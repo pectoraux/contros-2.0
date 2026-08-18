@@ -1,10 +1,13 @@
 # Contractor GenOffice Architecture
 
-> **Status: PROPOSED.** This document is the proposed architectural constitution
-> for Contractor GenOffice. It is **not automatically authoritative** until
-> reviewed and accepted by the Principal Architect. Items marked `UNRESOLVED`
-> require an explicit decision before implementation. The evidence base is
-> `architecture/RECONNAISSANCE.md`.
+> **Status: PROPOSED overall; foundation decisions DECIDED.**
+> The foundation questions Q1 (web-vs-electron), Q3 (canonical persistence),
+> and Q4 (identity and tenancy) are **DECIDED** (Phase 0.5 decision gate — see
+> `ADR/0001-foundation.md` and `ADR/0005-multitenancy.md`). The remaining
+> questions (Q2, Q5, Q6, Q7) are deferred to their respective domain phases.
+> This document is the proposed architectural constitution; it is **not
+> automatically authoritative** until reviewed and accepted by the Principal
+> Architect. The evidence base is `architecture/RECONNAISSANCE.md`.
 
 ## 0. What this is
 
@@ -274,34 +277,133 @@ See `DOMAIN-AUTHORITY.md` for the full map. Summary:
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [0001](ADR/0001-foundation.md) | Fork foundation, upstream pin, web-vs-electron | PROPOSED (Q1 UNRESOLVED) |
-| [0002](ADR/0002-domain-authority.md) | Domain authority vs. office-file-as-source-of-truth | PROPOSED |
-| [0003](ADR/0003-programme.md) | Programme domain & scheduling engine | PROPOSED |
-| [0004](ADR/0004-plan-bim.md) | Plans/BIM domain & viewer strategy | PROPOSED |
-| [0005](ADR/0005-multitenancy.md) | Multi-tenancy: identity, persistence, isolation | PROPOSED (multiple UNRESOLVED) |
-| [0006](ADR/0006-goals-learning.md) | Goals, pricing knowledge, learning/calibration | PROPOSED (schema deferred) |
+| [0001](ADR/0001-foundation.md) | Fork foundation, upstream pin, web-vs-electron, licensing posture | **DECIDED** (Q1, Q-lic1) |
+| [0002](ADR/0002-domain-authority.md) | Domain authority vs. office-file-as-source-of-truth | PROPOSED (Q2 deferred) |
+| [0003](ADR/0003-programme.md) | Programme domain & scheduling engine | PROPOSED (Q5 deferred) |
+| [0004](ADR/0004-plan-bim.md) | Plans/BIM domain & viewer strategy | PROPOSED (Q6 deferred) |
+| [0005](ADR/0005-multitenancy.md) | Multi-tenancy: identity, persistence, isolation | **DECIDED** (Q3, Q4, project authority, Office/Univer boundary) |
+| [0006](ADR/0006-goals-learning.md) | Goals, pricing knowledge, learning/calibration | PROPOSED (Q7 deferred by design) |
 
-## 12. Open architectural questions (require decision before implementation)
+## 12. Architectural questions — status
 
-These are tracked in detail in the ADRs. Summary:
+### Foundation questions (DECIDED in Phase 0.5)
 
-- **Q1** (ADR-0001): Is "web is primary" real for v1, or is Electron-first
-  acceptable with web deferred? GenOffice is Electron-only today. The answer
-  changes the scope of the identity/persistence/UI work by an order of
-  magnitude.
-- **Q2** (ADR-0002): Exact reconciliation between byte-preserving office-file
-  authority (GenOffice) and revisioned domain authority (Contractor OS).
-- **Q3** (ADR-0005): Canonical persistence technology (PostgreSQL? SQLite-per-
-  tenant? something else?). Recon shows none exists today.
-- **Q4** (ADR-0005): Identity model — replace Genspark account auth with
-  tenant auth, or wrap it?
-- **Q5** (ADR-0003): Build scheduling engine from scratch vs. port from legacy
-  Contros (reference) vs. embed an external engine behind an adapter.
-- **Q6** (ADR-0004): web-ifc / ThatOpen vs. alternative for Phase 1 BIM viewer.
-- **Q7** (ADR-0006): When does pricing-knowledge schema become real? (Default:
-  not yet — conceptual only.)
+- **Q1** (ADR-0001): **DECIDED — Option C / Hybrid.** Contractor Core is
+  web-capable (server API + application services + repositories, zero
+  Electron dependency); GenOffice Office engines are reused through explicit
+  adapters; Electron is desktop packaging / native capabilities (not a
+  second product). One shared spine (identity, tenant, project graph,
+  authorities, audit) consumed by both web client and Electron desktop.
+- **Q3** (ADR-0005): **DECIDED — PostgreSQL + object storage +
+  `@genoffice/project-store` as local convenience.** PostgreSQL holds
+  canonical transactional domain state; object storage holds large immutable
+  artifacts (Plan source artifacts, generated Office representations, AI
+  logs); `project-store` remains local convenience/cache (chat history,
+  recent files). Authority/derived/cache tiers explicitly defined.
+- **Q4** (ADR-0005): **DECIDED — Pluggable identity + explicit hierarchy.**
+  User -> Organization/Tenant -> Membership -> Workspace -> Project.
+  Authentication, authorization, tenant isolation, and audit identity are
+  explicitly separated. Genspark account auth becomes one AuthProvider
+  integration (useful for desktop AI + single-user mode), NOT the tenant
+  authority.
 
-## 13. Change management
+### Project authority (DECIDED in Phase 0.5)
+
+- **One canonical Project identity**: the Contractor OS Project (Tenant ->
+  Workspace -> Project). The GenOffice `project-store` entry is renamed
+  conceptually to **`LocalWorkspace`** — a local Office/document workspace
+  representation, linkable to a canonical Project by reference (not
+  authority). See `ADR/0005-multitenancy.md` Decision 9.
+
+### Office boundary (DECIDED in Phase 0.5)
+
+- **Office engines are authoritative for rendering/editing office files**;
+  they are **never authoritative for Contractor business state**. Univer is
+  reused (not removed, not forked); it is the workbook engine, mediated by
+  `WorkbookAdapter`; the application service finalizes `EstimateRevision`.
+  See `ADR/0005-multitenancy.md` Decision 8 and `DOMAIN-AUTHORITY.md` section 4.
+
+### Deferred questions (resolved at their domain phase, not now)
+
+- **Q2** (ADR-0002): Exact synchronization semantics between office-file
+  representations and domain authorities. Deferred — the foundation decision
+  (authority is canonical; office file is a representation) is enough to
+  proceed; detailed mechanics belong to the Commercial implementation phase.
+- **Q5** (ADR-0003): Scheduling engine source (scratch vs. port from legacy
+  Contros vs. embed external). Deferred to the Programme phase.
+- **Q6** (ADR-0004): BIM viewer library (web-ifc/ThatOpen vs. alternative).
+  Deferred to the Plans/BIM phase.
+- **Q7** (ADR-0006): Pricing-knowledge schema timing. Deferred by design —
+  schema is designed when a concrete pricing feature is specified.
+
+## 12.1 Frozen foundation invariants (master prompt section 11)
+
+The following are **frozen** by the Phase 0.5 foundation decisions. They
+may not be weakened without an explicit architectural change request
+(section 13).
+
+1. **ONE canonical Tenant model.** Organization/Tenant is the top-level
+   isolation boundary (ADR-0005 Decision 1).
+2. **ONE canonical Workspace model.** Workspace belongs to exactly one
+   Tenant; owns Projects.
+3. **ONE canonical Project identity.** The Contractor OS Project. The
+   `project-store` entry is a `LocalWorkspace` (local representation), not a
+   Project (ADR-0005 Decision 9).
+4. **ONE canonical transactional domain store.** PostgreSQL. No second
+   database (ADR-0005 Q3 Decision).
+5. **ONE audit model.** Tenant-scoped, append-only; audit identity separate
+   from content integrity hash (ADR-0005 Decisions 6, Q4 Decision).
+6. **ONE authority model.** Domain authorities (`EstimateRevision`,
+   `ProgrammeRevision`, `PlanMeasurement`, `ProjectActual`, `Goal`) are
+   explicit, immutable-once-finalized, revisioned, tenant-scoped
+   (`DOMAIN-AUTHORITY.md`).
+7. **`@genoffice/project-store` is NOT the Contractor domain authority.** It
+   is local convenience/cache (ADR-0005 Decisions 3, 7).
+8. **Office engines are reusable representations/components.** They are
+   authoritative for rendering/editing office files; never for Contractor
+   business state (ADR-0005 Decision 8).
+9. **Electron is not a second product.** It is desktop packaging / native
+   capabilities; it consumes the same Core API the web client consumes
+   (ADR-0001 Decision 4).
+10. **AI is not a hidden authority.** AI produces candidates; application
+    services finalize (ARCHITECTURE.md invariant 8).
+11. **Tenant isolation exists below the UI.** Enforced at the repository
+    layer on every query; the client never supplies a `tenantId`
+    (ADR-0005 Decisions 2, Q4 Decision).
+12. **Historical revisions are immutable.** Corrections are new revisions /
+    new evidence / new events (ARCHITECTURE.md invariant 3).
+13. **External engines do not become domain authorities.** Univer, MPXJ,
+    web-ifc, ThatOpen, Gantt libraries, Genspark proxy: components only
+    (ARCHITECTURE.md invariant 9).
+
+## 13. Implementation gate (master prompt section 12)
+
+After the foundation decisions, do NOT immediately build
+Programme/BIM/AI/Commercial. The approved implementation sequence is:
+
+```
+Identity
+  -> Tenant
+  -> Workspace
+  -> Project
+  -> Audit
+  -> Revision framework
+  -> Core API
+```
+
+Only after that:
+
+```
+Commercial -> Programme -> Plans/BIM -> Goals -> Execution ->
+Office integration -> Learning -> AI
+```
+
+The foundation decisions (Q1/Q3/Q4 + project authority + Office boundary)
+unblock the first sequence. No Contractor feature implementation begins
+until Identity + Tenant + Workspace + Project + Audit + Revision framework
++ Core API exist.
+
+## 14. Change management
 
 Before modifying a frozen area, record internally:
 

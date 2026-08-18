@@ -31,36 +31,53 @@ BASELINE). No Contractor feature implementation is included. The fork is
    process.
 7. [`ADR/`](ADR) — Architecture Decision Records:
    - [`0001-foundation.md`](ADR/0001-foundation.md) — fork foundation,
-     substrate reuse, licensing posture, **Q1 web-vs-electron (UNRESOLVED)**,
-     Q-lic1 MPL/LGPL allowlist (UNRESOLVED).
+     substrate reuse, licensing posture. **Q1 web-vs-electron DECIDED
+     (Option C / Hybrid).** Q-lic1 DECIDED (keep stricter allowlist).
    - [`0002-domain-authority.md`](ADR/0002-domain-authority.md) —
      domain authority vs. office-file-as-source-of-truth. **Q2
-     synchronization semantics (UNRESOLVED).**
+     synchronization semantics (DEFERRED to Commercial phase).**
    - [`0003-programme.md`](ADR/0003-programme.md) — Programme domain &
-     scheduling engine. **Q5 engine source (UNRESOLVED).**
+     scheduling engine. **Q5 engine source (DEFERRED to Programme phase).**
    - [`0004-plan-bim.md`](ADR/0004-plan-bim.md) — Plans/BIM domain &
-     viewer strategy. **Q6 viewer library (UNRESOLVED).**
+     viewer strategy. **Q6 viewer library (DEFERRED to Plans/BIM phase).**
    - [`0005-multitenancy.md`](ADR/0005-multitenancy.md) — multi-tenancy:
-     identity, persistence, isolation. **Q3 persistence technology
-     (UNRESOLVED), Q4 identity model (UNRESOLVED).**
+     identity, persistence, isolation. **Q3 persistence DECIDED
+     (PostgreSQL + object storage + project-store local). Q4 identity
+     DECIDED (pluggable identity + explicit hierarchy). Project authority
+     DECIDED. Office/Univer boundary DECIDED.**
    - [`0006-goals-learning.md`](ADR/0006-goals-learning.md) — goals, pricing
-     knowledge, learning/calibration. **Q7 pricing schema timing (UNRESOLVED
-     by design — deferred).**
+     knowledge, learning/calibration. **Q7 pricing schema timing (DEFERRED
+     by design).**
 
 See also [`../third-party/README.md`](../third-party/README.md) — dependency
 assessment framework + assessments for adopted and under-consideration
 dependencies.
 
-## Open questions requiring decisions before implementation
+## Foundation decisions (Phase 0.5 — DECIDED)
 
-- **Q1** (ADR-0001): Web vs. Electron for v1. Highest-impact open question.
-- **Q-lic1** (ADR-0001): MPL/LGPL in the license allowlist.
+- **Q1** (ADR-0001): **DECIDED — Option C / Hybrid.** Contractor Core is
+  web-capable; GenOffice Office engines reused via adapters; Electron =
+  desktop packaging.
+- **Q3** (ADR-0005): **DECIDED — PostgreSQL + object storage +
+  `@genoffice/project-store` as local convenience.**
+- **Q4** (ADR-0005): **DECIDED — Pluggable identity + explicit hierarchy.**
+  User -> Organization/Tenant -> Membership -> Workspace -> Project.
+- **Project authority**: **DECIDED** — one canonical Project; `project-store`
+  entry is a `LocalWorkspace` (local representation).
+- **Office boundary**: **DECIDED** — Office engines authoritative for
+  rendering/editing office files; never for Contractor business state.
+  Univer reused, not the commercial authority.
+- **Q-lic1** (ADR-0001): **DECIDED** — keep GenOffice's stricter license
+  allowlist; extend per-dependency with review.
+
+## Deferred questions (resolved at their domain phase, not now)
+
 - **Q2** (ADR-0002): Office-file vs. domain-authority synchronization
-  semantics.
-- **Q3** (ADR-0005): Canonical persistence technology (PostgreSQL implied).
-- **Q4** (ADR-0005): Identity model (replace vs. wrap Genspark account).
+  semantics. Deferred to the Commercial phase.
 - **Q5** (ADR-0003): Scheduling engine source (scratch vs. port vs. embed).
+  Deferred to the Programme phase.
 - **Q6** (ADR-0004): BIM viewer library (web-ifc/ThatOpen vs. alternative).
+  Deferred to the Plans/BIM phase.
 - **Q7** (ADR-0006): Pricing-knowledge schema timing (deferred by design).
 
 ## Operating principle

@@ -136,7 +136,65 @@ etc.).
 are derived; only the `Goal` (intent: metric/target/period/scope) is stored as
 intent.
 
-## 4. The project graph (authoritative connections)
+## 4. Project identity (one canonical Project)
+
+There is **one canonical Project identity**: the Contractor OS Project
+(Tenant -> Workspace -> Project). It owns {Opportunity, Plans, BOQ,
+EstimateRevisions, Bids, ProgrammeRevisions, Actuals, Goals}.
+
+The GenOffice `@genoffice/project-store` entry is **not** a Project. It is
+renamed conceptually to **`LocalWorkspace`** — a local Office/document
+workspace representation (groups files + AI chat history for the desktop
+editor). A `LocalWorkspace` may be **linked** to a canonical `Project` by a
+`projectId` reference, but the link is a reference, not authority:
+
+- The canonical Project is the truth (PostgreSQL, tenant-scoped).
+- The LocalWorkspace is a local convenience view (filesystem, no tenant scope).
+- A LocalWorkspace may exist without a canonical Project (personal/local
+  files not yet promoted). A canonical Project may exist without a
+  LocalWorkspace (created server-side, never opened on a desktop).
+- The link is resolved by the desktop client; the repository enforces
+  `tenantId`/`projectId` scope on canonical data only.
+
+This resolves the naming collision flagged in Phase 0. See ADR-0005 Decision 9.
+
+## 5. Office engine authority vs. Contractor business authority
+
+The Office engines are authoritative for **rendering and editing office
+files**; they are **never authoritative for Contractor business state**.
+
+| Office engine is authoritative for | Contractor domain is authoritative for |
+| --- | --- |
+| Rendering a workbook (Univer) | `EstimateRevision` |
+| Editing workbook content (Univer + xlsx-gateway) | `ProgrammeRevision` |
+| Rendering a deck (pptx-render) | `Goal` (intent) + derived achievement |
+| Rendering a doc (docx-engine) | `ProjectActual` |
+| Rendering a PDF (pdf.js + PDFium) | `PlanMeasurement` |
+| Rendering markdown (Tiptap) | `Bid` |
+
+The boundary is mediated by **domain adapters** (the `WorkbookAdapter`
+pattern, extended to all Office engines). The adapter translates between
+Office representations and Contractor authorities. The application service
+finalizes the authority; the engine never does.
+
+### Univer rule (explicit)
+
+- **Univer** = the Office workbook engine in Sheets (rendering + interaction
+  + cell editing). It is **reused** (not removed, not forked).
+- **Contractor domain** = the commercial authority (`EstimateRevision`,
+  `Bid`, pricing, etc.).
+- Univer is **never** the Contractor commercial authority. The
+  `WorkbookAdapter` (`getSnapshot`/`plan`/`apply`/`undo`) mediates. The
+  application service finalizes the `EstimateRevision` from accepted plans;
+  Univer never writes the authority directly.
+- The integration boundary permits canonical domain state <-> Office
+  representation translation **without** allowing Office state to silently
+  rewrite historical authority. (Detailed sync mechanics deferred to
+  ADR-0002 Q2.)
+
+See ADR-0005 Decision 8.
+
+## 6. The project graph (authoritative connections)
 
 ```
 PLAN / BIM artifact (evidence)
@@ -156,7 +214,7 @@ PLAN / BIM artifact (evidence)
 
 Connections are explicit. Domains do not collapse.
 
-## 5. What is NOT authoritative
+## 7. What is NOT authoritative
 
 These are convenience representations. They are allowed but never the truth:
 
@@ -173,8 +231,29 @@ These are convenience representations. They are allowed but never the truth:
 - derived dashboards (derived from authorities)
 - Electron local state (`@genoffice/project-store` is a local convenience store
   for chat history + recent files — **not** a domain authority)
+- Office files (`.xlsx`/`.docx`/`.pptx`/`.pdf`/`.md`) — representations,
+  not authorities (see section 5; ADR-0002)
+- Univer workbook model — a representation, not the commercial authority
+  (see section 5; ADR-0005 Decision 8)
 
-## 6. Revision framework (applies to all revisioned authorities)
+## 8. Persistence tiers (authoritative / derived / cache)
+
+Per ADR-0005 Q3 Decision, persistence is divided into three tiers:
+
+- **Authoritative** (PostgreSQL + object storage): canonical truth.
+  Immutable-once-finalized revisions; append-only evidence; tenant-scoped.
+- **Derived** (PostgreSQL cache tables or in-memory): recomputable from
+  authoritative inputs + algorithm version. Examples: goal current value,
+  variance, schedule result (when cached), office file representations
+  generated from authorities. Never stored as canonical truth.
+- **Cache / local convenience** (`@genoffice/project-store`, in-memory,
+  CDN): improves performance or UX; never the truth. Examples: chat history,
+  recent files, local workspace grouping, `ScheduleResult` cache.
+
+Nothing in the cache/derived tier may be promoted to authoritative without
+  going through the application service + repository + audit.
+
+## 9. Revision framework (applies to all revisioned authorities)
 
 For every revisioned authority:
 
@@ -192,7 +271,7 @@ For every revisioned authority:
 **Repository contract** (Section 35 of the master prompt): immutable-revision
 repositories must NOT expose `update`/`delete` for finalized records.
 
-## 7. Determinism & canonical hashing
+## 10. Determinism & canonical hashing
 
 - Canonical calculations use canonicalized content (stable key ordering, no
   unstable fields, deterministic serialization).
@@ -201,15 +280,15 @@ repositories must NOT expose `update`/`delete` for finalized records.
 - Content hash identifies content. Authorship/authorization/actor identity live
   in audit events. (Section 15 of ARCHITECTURE.md.)
 
-## 8. What does NOT exist yet (gap)
+## 11. What does NOT exist yet (gap)
 
 GenOffice has **none** of these authorities. `@genoffice/project-store` is a
 local-filesystem convenience store for chat history + file groupings. The
 Contractor OS domain authorities are a **new layer** to be built — tenant-
-scoped, DB-backed, behind application services, with the revision framework
-above.
+scoped, PostgreSQL-backed, behind application services, with the revision
+framework above.
 
-This is the single largest body of work in the implementation sequence
-(Section 32 of ARCHITECTURE.md): identity + tenancy -> Core API -> project
-graph -> shared domain contracts -> audit -> revision framework -> port
-commercial -> port programme -> goals -> plan/BIM -> ... .
+The foundation decisions (Phase 0.5: Q1 runtime, Q3 persistence, Q4
+identity) unblock the implementation sequence: Identity -> Tenant ->
+Workspace -> Project -> Audit -> Revision framework -> Core API (see
+ARCHITECTURE.md section 13).
