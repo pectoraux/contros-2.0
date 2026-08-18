@@ -1,0 +1,31 @@
+{
+  "name": "@contractor/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Contractor GenOffice platform foundation — identity, tenant, workspace, project, audit, revision framework, Core API. Zero Electron dependency. PostgreSQL canonical.",
+  "license": "Apache-2.0",
+  "exports": {
+    "./domain": "./src/domain/index.ts",
+    "./persistence": "./src/persistence/index.ts",
+    "./service": "./src/service/index.ts",
+    "./api": "./src/api/index.ts",
+    "./storage": "./src/storage/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.0",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

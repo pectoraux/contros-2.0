@@ -1,0 +1,11 @@
+/**
+ * Contractor GenOffice — Service layer barrel export.
+ */
+
+export { IdentityService } from './identity.service.js'
+export type { ResolveTenantContextResult } from './identity.service.js'
+export { OrganizationService } from './organization.service.js'
+export { WorkspaceService } from './workspace.service.js'
+export { ProjectService } from './project.service.js'
+export { AuditService } from './audit.service.js'
+export { RevisionService } from './revision.service.js'
