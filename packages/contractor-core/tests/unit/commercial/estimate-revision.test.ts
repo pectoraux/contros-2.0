@@ -26,7 +26,7 @@ import {
 import { estimateLine } from '../../../src/domain/commercial/estimate-line.js'
 import { money, moneyFromMinor } from '../../../src/domain/commercial/money.js'
 import { quantity, UNITS } from '../../../src/domain/commercial/quantity.js'
-import { ratio, markup, markupRaw } from '../../../src/domain/commercial/pricing.js'
+import { ratio, markup, markupRaw, grossMargin } from '../../../src/domain/commercial/pricing.js'
 import { currencyCode } from '../../../src/domain/commercial/currency.js'
 import { boqItem, boq } from '../../../src/domain/commercial/boq.js'
 import type { RevisionMetadata } from '../../../src/domain/types.js'
@@ -361,5 +361,154 @@ describe('BOQ quantity snapshot: finalized revision immune to BOQ changes', () =
     expect(line.boqItemId).toBe('bi_1')
     // The EstimateLine's quantity is its OWN field (snapshot)
     expect(line.quantity).not.toBe(item.quantity) // different object instances
+  })
+})
+
+// ── Phase 2A.2 regression tests ──────────────────────────────
+
+describe('Me1 regression: pricingStrategy/pricingRatio do NOT affect canonical financial result', () => {
+  // Matrix (Phase 2A.2 §4):
+  // | Change          |    Hash | Financial result |
+  // | pricingStrategy | changes |        unchanged |
+  // | pricingRatio    | changes |        unchanged |
+
+  it('changing pricingStrategy changes hash but NOT totalCost/sellPrice/profit/grossMargin', () => {
+    const baseLine = (strategy: 'markup' | 'margin', ratioVal: number) => estimateLine({
+      lineId: 'l1', boqItemId: null, description: 'Concrete',
+      quantity: quantity(100, UNITS.SQUARE_METRE),
+      costBasis: 'unit-rate', rate: moneyFromMinor(500, 'GHS'),
+      pricingStrategy: strategy, pricingRatio: ratio(ratioVal),
+    })
+    const policy = { overheadPct: ratio(0.10), contingencyPct: ratio(0.05), targetProfitMode: 'markup' as const, targetProfitRatio: ratio(0.10) }
+
+    // Line A: markup 20%, Line B: margin 50% (very different per-line pricing)
+    const pA = estimateRevisionPayload({ projectId: 'p', currency: currencyCode('GHS'), policy, lines: [baseLine('markup', 0.20)], pricingAlgorithmVersion: 'v1' })
+    const pB = estimateRevisionPayload({ projectId: 'p', currency: currencyCode('GHS'), policy, lines: [baseLine('margin', 0.50)], pricingAlgorithmVersion: 'v1' })
+
+    // Hash MUST change (pricingStrategy + pricingRatio are in the payload = document identity)
+    expect(estimateRevisionContentHash(pA)).not.toBe(estimateRevisionContentHash(pB))
+
+    // Financial result MUST be identical (pricing fields are metadata, not canonical)
+    const tA = computeEstimateRevisionTotals(pA)
+    const tB = computeEstimateRevisionTotals(pB)
+    expect(tA.totalLineCost.amount).toBe(tB.totalLineCost.amount)
+    expect(tA.overhead.amount).toBe(tB.overhead.amount)
+    expect(tA.contingency.amount).toBe(tB.contingency.amount)
+    expect(tA.totalCost.amount).toBe(tB.totalCost.amount)
+    expect(tA.profit.amount).toBe(tB.profit.amount)
+    expect(tA.sellPrice.amount).toBe(tB.sellPrice.amount)
+    expect(tA.grossMargin).toBe(tB.grossMargin)
+  })
+
+  it('changing pricingRatio changes hash but NOT totalCost/sellPrice/profit/grossMargin', () => {
+    const baseLine = (ratioVal: number) => estimateLine({
+      lineId: 'l1', boqItemId: null, description: 'Concrete',
+      quantity: quantity(100, UNITS.SQUARE_METRE),
+      costBasis: 'unit-rate', rate: moneyFromMinor(500, 'GHS'),
+      pricingStrategy: 'markup', pricingRatio: ratio(ratioVal),
+    })
+    const policy = { overheadPct: ratio(0.10), contingencyPct: ratio(0.05), targetProfitMode: 'markup' as const, targetProfitRatio: ratio(0.10) }
+
+    const pA = estimateRevisionPayload({ projectId: 'p', currency: currencyCode('GHS'), policy, lines: [baseLine(0.10)], pricingAlgorithmVersion: 'v1' })
+    const pB = estimateRevisionPayload({ projectId: 'p', currency: currencyCode('GHS'), policy, lines: [baseLine(0.50)], pricingAlgorithmVersion: 'v1' })
+
+    expect(estimateRevisionContentHash(pA)).not.toBe(estimateRevisionContentHash(pB))
+
+    const tA = computeEstimateRevisionTotals(pA)
+    const tB = computeEstimateRevisionTotals(pB)
+    expect(tA.totalLineCost.amount).toBe(tB.totalLineCost.amount)
+    expect(tA.totalCost.amount).toBe(tB.totalCost.amount)
+    expect(tA.profit.amount).toBe(tB.profit.amount)
+    expect(tA.sellPrice.amount).toBe(tB.sellPrice.amount)
+    expect(tA.grossMargin).toBe(tB.grossMargin)
+  })
+})
+
+describe('Me2 regression: grossMargin returns mathematical truth (no clamping)', () => {
+  it('sell < cost → negative gross margin (loss)', () => {
+    // cost=200, sell=100 → profit=-100, margin=profit/sellPrice=-100/100=-1.0
+    // (margin is profit / SELL price, not profit / cost)
+    const gm = grossMargin(money(100, 'GHS'), money(200, 'GHS'))
+    expect(gm).toBe(-1) // -100% margin
+  })
+
+  it('sell == cost → zero gross margin (break-even)', () => {
+    const gm = grossMargin(money(100, 'GHS'), money(100, 'GHS'))
+    expect(gm).toBe(0)
+  })
+
+  it('sell > cost → positive gross margin (profit)', () => {
+    // cost=100, sell=120 → profit=20, margin=20/120≈0.1667
+    const gm = grossMargin(money(120, 'GHS'), money(100, 'GHS'))
+    expect(gm).toBeCloseTo(0.16667, 4)
+  })
+
+  it('sell=0 → 0 (avoid division by zero)', () => {
+    const gm = grossMargin(money(0, 'GHS'), money(100, 'GHS'))
+    expect(gm).toBe(0)
+  })
+
+  it('grossMargin in EstimateRevisionTotals can be negative if sellPrice < totalCost', () => {
+    // This can happen in margin mode with ratio=0 (sellPrice=totalCost, margin=0)
+    // or theoretically if someone constructs a negative-profit scenario via
+    // directorAdjustment on a Bid. The domain must report the mathematical
+    // truth, not a clamped 0.
+    // Here we test the grossMargin function directly; the canonical path
+    // with positive targetProfitRatio guarantees sellPrice >= totalCost.
+    const gm = grossMargin(money(50, 'GHS'), money(100, 'GHS'))
+    expect(gm).toBe(-1) // -50/50 = -1.0 = -100% margin
+  })
+})
+
+describe('L1 regression: margin >= 1 produces domain-specific error (not divide-by-zero)', () => {
+  it('margin = 0 → valid', () => {
+    const payload = makePayload([makeLine('l1', 'X', 500, 100, 0.20)], { profitMode: 'margin', profitRatio: 0 })
+    expect(() => computeEstimateRevisionTotals(payload)).not.toThrow()
+  })
+
+  it('margin = 0.2 → valid', () => {
+    const payload = makePayload([makeLine('l1', 'X', 500, 100, 0.20)], { profitMode: 'margin', profitRatio: 0.2 })
+    expect(() => computeEstimateRevisionTotals(payload)).not.toThrow()
+  })
+
+  it('margin = 0.999 → valid (very high sell price)', () => {
+    const payload = makePayload([makeLine('l1', 'X', 500, 100, 0.20)], { profitMode: 'margin', profitRatio: 0.999 })
+    const totals = computeEstimateRevisionTotals(payload)
+    expect(totals.sellPrice.amount).toBeGreaterThan(totals.totalCost.amount * 100) // sell >> cost
+  })
+
+  it('margin = 1 → rejected with domain-specific error (NOT "divide by zero")', () => {
+    // ratio(1.0) is valid (Ratio is 0..1 inclusive), but margin=1 must be rejected
+    // at the computation boundary with a domain-specific message.
+    const payload = makePayload([makeLine('l1', 'X', 500, 100, 0.20)], { profitMode: 'margin', profitRatio: 1 })
+    let threw = false
+    let errorMsg = ''
+    try {
+      computeEstimateRevisionTotals(payload)
+    } catch (e) {
+      threw = true
+      errorMsg = (e as Error).message
+    }
+    expect(threw).toBe(true)
+    // Must NOT be a generic "divide by zero" message
+    expect(errorMsg).not.toMatch(/divide by zero/i)
+    // Must contain a domain-specific message about margin / 100%
+    expect(errorMsg.toLowerCase()).toMatch(/margin|100%|less than/)
+  })
+
+  it('margin > 1 → rejected by ratio() validation (before reaching computation)', () => {
+    // ratio(1.5) throws at construction time — never reaches computeEstimateRevisionTotals
+    expect(() => ratio(1.5)).toThrow(/invalid ratio/i)
+  })
+
+  it('no NaN, Infinity, or divide-by-zero escapes from the canonical computation', () => {
+    // Test all valid margin values produce finite results
+    for (const m of [0, 0.1, 0.2, 0.5, 0.9, 0.99, 0.999]) {
+      const payload = makePayload([makeLine('l1', 'X', 500, 100, 0.20)], { profitMode: 'margin', profitRatio: m })
+      const totals = computeEstimateRevisionTotals(payload)
+      expect(Number.isFinite(totals.sellPrice.amount)).toBe(true)
+      expect(Number.isFinite(totals.profit.amount)).toBe(true)
+      expect(Number.isFinite(totals.grossMargin)).toBe(true)
+    }
   })
 })

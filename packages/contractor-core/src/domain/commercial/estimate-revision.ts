@@ -12,7 +12,7 @@
  * Same authoritative inputs + same algorithm version + same contract =
  * same content hash → same historical result. (master §13; Phase 2A §13.)
  *
- * COMMERCIAL MODEL (Phase 2A.1 — hardened):
+ * COMMERCIAL MODEL (Phase 2A.1 — hardened; Phase 2A.2 — boundaries hardened):
  *
  *   totalLineCost   = sum(lineCost = rate × quantity)
  *   contingency     = totalLineCost × contingencyPct   (on DIRECT COST only)
@@ -26,8 +26,10 @@
  *   grossMargin     = grossProfit / sellPrice
  *
  * The CANONICAL sell price is estimate-level (not per-line). Per-line
- * pricingStrategy + pricingRatio are adjustment metadata; they do NOT
- * determine the canonical sell price. (Phase 2A.1 H2 decision.)
+ * pricingStrategy + pricingRatio are document-identity metadata; they do
+ * NOT participate in the canonical financial computation path. (Phase 2A.1
+ * H2 decision; Phase 2A.2 Me1 fix: dead per-line sell computation removed
+ * from the canonical path.)
  *
  * Overhead is calculated on DIRECT COST ONLY (not direct + contingency).
  * This is an INTENTIONAL CHANGE from legacy Contros, which calculated
@@ -40,14 +42,10 @@ import type { RevisionMetadata } from '../types.js'
 import type { EstimateLine } from './estimate-line.js'
 import type { Money, CurrencyCode } from './money.js'
 import type { Ratio } from './pricing.js'
-import {
-  computeTotals,
-  extendLine,
-  grossMargin,
-  ratio,
-} from './pricing.js'
+import { extendLine, grossMargin } from './pricing.js'
 import { multiply, add, subtract, divide } from './money.js'
 import { contentHash } from '../hashing.js'
+import { ValidationError } from '../errors.js'
 
 /**
  * TargetProfitMode — how the estimate-level profit is calculated.
@@ -65,7 +63,7 @@ export type TargetProfitMode = 'markup' | 'margin'
  *
  * This is the CANONICAL pricing authority. The sell price is computed from
  * the total cost + this policy, NOT from per-line markup/margin. Per-line
- * pricingStrategy + pricingRatio remain on EstimateLine as adjustment
+ * pricingStrategy + pricingRatio remain on EstimateLine as document-identity
  * metadata but do NOT determine the canonical sell price.
  * (Phase 2A.1 H2 decision.)
  */
@@ -125,43 +123,75 @@ export interface EstimateRevisionTotals {
   readonly profit: Money               // estimate-level profit
   readonly sellPrice: Money            // totalCost + profit (markup) or totalCost/(1-margin) (margin)
   readonly grossProfit: Money          // sellPrice - totalCost (= profit)
-  readonly grossMargin: Ratio          // grossProfit / sellPrice
+  readonly grossMargin: number         // grossProfit / sellPrice; may be negative (loss)
 }
 
 /**
  * Compute the estimate totals from an EstimateRevisionPayload.
  *
- * Commercial model (Phase 2A.1):
- *   totalLineCost = sum(lineCost)
- *   contingency   = totalLineCost × contingencyPct   (H1: on direct cost only)
- *   overhead      = totalLineCost × overheadPct       (H1: on direct cost only)
- *   totalCost     = totalLineCost + overhead + contingency
- *   profit (markup)  = totalCost × targetProfitRatio; sellPrice = totalCost + profit
- *   profit (margin)  = sellPrice - totalCost; sellPrice = totalCost / (1 - targetProfitRatio)
- *   grossProfit   = sellPrice - totalCost
- *   grossMargin   = grossProfit / sellPrice
+ * CANONICAL CALCULATION PATH (Phase 2A.2 — Me1 fix: dead per-line sell
+ * computation removed; only line COST enters the canonical path):
+ *
+ *   EstimateLine → lineCostOf (rate × qty, or lump-sum)
+ *       ↓
+ *   sum(lineCost) → totalLineCost
+ *       ↓
+ *   overhead = totalLineCost × overheadPct       (H1: on direct cost only)
+ *   contingency = totalLineCost × contingencyPct (H1: on direct cost only)
+ *   totalCost = totalLineCost + overhead + contingency
+ *       ↓
+ *   EstimatePricingPolicy (targetProfitMode + targetProfitRatio)
+ *       ↓
+ *   profit / sellPrice (estimate-level, NOT per-line)
+ *       ↓
+ *   grossProfit, grossMargin
+ *
+ * pricingStrategy + pricingRatio on EstimateLine do NOT appear in this path.
+ * They remain part of the content hash (document identity) but do not
+ * influence the financial result. (Phase 2A.2 §3, §4.)
  */
 export function computeEstimateRevisionTotals(payload: EstimateRevisionPayload): EstimateRevisionTotals {
-  // Per-line costs (rate × quantity, or lump-sum)
-  const lines = payload.lines.map((l) => ({
-    cost: lineCostOf(l),
-    sellPrice: lineSellPriceOf(l), // informational per-line sell; NOT the canonical sell
-  }))
-  const lineTotals = computeTotals(lines, payload.currency)
+  // Sum line costs ONLY (rate × quantity, or lump-sum). Per-line sell price
+  // is NOT computed in the canonical path — it is document-identity metadata.
+  // (Phase 2A.2 Me1 fix.)
+  let lineCostMinor = 0
+  const c = payload.currency
+  for (const line of payload.lines) {
+    const cost = lineCostOf(line)
+    if (cost.currency !== c) {
+      // This should never happen — estimateRevisionPayload() enforces single-currency
+      // at construction time. Defense in depth.
+      throw new Error(
+        `EstimateRevisionTotals: currency mismatch in line ${line.lineId}: ` +
+          `expected ${c}, got ${cost.currency}`,
+      )
+    }
+    lineCostMinor += cost.amount
+  }
+  const totalLineCost = { __brand: 'Money' as const, amount: lineCostMinor, currency: c } as Money
 
   // H1: overhead and contingency on DIRECT COST ONLY (totalLineCost).
   // Legacy Contros calculated overhead on (direct + contingency); this is
   // an INTENTIONAL CHANGE. (Phase 2A.1 H1 decision.)
-  const overhead = multiply(lineTotals.totalCost, payload.policy.overheadPct)
-  const contingency = multiply(lineTotals.totalCost, payload.policy.contingencyPct)
-  const totalCost = add(add(lineTotals.totalCost, overhead), contingency)
+  const overhead = multiply(totalLineCost, payload.policy.overheadPct)
+  const contingency = multiply(totalLineCost, payload.policy.contingencyPct)
+  const totalCost = add(add(totalLineCost, overhead), contingency)
 
   // H2: canonical sell price is ESTIMATE-LEVEL (not per-line).
-  // profit = totalCost × ratio (markup) or sellPrice = totalCost/(1-ratio) (margin).
+  // L1: domain-specific validation for margin mode (targetProfitRatio >= 1).
   let profit: Money
   let sellPrice: Money
   if (payload.policy.targetProfitMode === 'margin') {
     // margin: sellPrice = totalCost / (1 - ratio); profit = sellPrice - totalCost
+    // L1 fix: reject margin >= 1 with a domain-specific error BEFORE reaching
+    // Money.divide(..., 0). (Phase 2A.2 §7.)
+    if (payload.policy.targetProfitRatio >= 1) {
+      throw new ValidationError(
+        `Target profit margin must be less than 100% (got ${payload.policy.targetProfitRatio}). ` +
+          `A margin of 100% or more makes the sell price undefined.`,
+        { targetProfitMode: 'margin', targetProfitRatio: payload.policy.targetProfitRatio },
+      )
+    }
     sellPrice = divide(totalCost, 1 - payload.policy.targetProfitRatio)
     profit = subtract(sellPrice, totalCost)
   } else {
@@ -173,7 +203,7 @@ export function computeEstimateRevisionTotals(payload: EstimateRevisionPayload):
   const grossProfit = subtract(sellPrice, totalCost)
 
   return {
-    totalLineCost: lineTotals.totalCost,
+    totalLineCost,
     overhead,
     contingency,
     totalCost,
@@ -245,27 +275,4 @@ function lineCostOf(line: EstimateLine): Money {
     return line.rate
   }
   return extendLine(line.rate, line.quantity)
-}
-
-/**
- * Per-line sell price — INFORMATIONAL ONLY.
- *
- * This is NOT the canonical sell price. The canonical sell price is
- * estimate-level (totalCost + profit from the pricing policy). The per-line
- * sell price is computed here for reference/adjustment purposes only.
- * (Phase 2A.1 H2: line-level pricing is adjustment metadata, not authority.)
- *
- * If the exact interaction between per-line pricing and the estimate-level
- * policy cannot be defined without Pricing Knowledge, this remains an
- * informational computation. The canonical authority is the estimate-level
- * policy.
- */
-function lineSellPriceOf(line: EstimateLine): Money {
-  const cost = lineCostOf(line)
-  // Per-line pricing is kept as adjustment metadata; this computation
-  // is informational only and does NOT define the canonical sell price.
-  if (line.pricingStrategy === 'markup') {
-    return multiply(cost, 1 + line.pricingRatio)
-  }
-  return divide(cost, 1 - line.pricingRatio)
 }

@@ -80,8 +80,10 @@ export function lineGrossProfit(line: EstimateLine): Money {
 
 /**
  * Compute the line's gross margin (grossProfit / sellPrice).
+ * Returns a plain number (may be negative if sellPrice < cost — a loss).
+ * (Phase 2A.2 Me2 fix: no silent clamping.)
  */
-export function lineGrossMargin(line: EstimateLine): Ratio {
+export function lineGrossMargin(line: EstimateLine): number {
   return grossMargin(lineSellPrice(line), lineCost(line))
 }
 

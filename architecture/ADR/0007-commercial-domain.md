@@ -323,6 +323,45 @@ It is NOT a live reference to `BOQItem.quantity`. A finalized
 `BOQItem` and an `EstimateLine` is by reference (`boqItemId`), not by
 live value. (Phase 2A.1 §9.)
 
+## Decision 15 — Me1: Canonical calculation path is cost-only (Phase 2A.2)
+
+**DECIDED (Phase 2A.2).**
+
+The canonical calculation path in `computeEstimateRevisionTotals` is
+visibly cost-only: `EstimateLine → lineCostOf → sum → totalLineCost →
+overhead + contingency → totalCost → EstimatePricingPolicy → profit →
+sellPrice`. Per-line `pricingStrategy` + `pricingRatio` do NOT appear in
+this path. The dead `lineSellPriceOf` computation was removed from the
+canonical totals. (Phase 2A.2 §3.)
+
+`pricingStrategy` + `pricingRatio` remain on `EstimateLine` as
+**document-identity metadata** — they are part of the content hash (what
+was finalized) but do NOT influence the canonical financial result (what
+the commercial outcome is).
+
+| Change | Hash | Financial result |
+| --- | --- | --- |
+| pricingStrategy | changes | unchanged |
+| pricingRatio | changes | unchanged |
+
+## Decision 16 — Me2: grossMargin returns mathematical truth (Phase 2A.2)
+
+**DECIDED (Phase 2A.2).**
+
+`grossMargin()` returns the mathematical ratio as a plain `number` (may
+be negative if sellPrice < cost — a loss). It does NOT silently clamp to
+[0, 1]. A loss is reported as a negative margin, not hidden as 0%.
+(Phase 2A.2 §5.)
+
+## Decision 17 — L1: Domain-specific margin validation (Phase 2A.2)
+
+**DECIDED (Phase 2A.2).**
+
+Margin mode with `targetProfitRatio >= 1` is rejected with a
+`ValidationError` containing the message "Target profit margin must be
+less than 100%". This prevents the generic "Money divide by zero" error
+from reaching the caller. (Phase 2A.2 §7.)
+
 ## Legacy Contros findings
 
 | Legacy behavior | Current contract | Decision |
@@ -368,9 +407,9 @@ live value. (Phase 2A.1 §9.)
 
 ## Verification
 
-- 80 Commercial tests pass (money 21, pricing 18, estimate-revision 28,
+- 93 Commercial tests pass (money 21, pricing 18, estimate-revision 41,
   bid 6, architecture 7).
-- Full suite: 211/211 pass (131 foundation + 80 commercial). Zero regressions.
+- Full suite: 224/224 pass (131 foundation + 93 commercial). Zero regressions.
 - TypeScript clean (`tsc --noEmit`, 0 errors).
 - All tests pure (no DB, no network, no filesystem, no Electron, no mocks).
 - Replay tests prove: same payload → same content hash → same totals.
@@ -378,5 +417,8 @@ live value. (Phase 2A.1 §9.)
 - H2 regression test: estimate-level profit (markup + margin modes); positive profit ratio → sellPrice >= totalCost.
 - M1 regression test: markup() returns 3.0 for 300% markup (not clamped to 1.0).
 - M2 regression test: mixed-currency payload throws at construction time (never hashable).
+- Me1 regression test: changing pricingStrategy/pricingRatio changes hash but NOT financial result.
+- Me2 regression test: grossMargin(sell=100, cost=200) = -1 (negative, not clamped to 0).
+- L1 regression test: margin=1 throws ValidationError "Target profit margin must be less than 100%" (not "divide by zero").
 - Line-order regression test: same lines, different order → different hash.
 - BOQ snapshot regression test: EstimateLine quantity is independent of BOQItem quantity.

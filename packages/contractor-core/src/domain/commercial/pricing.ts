@@ -111,15 +111,18 @@ export function grossProfit(sellPrice: Money, cost: Money): Money {
 
 /**
  * Gross margin = grossProfit / sellPrice.
- * Returns a Ratio (0..1). Returns 0 if sellPrice is 0.
+ * Returns the mathematical ratio as a plain number (may be negative if
+ * sellPrice < cost — a loss). Returns 0 if sellPrice is 0.
+ *
+ * NOTE: the return type is `number`, NOT `Ratio`, because margin can be
+ * negative (a loss) and `Ratio` is bounded to [0, 1]. Financial results
+ * must return mathematical truth, not silently clamped values.
+ * (Phase 2A.2 Me2 fix: no silent clamping of financial results.)
  */
-export function grossMargin(sellPrice: Money, cost: Money): Ratio {
-  if (sellPrice.amount === 0) return ratio(0)
+export function grossMargin(sellPrice: Money, cost: Money): number {
+  if (sellPrice.amount === 0) return 0
   const profit = subtract(sellPrice, cost)
-  // margin = profit / sellPrice, computed in minor units
-  const marginFraction = profit.amount / sellPrice.amount
-  // Clamp to [0,1] for safety (floating-point may produce tiny out-of-range)
-  return ratio(Math.max(0, Math.min(1, marginFraction)))
+  return profit.amount / sellPrice.amount
 }
 
 /**
@@ -154,7 +157,7 @@ export interface EstimateTotals {
   readonly totalCost: Money
   readonly totalSellPrice: Money
   readonly totalGrossProfit: Money
-  readonly grossMargin: Ratio
+  readonly grossMargin: number // mathematical ratio; may be negative (loss)
 }
 
 /**
@@ -168,7 +171,7 @@ export function computeTotals(
   const c = typeof currency === 'string' ? (currency as CurrencyCode) : currency
   if (lines.length === 0) {
     const zero = moneyFromMinor(0, c)
-    return { totalCost: zero, totalSellPrice: zero, totalGrossProfit: zero, grossMargin: ratio(0) }
+    return { totalCost: zero, totalSellPrice: zero, totalGrossProfit: zero, grossMargin: 0 }
   }
   let costMinor = 0
   let sellMinor = 0
