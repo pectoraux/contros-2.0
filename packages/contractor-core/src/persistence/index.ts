@@ -18,6 +18,7 @@ export { BOQRepository } from './repositories/boq.repository.js'
 export { EstimateRevisionRepository } from './repositories/estimate-revision.repository.js'
 export { BidRepository } from './repositories/bid.repository.js'
 export { MagicLinkRepository } from './repositories/magic-link.repository.js'
+export { WaitlistRepository } from './repositories/waitlist.repository.js'
 
 // The migration SQL is importable for test bootstrap.
 import { readFileSync } from 'node:fs'
@@ -34,5 +35,9 @@ export const COMMERCIAL_MIGRATION_SQL = readFileSync(
 )
 export const MAGIC_LINKS_MIGRATION_SQL = readFileSync(
   join(__dirname, 'migrations/0003_magic_links.sql'),
+  'utf8',
+)
+export const AUTH_MIGRATION_SQL = readFileSync(
+  join(__dirname, 'migrations/0004_auth.sql'),
   'utf8',
 )

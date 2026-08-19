@@ -79,6 +79,16 @@ export const authApi = {
   devMode: () => request<DevModeInfo>('GET', '/auth/dev-mode'),
   session: () => request<SessionInfo>('GET', '/auth/session'),
   devLogin: (credential: string) => request<LoginResult>('POST', '/auth/dev-login', { credential }),
+  passwordLogin: (email: string, password: string) =>
+    request<{ userId: string }>('POST', '/auth/password-login', { email, password }),
+  signup: (email: string, displayName?: string) =>
+    request<{ id: string; email: string; status: string; message: string }>('POST', '/auth/signup', { email, displayName: displayName ?? null }),
+  demoLogin: (role: 'owner' | 'member' | 'viewer') =>
+    request<{ userId: string; role: string }>('POST', '/auth/demo-login', { role }),
+  listWaitlist: () =>
+    request<{ entries: Array<{ id: string; email: string; status: string; createdAt: string; displayName: string | null }> }>('GET', '/auth/waitlist'),
+  approveWaitlist: (waitlistId: string, password: string) =>
+    request<{ userId: string; email: string; message: string }>('POST', '/auth/waitlist', { waitlistId, password }),
   memberships: () => request<{ memberships: MembershipChoice[] }>('GET', '/auth/memberships'),
   selectTenant: (membershipId: string) =>
     request<TenantSelectionResult>('POST', '/auth/select-tenant', { membershipId }),

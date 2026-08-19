@@ -26,11 +26,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Pool } from 'pg'
 import {
   PgLiteClient, PostgresClient, FOUNDATION_MIGRATION_SQL, COMMERCIAL_MIGRATION_SQL,
-  MAGIC_LINKS_MIGRATION_SQL, applyMigration,
+  MAGIC_LINKS_MIGRATION_SQL, AUTH_MIGRATION_SQL, applyMigration,
   OrganizationRepository, UserRepository, MembershipRepository, WorkspaceRepository,
   ProjectRepository, AuditRepository, RevisionRepository,
   PlanMeasurementRepository, BOQRepository, EstimateRevisionRepository, BidRepository,
-  MagicLinkRepository,
+  MagicLinkRepository, WaitlistRepository,
 } from '@contractor/core/persistence'
 import {
   IdentityService, OrganizationService, WorkspaceService, ProjectService,
@@ -39,9 +39,10 @@ import {
 import { CoreApi, type ApiRequest, type ApiResponse } from '@contractor/core/api'
 import {
   loadSessionConfigFromEnv, WebSessionResolver,
-  signSession, sessionCookieHeader, clearSessionCookieHeader, readSessionCookie, verifySession,
+  signSession, sessionCookieHeader, clearSessionCookieHeader,
 } from './index.js'
 import { MagicLinkAuthService } from './magic-link.js'
+import { PasswordAuthService } from './password-auth.js'
 
 // ── Module-global singletons (reused across cold-start invocations) ──────────
 // Vercel reuses the module across invocations within a warm instance.
@@ -57,16 +58,18 @@ interface CachedDeps {
   organizations: OrganizationRepository
   magicLinks: MagicLinkRepository
   magicLinkAuth: MagicLinkAuthService
+  passwordAuth: PasswordAuthService
+  waitlist: WaitlistRepository
   config: ReturnType<typeof loadSessionConfigFromEnv>
   magicLinkConfig: { linkSecret: string; linkTtlSeconds: number; appBaseUrl: string }
 }
 
-function getDeps(): CachedDeps {
+async function getDeps(): Promise<CachedDeps> {
   if (cachedDeps) return cachedDeps
   const db = createDb()
   // Migrations are applied lazily on first invocation (idempotent).
   // In production, prefer running migrations as a deploy step instead.
-  applyMigrations(db)
+  await applyMigrations(db)
   const users = new UserRepository(db)
   const memberships = new MembershipRepository(db)
   const organizations = new OrganizationRepository(db)
@@ -79,6 +82,7 @@ function getDeps(): CachedDeps {
   const estRev = new EstimateRevisionRepository(db)
   const bids = new BidRepository(db)
   const magicLinks = new MagicLinkRepository(db)
+  const waitlist = new WaitlistRepository(db)
 
   const identity = new IdentityService(users, memberships)
   const orgService = new OrganizationService(organizations, memberships, audit)
@@ -109,9 +113,10 @@ function getDeps(): CachedDeps {
     }
   }
   const magicLinkAuth = new MagicLinkAuthService(users, magicLinks, magicLinkConfig)
+  const passwordAuth = new PasswordAuthService({ users, memberships, organizations, waitlist })
   cachedDeps = {
-    coreApi, resolver, users, memberships, organizations, magicLinks, magicLinkAuth,
-    config, magicLinkConfig,
+    coreApi, resolver, users, memberships, organizations, magicLinks, magicLinkAuth, passwordAuth,
+    waitlist, config, magicLinkConfig,
   }
   return cachedDeps
 }
@@ -139,13 +144,14 @@ async function applyMigrations(db: PostgresClient | PgLiteClient): Promise<void>
   await applyMigration(db, FOUNDATION_MIGRATION_SQL)
   await applyMigration(db, COMMERCIAL_MIGRATION_SQL)
   await applyMigration(db, MAGIC_LINKS_MIGRATION_SQL)
+  await applyMigration(db, AUTH_MIGRATION_SQL)
 }
 
 // ── Vercel function handler ─────────────────────────────────────────────────
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
-    const deps = getDeps()
+    const deps = await getDeps()
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     const method = req.method ?? 'GET'
@@ -153,6 +159,21 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // Auth routes
     if (path === '/api/auth/dev-mode' && method === 'GET') {
       return sendJson(res, 200, { devAuth: deps.config.devAuthEnabled })
+    }
+    if (path === '/api/auth/password-login' && method === 'POST') {
+      return handlePasswordLogin(req, res, deps)
+    }
+    if (path === '/api/auth/signup' && method === 'POST') {
+      return handleSignup(req, res, deps)
+    }
+    if (path === '/api/auth/demo-login' && method === 'POST') {
+      return handleDemoLogin(req, res, deps)
+    }
+    if (path === '/api/auth/waitlist' && method === 'GET') {
+      return handleListWaitlist(req, res, deps)
+    }
+    if (path === '/api/auth/waitlist' && method === 'POST') {
+      return handleApproveWaitlist(req, res, deps)
     }
     if (path === '/api/auth/dev-login' && method === 'POST') {
       return handleDevLogin(req, res, deps)
@@ -170,7 +191,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return handleSelectTenant(req, res, deps)
     }
     if (path === '/api/auth/logout' && method === 'POST') {
-      res.setHeader('Set-Cookie', clearSessionCookieHeader(deps.config.devAuthEnabled ? false : true))
+      res.setHeader('Set-Cookie', clearSessionCookieHeader(true))
       return sendJson(res, 200, { ok: true })
     }
     if (path === '/api/auth/session' && method === 'GET') {
@@ -318,6 +339,84 @@ async function handleSession(req: IncomingMessage, res: ServerResponse, deps: Ca
     authenticated: true, userId: user.id, email: user.email, displayName: user.displayName,
     tenantSelected: payload.selectedMembershipId !== null,
   })
+}
+
+// ── Password auth + waitlist handlers (Phase 2C.3) ──────────────────────────
+
+async function handlePasswordLogin(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
+  const body = await readJsonBody(req)
+  if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'validation', message: 'Invalid body' })
+  const b = body as Record<string, unknown>
+  const email = typeof b.email === 'string' ? b.email : ''
+  const password = typeof b.password === 'string' ? b.password : ''
+  if (!email || !password) return sendJson(res, 400, { error: 'validation', message: 'email and password required' })
+  const result = await deps.passwordAuth.login(email, password)
+  if (!result) return sendJson(res, 401, { error: 'unauthenticated', message: 'Invalid email or password' })
+  const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
+  const token = signSession({ userId: result.userId, selectedMembershipId: null, exp }, deps.config.sessionSecret)
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  return sendJson(res, 200, { userId: result.userId })
+}
+
+async function handleSignup(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
+  const body = await readJsonBody(req)
+  if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'validation', message: 'Invalid body' })
+  const b = body as Record<string, unknown>
+  const email = typeof b.email === 'string' ? b.email : ''
+  const displayName = typeof b.displayName === 'string' ? b.displayName : null
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return sendJson(res, 400, { error: 'validation', message: 'valid email required' })
+  }
+  const entry = await deps.passwordAuth.joinWaitlist(email, displayName)
+  return sendJson(res, 200, { id: entry.id, email: entry.email, status: entry.status, message: 'You are on the waitlist. An admin will review your request.' })
+}
+
+async function handleDemoLogin(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
+  const body = await readJsonBody(req)
+  if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'validation', message: 'Invalid body' })
+  const role = (body as Record<string, unknown>).role
+  if (role !== 'owner' && role !== 'member' && role !== 'viewer') {
+    return sendJson(res, 400, { error: 'validation', message: 'role must be owner, member, or viewer' })
+  }
+  const result = await deps.passwordAuth.demoLogin(role)
+  if (!result) return sendJson(res, 401, { error: 'unauthenticated', message: 'Demo user not found. Run the bootstrap script.' })
+  const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
+  const token = signSession({ userId: result.userId, selectedMembershipId: null, exp }, deps.config.sessionSecret)
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  return sendJson(res, 200, { userId: result.userId, role })
+}
+
+async function handleListWaitlist(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
+  const payload = deps.resolver.resolvePayload(req.headers.cookie)
+  if (!payload) return sendJson(res, 401, { error: 'unauthenticated', message: 'Not authenticated' })
+  // Verify admin role
+  const memberships = await deps.memberships.listTenantsForUser(payload.userId)
+  const adminM = memberships.find((m) => m.role === 'admin' || m.role === 'owner')
+  if (!adminM) return sendJson(res, 403, { error: 'forbidden', message: 'Admin access required' })
+  const entries = await deps.waitlist.listAll()
+  return sendJson(res, 200, { entries })
+}
+
+async function handleApproveWaitlist(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
+  const payload = deps.resolver.resolvePayload(req.headers.cookie)
+  if (!payload) return sendJson(res, 401, { error: 'unauthenticated', message: 'Not authenticated' })
+  const memberships = await deps.memberships.listTenantsForUser(payload.userId)
+  const adminM = memberships.find((m) => m.role === 'admin' || m.role === 'owner')
+  if (!adminM) return sendJson(res, 403, { error: 'forbidden', message: 'Admin access required' })
+  const body = await readJsonBody(req)
+  if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'validation', message: 'Invalid body' })
+  const b = body as Record<string, unknown>
+  const waitlistId = typeof b.waitlistId === 'string' ? b.waitlistId : ''
+  const password = typeof b.password === 'string' ? b.password : ''
+  if (!waitlistId || !password || password.length < 6) {
+    return sendJson(res, 400, { error: 'validation', message: 'waitlistId and password (min 6 chars) required' })
+  }
+  try {
+    const result = await deps.passwordAuth.approveWaitlistEntry(waitlistId, payload.userId, adminM.organizationId, password)
+    return sendJson(res, 200, { userId: result.userId, email: result.email, message: 'User created. They can now login with their email + the password you set.' })
+  } catch (e) {
+    return sendJson(res, 400, { error: 'validation', message: e instanceof Error ? e.message : 'Failed to approve' })
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
