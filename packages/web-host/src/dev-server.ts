@@ -39,10 +39,28 @@ async function main() {
     process.exit(1)
   }
 
-  const pg = new PGlite()
-  const db = new PgLiteClient(pg)
+  // Use PostgresClient when DATABASE_URL is a real Postgres URL; else PGlite (dev).
+  let db: PgLiteClient | import('@contractor/core/persistence').PostgresClient
+  if (process.env.DATABASE_URL && /^postgres(ql)?:\/\//.test(process.env.DATABASE_URL)) {
+    const { Pool } = await import('pg')
+    const { PostgresClient } = await import('@contractor/core/persistence')
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 5, ssl: { rejectUnauthorized: false },
+    })
+    db = new PostgresClient(pool)
+    console.log('Using PostgreSQL:', process.env.DATABASE_URL.split('@')[1]?.split('/')[0] ?? '?')
+  } else {
+    const pg = new PGlite()
+    db = new PgLiteClient(pg)
+    console.log('Using PGlite (in-memory)')
+  }
   await applyMigration(db, FOUNDATION_MIGRATION_SQL)
   await applyMigration(db, COMMERCIAL_MIGRATION_SQL)
+  // Also apply magic-links + auth migrations (additive, idempotent)
+  const { MAGIC_LINKS_MIGRATION_SQL, AUTH_MIGRATION_SQL } = await import('@contractor/core/persistence')
+  await applyMigration(db, MAGIC_LINKS_MIGRATION_SQL)
+  await applyMigration(db, AUTH_MIGRATION_SQL)
 
   // Seed a dev org/user/membership if none exists (idempotent)
   if (devUserEmail) {
@@ -78,15 +96,14 @@ async function main() {
     new WebSessionResolver({ users, memberships, config }),
   )
 
-  const server = startWebHost(
-    {
-      coreApi, resolver: new WebSessionResolver({ users, memberships, config }),
-      users, memberships, organizations, config,
-      staticDir: null, // dev: Vite serves the browser
-      secure: false, // dev: not over HTTPS
-    },
-    port,
-  )
+  // Use the Vercel handler directly — it has all routes (password-login, signup,
+  // demo-login, waitlist, etc.) and delegates to CoreApi. This ensures the dev
+  // server and production Vercel function use exactly the same code path.
+  // The Vercel handler is a standard (req, res) => void that works with http.createServer.
+  const { createServer } = await import('node:http')
+  const vercelHandler = (await import('./vercel-handler.js')).default
+  const server = createServer(vercelHandler)
+  server.listen(port)
   console.log(`Contractor GenOffice web host listening on http://localhost:${port}`)
   console.log(`  dev auth: ${config.devAuthEnabled ? 'ENABLED' : 'disabled'}`)
 
