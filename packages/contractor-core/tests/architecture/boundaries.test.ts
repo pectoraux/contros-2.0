@@ -165,3 +165,86 @@ describe('architecture: repositories do not import services', () => {
     expect(violations.map((v) => v.rel)).toEqual([])
   })
 })
+
+/**
+ * Architecture: API layer must NOT contain raw SQL. The API is a transport
+ * adapter — it delegates persistence to repositories via the application
+ * service. (Phase 2B.3 §3, §19, §20.)
+ */
+describe('architecture: API layer contains no raw SQL', () => {
+  it('src/api/ does NOT contain INSERT/UPDATE/DELETE/SELECT SQL statements', () => {
+    const apiFiles = readSrcFiles().filter((f) => f.rel.startsWith('api/'))
+    const sqlStatement = /['"`]\s*(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|SELECT\s+[\s\S]*?\s+FROM)/i
+    const violations = apiFiles.filter((f) => {
+      const lines = f.content.split('\n')
+      return lines.some((line) => {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return false
+        return sqlStatement.test(line)
+      })
+    })
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})
+
+/**
+ * Architecture: API layer must NOT import repositories directly. The API
+ * calls application services (which own the transaction + repository
+ * orchestration). Importing repositories directly would bypass the service
+ * boundary, the authorization layer, and the audit-atomic transaction.
+ * (Phase 2B.3 §3, §20.)
+ */
+describe('architecture: API layer does not import repositories directly', () => {
+  it('src/api/ does NOT import from src/persistence/repositories/', () => {
+    const apiFiles = readSrcFiles().filter((f) => f.rel.startsWith('api/'))
+    const violations = apiFiles.filter((f) =>
+      /from\s+['"](\.\.\/){1,}persistence\/repositories/.test(f.content) ||
+      /from\s+['"]@contractor\/core\/persistence\/repositories['"]/.test(f.content) ||
+      /from\s+['"]\.\.\/\.\.\/persistence\/repositories/.test(f.content),
+    )
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})
+
+/**
+ * Architecture: API layer must NOT directly mutate audit. The audit is
+ * emitted atomically inside the application service's transaction
+ * (ADR-0007 Decision 18). The API must never call AuditRepository.append
+ * or AuditService.record. (Phase 2B.3 §16.)
+ */
+describe('architecture: API layer does not mutate audit directly', () => {
+  it('src/api/ does NOT import AuditRepository or call audit.append/audit.record', () => {
+    const apiFiles = readSrcFiles().filter((f) => f.rel.startsWith('api/'))
+    const violations = apiFiles.filter((f) =>
+      /from\s+['"](\.\.\/){1,}persistence\/repositories\/audit/.test(f.content) ||
+      /AuditRepository/.test(f.content) ||
+      /\.append\s*\(/.test(f.content) ||
+      /audit\.record\s*\(/.test(f.content),
+    )
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})
+
+/**
+ * Architecture: API layer must NOT contain pricing formulas. Derived
+ * commercial values (totalCost, profit, sellPrice, grossMargin) are
+ * computed by the domain + surfaced by replayEstimate — never by the API.
+ * (Phase 2B.3 §12.)
+ */
+describe('architecture: API layer contains no pricing formulas', () => {
+  it('src/api/ does NOT compute totalCost/profit/sellPrice/grossMargin', () => {
+    const apiFiles = readSrcFiles().filter((f) => f.rel.startsWith('api/'))
+    // Matches pricing-formula computation patterns (not field reads like `t.totalCost`).
+    // Anchored to assignment/computation forms; mappers that READ fields use `.totalCost` which won't match.
+    const formulaPattern = /\b(totalCost|sellPrice|grossProfit|grossMargin|overhead|contingency)\s*=\s*[^=]/
+    const violations = apiFiles.filter((f) => {
+      const lines = f.content.split('\n')
+      return lines.some((line) => {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return false
+        return formulaPattern.test(line)
+      })
+    })
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})

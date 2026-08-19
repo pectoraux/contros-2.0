@@ -22,10 +22,15 @@ import type { WorkspaceService } from '../service/workspace.service.js'
 import type { ProjectService } from '../service/project.service.js'
 import type { AuditService } from '../service/audit.service.js'
 import type { RevisionService } from '../service/revision.service.js'
+import type { PlanMeasurementService } from '../service/plan-measurement.service.js'
+import type { BOQService } from '../service/boq.service.js'
+import type { EstimateService } from '../service/estimate.service.js'
+import type { BidService } from '../service/bid.service.js'
 import type { TenantContext } from '../domain/types.js'
 import type { DomainError } from '../domain/errors.js'
 import { httpStatusForError, asDomainError } from '../domain/errors.js'
-import { UnauthorizedError } from '../domain/errors.js'
+import { UnauthenticatedError } from '../domain/errors.js'
+import { routeCommercial, type CommercialApiServices } from './commercial-routes.js'
 
 export interface ApiRequest {
   method: string
@@ -46,6 +51,11 @@ export interface ApiServices {
   projects: ProjectService
   audit: AuditService
   revisions: RevisionService
+  // Phase 2B.3 — Commercial application services
+  measurements: PlanMeasurementService
+  boqs: BOQService
+  estimates: EstimateService
+  bids: BidService
 }
 
 export interface ApiSessionResolver {
@@ -76,7 +86,10 @@ export class CoreApi {
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : undefined
       const session = await this.sessionResolver.resolveSession(token)
       if (!session) {
-        return errorResponse(new UnauthorizedError(), 'Authentication required')
+        // Phase 2B.3: no session = UNAUTHENTICATED (401), not unauthorized (403).
+        // (Authorization failure — wrong role/tenant — is a separate 403 condition
+        // raised by the application service's requirePermission.)
+        return errorResponse(new UnauthenticatedError())
       }
 
       // 2. Resolve the trusted TenantContext (server-side)
@@ -97,7 +110,21 @@ export class CoreApi {
   }
 
   private async route(req: ApiRequest, ctx: TenantContext): Promise<ApiResponse> {
-    const [resource, id] = req.path.split('/').filter(Boolean)
+    const segments = req.path.split('/').filter(Boolean)
+
+    // Phase 2B.3 — Commercial routes (estimates, bids, boqs, measurements,
+    // and their nested sub-resources). routeCommercial returns null if the
+    // path is not a Commercial route, falling through to foundation routes.
+    const commercialServices: CommercialApiServices = {
+      measurements: this.services.measurements,
+      boqs: this.services.boqs,
+      estimates: this.services.estimates,
+      bids: this.services.bids,
+    }
+    const commercial = await routeCommercial(segments, req.method, req.body, ctx, commercialServices)
+    if (commercial) return commercial
+
+    const [resource, id] = segments
     switch (resource) {
       case 'workspaces':
         if (req.method === 'GET' && !id) return json(await this.services.workspaces.listWorkspaces(ctx))
