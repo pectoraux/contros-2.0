@@ -33,3 +33,4 @@ electron-builder.env
 __pycache__/
 /notes/
 /MEMORY.md
+bun.lock

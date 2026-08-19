@@ -1,0 +1,27 @@
+{
+  "name": "@contractor/web-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin HTTP host adapter for Contractor GenOffice CoreApi. Node http.createServer wrapping CoreApi.handle(); signed-cookie session; DEV-only auth boundary. No business logic.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.js",
+    "./session": "./src/session.js",
+    "./resolver": "./src/resolver.js",
+    "./server": "./src/server.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@contractor/core": "*",
+    "@electric-sql/pglite": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
