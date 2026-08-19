@@ -52,13 +52,79 @@ revisions, not edits to finalized ones.
 Inputs/evidence feeding an `EstimateRevision`:
 
 - BOQ (bill of quantities) — itself derived from `PlanMeasurement` evidence.
-- `EstimateLine` entries (resource, quantity, unit, rate, markup).
+- `EstimateLine` entries (quantity, unit, rate, pricing strategy — see §3.1.1).
 - Pricing provenance (`ResourcePriceObservation`, `Recipe`, `CostModel` —
-  conceptual; see ADR-0006).
+  conceptual; see ADR-0006; NOT introduced in Phase 2A).
 - Margin target / bid context.
 
 **Forbidden:** mutating a finalized `EstimateRevision` to "fix" a current
 problem. The fix is a new revision.
+
+### 3.1.1 Commercial domain contracts (Phase 2A — ESTABLISHED)
+
+The Commercial domain contracts are now established as pure TypeScript
+contracts + deterministic algorithms. See ADR-0007 for the full decision.
+
+**Authority chain:**
+```
+PlanMeasurement (evidence)
+    ↓
+BOQ (scope structure)
+    ↓
+EstimateLine (priced line)
+    ↓
+EstimateRevision (AUTHORITY — immutable commercial truth)
+    ↓
+Bid (commercial decision, references EstimateRevision)
+```
+
+**Money model:** integer minor units (e.g. cents for GHS/USD, whole yen for
+JPY), banker's rounding (round half to even) at the currency's minor-unit
+precision. Same-currency arithmetic only. (Phase 2A §8/§9; ADR-0007 Decision 2.)
+
+**Margin vs markup (CRITICAL distinction):**
+```
+cost          = direct + overhead + risk
+sellPrice     = price charged to client
+grossProfit   = sellPrice - cost
+grossMargin   = grossProfit / sellPrice    (fraction of SELL price)
+markup        = grossProfit / cost          (fraction of COST)
+```
+20% markup ≠ 20% margin. Conversions: `margin = markup/(1+markup)`,
+`markup = margin/(1-margin)`. (Phase 2A §8; ADR-0007 Decision 3.)
+
+**EstimateRevision payload + content hash:** the payload (projectId, currency,
+policy, lines, note, pricingAlgorithmVersion) is content-hashed using the
+Phase 1 canonical `contentHash` function. Same payload + same algorithmVersion
+= same content hash → same historical result. Metadata (revisionId, tenantId,
+createdBy, createdAt, finalizedAt, status, revisionNumber) is NOT part of the
+content hash — it is identity/audit. (Phase 2A §13; ADR-0007 Decision 5.)
+
+**Estimate-level totals:**
+```
+totalLineCost   = sum(lineCost = quantity × rate)
+overhead        = totalLineCost × overheadPct
+contingency     = totalLineCost × contingencyPct
+totalCost       = totalLineCost + overhead + contingency
+totalSellPrice  = sum(lineSellPrice)
+totalGrossProfit = totalSellPrice - totalCost
+grossMargin     = totalGrossProfit / totalSellPrice
+```
+(Phase 2A §7; ADR-0007 Decision 6.)
+
+**Bid:** references a finalized EstimateRevision by revisionId +
+contentHash. Does NOT duplicate the estimate payload. (Phase 2A §15;
+ADR-0007 Decision 7.)
+
+**Code location:** `packages/contractor-core/src/domain/commercial/`.
+Pure, zero external deps, zero Electron, zero persistence.
+
+**Office + AI boundaries (architectural rules, not implemented in Phase 2A):**
+- Office adapter: EstimateRevision ↔ Office adapter ↔ workbook representation.
+  Univer cannot directly mutate EstimateRevision. (Phase 2A §16; ADR-0002 Q2 deferred.)
+- AI may produce CandidateEstimateLine/CandidatePrice/CandidateQuantity/
+  CandidateBOQLine — but these are suggestions. AI cannot establish
+  EstimateRevision or Bid authority. (Phase 2A §17.)
 
 ### 3.2 Programme — `ProgrammeRevision` + mutable working Programme
 

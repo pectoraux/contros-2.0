@@ -283,6 +283,7 @@ See `DOMAIN-AUTHORITY.md` for the full map. Summary:
 | [0004](ADR/0004-plan-bim.md) | Plans/BIM domain & viewer strategy | PROPOSED (Q6 deferred) |
 | [0005](ADR/0005-multitenancy.md) | Multi-tenancy: identity, persistence, isolation | **DECIDED** (Q3, Q4, project authority, Office/Univer boundary) |
 | [0006](ADR/0006-goals-learning.md) | Goals, pricing knowledge, learning/calibration | PROPOSED (Q7 deferred by design) |
+| [0007](ADR/0007-commercial-domain.md) | Commercial domain contracts (Phase 2A) | PROPOSED (domain contracts established; persistence deferred) |
 
 ## 12. Architectural questions — status
 
