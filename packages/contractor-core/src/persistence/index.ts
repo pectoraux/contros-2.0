@@ -13,6 +13,10 @@ export { WorkspaceRepository } from './repositories/workspace.repository.js'
 export { ProjectRepository } from './repositories/project.repository.js'
 export { AuditRepository } from './repositories/audit.repository.js'
 export { RevisionRepository } from './repositories/revision.repository.js'
+export { PlanMeasurementRepository } from './repositories/plan-measurement.repository.js'
+export { BOQRepository } from './repositories/boq.repository.js'
+export { EstimateRevisionRepository } from './repositories/estimate-revision.repository.js'
+export { BidRepository } from './repositories/bid.repository.js'
 
 // The migration SQL is importable for test bootstrap.
 import { readFileSync } from 'node:fs'
@@ -21,5 +25,9 @@ import { dirname, join } from 'node:path'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 export const FOUNDATION_MIGRATION_SQL = readFileSync(
   join(__dirname, 'migrations/0001_foundation.sql'),
+  'utf8',
+)
+export const COMMERCIAL_MIGRATION_SQL = readFileSync(
+  join(__dirname, 'migrations/0002_commercial.sql'),
   'utf8',
 )
