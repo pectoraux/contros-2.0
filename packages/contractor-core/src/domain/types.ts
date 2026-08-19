@@ -127,6 +127,16 @@ export type Permission =
   | 'audit:read'
   | 'revision:finalize'
   | 'revision:read'
+  | 'plan:read'
+  | 'plan:write'
+  | 'boq:read'
+  | 'boq:write'
+  | 'estimate:read'
+  | 'estimate:write'
+  | 'estimate:finalize'
+  | 'bid:read'
+  | 'bid:write'
+  | 'bid:submit'
 
 // ────────────────────────────────────────────────────────────
 // Workspace

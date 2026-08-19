@@ -102,6 +102,12 @@ CREATE INDEX IF NOT EXISTS idx_erp_project ON estimate_revision_payloads(tenant_
 -- Immutability trigger: block UPDATE/DELETE on finalized/superseded payloads.
 -- The generic revisions trigger protects the revisions table; this trigger
 -- protects the payload JSONB. (Phase 2B.1 §8, §33.)
+--
+-- For draft status, the function returns NEW (allow the UPDATE — drafts are
+-- working state). For finalized/superseded, it raises (mutation forbidden).
+-- Returning OLD for draft status would silently discard every payload UPDATE,
+-- causing stored content_hash / payload_json drift — a serious correctness bug.
+-- (Phase 2B.2 trigger correctness fix.)
 CREATE OR REPLACE FUNCTION block_estimate_payload_mutation() RETURNS TRIGGER AS $$
 DECLARE
   rev_status TEXT;
@@ -110,7 +116,8 @@ BEGIN
   IF rev_status IN ('finalized', 'superseded') THEN
     RAISE EXCEPTION 'estimate revision payload % is immutable (revision status=%): mutation forbidden', OLD.revision_id, rev_status;
   END IF;
-  RETURN OLD;
+  -- draft status: allow the UPDATE to proceed with the new row.
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 

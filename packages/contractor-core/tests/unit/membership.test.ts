@@ -6,7 +6,8 @@ describe('membership authorization rules (pure)', () => {
     const p = permissionsForRole('owner')
     expect(p.has('org:admin')).toBe(true)
     expect(p.has('revision:finalize')).toBe(true)
-    expect(p.size).toBe(9)
+    // 19 = foundation 9 + commercial 10 (plan:2, boq:2, estimate:3, bid:3)
+    expect(p.size).toBe(19)
   })
 
   it('admin can manage workspaces/projects but not org:admin', () => {
