@@ -138,10 +138,14 @@ CREATE TRIGGER trg_block_audit_delete BEFORE DELETE ON audit_events
 -- finalized/superseded rows are IMMUTABLE. The repository enforces this
 -- (no update/delete for non-draft rows). A trigger provides defense in depth.
 -- ────────────────────────────────────────────────────────────
+-- C2: revisions are historical authority. They must NEVER be destroyed by
+-- a parent (project/workspace/org) deletion. The FK to projects uses
+-- ON DELETE RESTRICT — a project with revisions cannot be hard-deleted.
+-- (Phase 1.1 C2 fix.)
 CREATE TABLE IF NOT EXISTS revisions (
   revision_id       TEXT PRIMARY KEY,
   tenant_id         TEXT NOT NULL,
-  project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
   authority_kind    TEXT NOT NULL,
   revision_number   INTEGER NOT NULL,
   status            TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','finalized','superseded')),
@@ -156,21 +160,67 @@ CREATE TABLE IF NOT EXISTS revisions (
 CREATE INDEX IF NOT EXISTS idx_revisions_tenant ON revisions(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_revisions_project ON revisions(tenant_id, project_id, authority_kind);
 
--- Block UPDATE on finalized/superseded revisions (defense in depth).
--- The repository also checks status before any mutation.
--- EXCEPTION: the finalized->superseded transition is allowed (a newer
--- finalized revision supersedes the old one; the old one remains immutable
--- and present for historical reconstruction). (master prompt §13.)
+-- H1: dedicated revision-number counter. Each (tenant, project, authority_kind)
+-- has a monotonic counter row. Allocation is atomic via UPSERT + RETURNING —
+-- no race window, no serialization failures, no retry needed.
+-- (Phase 1.1 H1 fix: replaces SELECT MAX(revision_number)+1 under READ COMMITTED.)
+CREATE TABLE IF NOT EXISTS revision_counters (
+  tenant_id       TEXT NOT NULL,
+  project_id      TEXT NOT NULL,
+  authority_kind  TEXT NOT NULL,
+  next_number     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (tenant_id, project_id, authority_kind)
+);
+
+-- C1: finalized/superseded revisions are IMMUTABLE except for the
+-- controlled status transition finalized->superseded (and draft->superseded,
+-- draft->finalized). The trigger enforces that ONLY `status` (and
+-- `finalized_at` during draft->finalized) may change; every identity/content
+-- field is frozen once finalized. (Phase 1.1 C1 fix.)
+--
+-- Immutable fields (must not change after finalization):
+--   revision_id, tenant_id, project_id, authority_kind, revision_number,
+--   created_by, created_at, algorithm_version, content_hash,
+--   parent_revision_id
+-- Mutable fields (controlled lifecycle only):
+--   status (draft->finalized, draft->superseded, finalized->superseded)
+--   finalized_at (set when draft->finalized; unchanged thereafter)
 CREATE OR REPLACE FUNCTION block_immutable_revision_update() RETURNS TRIGGER AS $$
 BEGIN
-  IF OLD.status = 'finalized' AND NEW.status = 'superseded' THEN
-    -- Allowed: the supersede transition. Only the status (and nothing else)
-    -- may change.
+  -- From draft: any field may change (working state).
+  IF OLD.status = 'draft' THEN
     RETURN NEW;
   END IF;
-  IF OLD.status IN ('finalized','superseded') THEN
-    RAISE EXCEPTION 'revision % is immutable (status=%): UPDATE forbidden', OLD.revision_id, OLD.status;
+
+  -- From finalized: only the finalized->superseded transition is allowed,
+  -- and ONLY the status field may change. Every other field must be identical.
+  IF OLD.status = 'finalized' THEN
+    IF NEW.status = 'superseded' THEN
+      -- Verify NO field other than status changed.
+      IF NEW.revision_id IS DISTINCT FROM OLD.revision_id
+         OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+         OR NEW.project_id IS DISTINCT FROM OLD.project_id
+         OR NEW.authority_kind IS DISTINCT FROM OLD.authority_kind
+         OR NEW.revision_number IS DISTINCT FROM OLD.revision_number
+         OR NEW.created_by IS DISTINCT FROM OLD.created_by
+         OR NEW.created_at IS DISTINCT FROM OLD.created_at
+         OR NEW.algorithm_version IS DISTINCT FROM OLD.algorithm_version
+         OR NEW.content_hash IS DISTINCT FROM OLD.content_hash
+         OR NEW.parent_revision_id IS DISTINCT FROM OLD.parent_revision_id
+         OR NEW.finalized_at IS DISTINCT FROM OLD.finalized_at THEN
+        RAISE EXCEPTION 'revision % is finalized: only status may change during finalized->superseded (identity/content fields are immutable)', OLD.revision_id;
+      END IF;
+      RETURN NEW;
+    END IF;
+    -- Any other transition from finalized is forbidden.
+    RAISE EXCEPTION 'revision % is finalized: UPDATE forbidden (only finalized->superseded is allowed)', OLD.revision_id;
   END IF;
+
+  -- From superseded: terminal state. No UPDATE at all.
+  IF OLD.status = 'superseded' THEN
+    RAISE EXCEPTION 'revision % is superseded (terminal): UPDATE forbidden', OLD.revision_id;
+  END IF;
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

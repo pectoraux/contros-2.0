@@ -271,6 +271,70 @@ For every revisioned authority:
 **Repository contract** (Section 35 of the master prompt): immutable-revision
 repositories must NOT expose `update`/`delete` for finalized records.
 
+### 9.1 Revision immutability model (Phase 1.1 — hardened)
+
+The distinction between **content/identity immutability** and **controlled
+lifecycle transition** is enforced at the database level (not merely by
+repository convention):
+
+```
+Revision content/identity fields  = IMMUTABLE after finalization
+Revision lifecycle status         = controlled state transition
+```
+
+**Immutable fields** (cannot change once the revision is finalized; any
+UPDATE attempting to change them — including during a finalized→superseded
+transition — is rejected by a database trigger):
+
+- `revision_id` (primary key)
+- `tenant_id`
+- `project_id`
+- `authority_kind`
+- `revision_number`
+- `created_by`
+- `created_at`
+- `algorithm_version`
+- `content_hash`
+- `parent_revision_id`
+- `finalized_at`
+
+**Mutable field** (controlled lifecycle only):
+
+- `status` — the only field that may change after finalization, and only
+  for the approved transition: `finalized → superseded`.
+
+**Allowed state machine:**
+
+```
+draft     → finalized    (finalize)
+draft     → superseded   (discard without finalizing)
+finalized → superseded   (a newer finalized revision supersedes it)
+```
+
+**Forbidden:**
+
+- `finalized → draft` (cannot "un-finalize")
+- `superseded → anything` (terminal state — no UPDATE at all)
+- Any UPDATE that changes a content/identity field on a non-draft revision
+- Any DELETE on a finalized/superseded revision
+
+The database trigger (`block_immutable_revision_update`) enforces that
+during the `finalized → superseded` transition, **only `status` may
+change** — every other field is compared `OLD IS DISTINCT FROM NEW` and
+the UPDATE is rejected if any differ. This prevents the audit-identified
+bypass where a single `UPDATE ... SET content_hash='X', status='superseded'`
+could rewrite historical truth.
+
+### 9.2 Revision-number allocation (Phase 1.1 — concurrency-safe)
+
+Revision numbers are allocated from a dedicated `revision_counters` table
+(one row per `(tenant_id, project_id, authority_kind)`). Allocation is a
+single atomic `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING` statement
+inside the transaction — no `SELECT MAX()+1` race window, no serialization
+failures, no retry needed. Concurrent `createDraft` calls for the same
+`(tenant, project, authorityKind)` each receive a unique sequential number.
+(Phase 1.1 H1 fix.)
+
 ## 10. Determinism & canonical hashing
 
 - Canonical calculations use canonicalized content (stable key ordering, no

@@ -121,6 +121,32 @@ boundary rules apply to each tier:
 - Letting `@genoffice/project-store`, an Office file, a spreadsheet, a BIM
   viewer, or AI state become a second source of domain truth.
 
+### 4.1 Cascade / retention model (Phase 1.1 — C2 fix)
+
+Historical authority must never be destroyed accidentally by a parent
+deletion. The foundation schema classifies every foreign key:
+
+| FK | Cascade rule | Classification | Rationale |
+| --- | --- | --- | --- |
+| `auth_provider_bindings.user_id → users` | ON DELETE CASCADE | SAFE CASCADE | Auth bindings are convenience identity, not historical authority. Deleting a user cleans up their bindings. |
+| `memberships.user_id → users` | ON DELETE CASCADE | SAFE CASCADE | Memberships are not historical authority; deleting a user revokes their memberships. |
+| `memberships.organization_id → organizations` | ON DELETE CASCADE | SAFE CASCADE | An org's memberships are not historical authority. |
+| `workspaces.organization_id → organizations` | ON DELETE CASCADE | SAFE CASCADE | Workspaces are not historical authority (they are organizational containers). |
+| `projects.workspace_id → workspaces` | ON DELETE CASCADE | SAFE CASCADE | Projects are not historical authority (they are business identity, but not immutable history). |
+| `revisions.project_id → projects` | **ON DELETE RESTRICT** | **RESTRICT (historical)** | Revisions ARE historical authority. A project with revisions cannot be hard-deleted. Soft-delete (status='archived') is used instead. |
+
+**Rule:** any table that holds historical authority (revisions, audit_events,
+future `PlanMeasurement`, `ProjectActual`) must use `ON DELETE RESTRICT` (or
+have no FK) to its parent — never `ON DELETE CASCADE`. Audit_events has no FK
+to organizations (it uses `tenant_id` as a plain column), so it survives any
+parent deletion.
+
+**Soft-delete policy:** organizations, workspaces, and projects are
+soft-deleted (status flag: `active`/`disabled`/`archived`) rather than
+hard-deleted. No application service exposes hard deletion of these
+entities. Hard deletion is only possible via raw SQL, and the RESTRICT
+constraint on `revisions.project_id` prevents it when revisions exist.
+
 ## 5. Forbidden crossings
 
 | From | To | Forbidden? | Why |

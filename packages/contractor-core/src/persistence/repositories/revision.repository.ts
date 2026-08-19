@@ -53,8 +53,12 @@ export class RevisionRepository {
   constructor(private readonly db: DbClient) {}
 
   /**
-   * Create a new draft revision. The revision number is assigned
-   * automatically (next in sequence for tenant+project+authorityKind).
+   * Create a new draft revision. The revision number is allocated
+   * atomically from a dedicated counter row (revision_counters table),
+   * NOT via SELECT MAX(revision_number)+1. This is concurrency-safe:
+   * concurrent createDraft calls for the same (tenant, project,
+   * authorityKind) each get a unique sequential number with no race
+   * window and no retry. (Phase 1.1 H1 fix.)
    */
   async createDraft(
     tenantId: string,
@@ -67,12 +71,19 @@ export class RevisionRepository {
     createdAt: string,
   ): Promise<RevisionMetadata> {
     return this.db.tx(async (tx) => {
-      // Assign the next revision number within (tenant, project, authorityKind)
-      const seqRows = await tx.query<{ max_num: number | null }>(
-        `SELECT MAX(revision_number) as max_num FROM revisions WHERE tenant_id = $1 AND project_id = $2 AND authority_kind = $3`,
+      // Atomically allocate the next revision number.
+      // INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING is a single
+      // atomic statement; the row-level lock on the counter row serializes
+      // concurrent allocations. No MAX()+1 race, no serialization failure.
+      const counterRows = await tx.query<{ next_num: number }>(
+        `INSERT INTO revision_counters (tenant_id, project_id, authority_kind, next_number)
+         VALUES ($1, $2, $3, 2)
+         ON CONFLICT (tenant_id, project_id, authority_kind)
+         DO UPDATE SET next_number = revision_counters.next_number + 1
+         RETURNING next_number - 1 AS next_num`,
         [tenantId, projectId, authorityKind],
       )
-      const nextNum = (seqRows[0]?.max_num ?? 0) + 1
+      const nextNum = counterRows[0]!.next_num
       const rows = await tx.queryReturning<RevisionRow>(
         `INSERT INTO revisions (revision_id, tenant_id, project_id, authority_kind, revision_number, status, created_by, created_at, algorithm_version, content_hash, parent_revision_id, finalized_at)
          VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8, $9, $10, NULL)
