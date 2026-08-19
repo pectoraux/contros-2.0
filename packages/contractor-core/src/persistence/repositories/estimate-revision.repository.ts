@@ -42,9 +42,17 @@ export class EstimateRevisionRepository {
   }
 
   /**
-   * Create a draft EstimateRevision: allocate revision number via the generic
-   * counter, insert into revisions table, then store the canonical payload JSONB.
-   * Returns the full EstimateRevision (metadata + payload).
+   * Create a draft EstimateRevision ATOMICALLY: allocate revision number,
+   * insert revision metadata, AND insert the canonical payload JSONB — all
+   * within ONE transaction. If the payload INSERT fails, the entire
+   * transaction (including the revision metadata + counter allocation) is
+   * rolled back. No orphaned revision without payload can persist.
+   * (Phase 2B.1.1 H1 fix.)
+   *
+   * The RevisionRepository.createDraft() call uses this.db.tx() internally,
+   * which — when called from within this outer tx() — creates a SAVEPOINT
+   * rather than a new top-level transaction. This is the correct nesting
+   * behavior for DbClient.tx().
    */
   async createDraft(
     tenantId: string,
@@ -54,23 +62,31 @@ export class EstimateRevisionRepository {
     createdAt: string,
   ): Promise<EstimateRevision> {
     const contentHash = estimateRevisionContentHash(payload)
-    const metadata = await this.revisions.createDraft(
-      tenantId, projectId, 'estimate', createdBy,
-      payload.pricingAlgorithmVersion, contentHash, null, createdAt,
-    )
-    // Store the canonical payload JSONB
-    await this.db.queryReturning<PayloadRow>(
-      `INSERT INTO estimate_revision_payloads (revision_id, tenant_id, project_id, payload_json, currency, target_profit_mode, target_profit_ratio)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [
-        metadata.revisionId, tenantId, projectId,
-        JSON.stringify(payload),
-        payload.currency,
-        payload.policy.targetProfitMode,
-        payload.policy.targetProfitRatio,
-      ],
-    )
-    return { __brand: 'EstimateRevision', metadata, payload }
+    return this.db.tx(async (tx) => {
+      // Step 1: allocate revision number + insert revision metadata.
+      // This calls tx.tx() internally → SAVEPOINT (nested tx).
+      // The RevisionRepository uses `this.db` (the same client), so its
+      // internal tx() will nest as a SAVEPOINT within this outer tx.
+      const metadata = await this.revisions.createDraft(
+        tenantId, projectId, 'estimate', createdBy,
+        payload.pricingAlgorithmVersion, contentHash, null, createdAt,
+      )
+      // Step 2: insert the canonical payload JSONB.
+      // If this fails, the outer tx rolls back — including the revision
+      // metadata and counter allocation from Step 1.
+      await tx.queryReturning<PayloadRow>(
+        `INSERT INTO estimate_revision_payloads (revision_id, tenant_id, project_id, payload_json, currency, target_profit_mode, target_profit_ratio)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
+          metadata.revisionId, tenantId, projectId,
+          JSON.stringify(payload),
+          payload.currency,
+          payload.policy.targetProfitMode,
+          payload.policy.targetProfitRatio,
+        ],
+      )
+      return { __brand: 'EstimateRevision' as const, metadata, payload }
+    })
   }
 
   /**
@@ -93,10 +109,14 @@ export class EstimateRevisionRepository {
   }
 
   /**
-   * Update a draft revision's payload. Only allowed while status='draft'.
-   * The immutability trigger on estimate_revision_payloads blocks this for
-   * finalized/superseded revisions. Also updates the content_hash in the
-   * revisions table via the generic RevisionRepository.
+   * Update a draft revision's payload ATOMICALLY: update content_hash on
+   * the revisions table AND update the payload JSONB — all within ONE
+   * transaction. If either write fails, neither persists.
+   * (Phase 2B.1.1 H1 fix.)
+   *
+   * The RevisionRepository.updateDraftContent() fetches the revision first
+   * (to check status) then updates. When called from within this outer tx,
+   * its internal operations participate in the same transaction.
    */
   async updateDraftPayload(
     revisionId: string,
@@ -104,26 +124,32 @@ export class EstimateRevisionRepository {
     payload: EstimateRevisionPayload,
   ): Promise<EstimateRevision | null> {
     const contentHash = estimateRevisionContentHash(payload)
-    // Update the content_hash on the generic revisions table (only if draft)
-    const metadata = await this.revisions.updateDraftContent(
-      revisionId, tenantId, contentHash, payload.pricingAlgorithmVersion,
-    )
-    if (!metadata) return null
-    // Update the payload JSONB (trigger blocks if not draft)
-    await this.db.queryReturning<PayloadRow>(
-      `UPDATE estimate_revision_payloads
-       SET payload_json = $3, currency = $4, target_profit_mode = $5, target_profit_ratio = $6
-       WHERE revision_id = $1 AND tenant_id = $2
-       RETURNING *`,
-      [
-        revisionId, tenantId,
-        JSON.stringify(payload),
-        payload.currency,
-        payload.policy.targetProfitMode,
-        payload.policy.targetProfitRatio,
-      ],
-    )
-    return { __brand: 'EstimateRevision', metadata, payload }
+    return this.db.tx(async (tx) => {
+      // Step 1: check status + update content_hash on the revisions table.
+      // updateDraftContent does a SELECT (status check) + UPDATE (hash).
+      // Both participate in this transaction.
+      // The RevisionRepository uses `this.db` (the same client).
+      const metadata = await this.revisions.updateDraftContent(
+        revisionId, tenantId, contentHash, payload.pricingAlgorithmVersion,
+      )
+      if (!metadata) return null
+      // Step 2: update the payload JSONB.
+      // If this fails, the outer tx rolls back — content_hash reverts too.
+      await tx.queryReturning<PayloadRow>(
+        `UPDATE estimate_revision_payloads
+         SET payload_json = $3, currency = $4, target_profit_mode = $5, target_profit_ratio = $6
+         WHERE revision_id = $1 AND tenant_id = $2
+         RETURNING *`,
+        [
+          revisionId, tenantId,
+          JSON.stringify(payload),
+          payload.currency,
+          payload.policy.targetProfitMode,
+          payload.policy.targetProfitRatio,
+        ],
+      )
+      return { __brand: 'EstimateRevision' as const, metadata, payload }
+    })
   }
 
   /**

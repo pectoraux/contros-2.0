@@ -411,3 +411,127 @@ describe('EstimateRevision lifecycle (draft → finalized → superseded)', () =
     expect(r2.metadata.revisionNumber).toBe(r1.metadata.revisionNumber + 1)
   })
 })
+
+// ── §8: FAILURE TEST — CREATE (payload failure rolls back revision) ──
+
+describe('§8: createDraft payload failure → full rollback', () => {
+  it('payload INSERT failure causes revision INSERT rollback (no orphaned revision)', async () => {
+    const { orgId, proj, ctx } = await bootstrap('FailCreate')
+    // Get the counter state before
+    const counterBefore = await db.query<{ next_number: number }>(
+      `SELECT next_number FROM revision_counters WHERE tenant_id = $1 AND project_id = $2 AND authority_kind = 'estimate'`,
+      [orgId, proj.id],
+    )
+    const counterBeforeVal = counterBefore[0]?.next_number ?? 1
+
+    // Create a valid payload
+    const payload = makePayload(proj.id)
+
+    // We'll sabotage the payload INSERT by pre-inserting a row with the same
+    // revision_id (PK violation). But we don't know the revision_id in advance
+    // (it's generated inside createDraft). Instead, we'll cause a CHECK
+    // violation by temporarily disabling the payload table's permissions.
+    // Actually, the simplest approach: use a raw SQL to make the payload_json
+    // column NOT NULL fail — but it IS NOT NULL already and we pass a valid value.
+    //
+    // The cleanest approach: drop the estimate_revision_payloads table temporarily
+    // to force the INSERT to fail. But that's destructive.
+    //
+    // Best approach: create a trigger that blocks INSERT into
+    // estimate_revision_payloads, forcing the payload write to fail AFTER
+    // the revision metadata has been written.
+
+    // Install a blocking trigger
+    await db.execRaw(`
+      CREATE OR REPLACE FUNCTION block_payload_insert() RETURNS TRIGGER AS $$
+      BEGIN
+        RAISE EXCEPTION 'Test: payload insert blocked';
+      END;
+      $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS trg_block_payload_insert ON estimate_revision_payloads;
+      CREATE TRIGGER trg_block_payload_insert BEFORE INSERT ON estimate_revision_payloads
+        FOR EACH ROW EXECUTE FUNCTION block_payload_insert();
+    `)
+
+    // createDraft should throw because the payload INSERT fails
+    await expect(
+      repos.estRev.createDraft(orgId, proj.id, payload, ctx.actor.kind === 'user' ? ctx.actor.userId : 'svc', new Date().toISOString()),
+    ).rejects.toThrow(/Test: payload insert blocked/i)
+
+    // Remove the blocking trigger
+    await db.execRaw(`DROP TRIGGER IF EXISTS trg_block_payload_insert ON estimate_revision_payloads;`)
+
+    // Verify NO orphaned revision exists
+    const orphanedRevisions = await db.query<{ revision_id: string }>(
+      `SELECT revision_id FROM revisions WHERE tenant_id = $1 AND project_id = $2 AND authority_kind = 'estimate'`,
+      [orgId, proj.id],
+    )
+    expect(orphanedRevisions.length).toBe(0)
+
+    // Verify NO orphaned payload exists
+    const orphanedPayloads = await db.query<{ revision_id: string }>(
+      `SELECT revision_id FROM estimate_revision_payloads WHERE tenant_id = $1 AND project_id = $2`,
+      [orgId, proj.id],
+    )
+    expect(orphanedPayloads.length).toBe(0)
+
+    // Verify the counter was NOT consumed (rolled back)
+    const counterAfter = await db.query<{ next_number: number }>(
+      `SELECT next_number FROM revision_counters WHERE tenant_id = $1 AND project_id = $2 AND authority_kind = 'estimate'`,
+      [orgId, proj.id],
+    )
+    const counterAfterVal = counterAfter[0]?.next_number ?? 1
+    expect(counterAfterVal).toBe(counterBeforeVal) // counter NOT consumed
+
+    // Verify that a subsequent createDraft succeeds with the correct number
+    const payload2 = makePayload(proj.id)
+    const created = await repos.estRev.createDraft(orgId, proj.id, payload2, ctx.actor.kind === 'user' ? ctx.actor.userId : 'svc', new Date().toISOString())
+    expect(created.metadata.revisionNumber).toBe(counterBeforeVal) // same number — counter was rolled back
+  })
+})
+
+// ── §9: FAILURE TEST — UPDATE (payload failure preserves old state) ──
+
+describe('§9: updateDraftPayload payload failure → old state preserved', () => {
+  it('payload UPDATE failure causes content_hash rollback (no hash/payload mismatch)', async () => {
+    const { orgId, proj, ctx } = await bootstrap('FailUpdate')
+    // Create a draft
+    const originalPayload = makePayload(proj.id)
+    const created = await repos.estRev.createDraft(orgId, proj.id, originalPayload, ctx.actor.kind === 'user' ? ctx.actor.userId : 'svc', new Date().toISOString())
+    const originalHash = created.metadata.contentHash
+
+    // Install a blocking trigger on UPDATE of estimate_revision_payloads
+    await db.execRaw(`
+      CREATE OR REPLACE FUNCTION block_payload_update_test() RETURNS TRIGGER AS $$
+      BEGIN
+        RAISE EXCEPTION 'Test: payload update blocked';
+      END;
+      $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS trg_block_payload_update_test ON estimate_revision_payloads;
+      CREATE TRIGGER trg_block_payload_update_test BEFORE UPDATE ON estimate_revision_payloads
+        FOR EACH ROW EXECUTE FUNCTION block_payload_update_test();
+    `)
+
+    // Attempt to update the draft payload — should fail
+    const newPayload = makePayload(proj.id, 600, 200) // different rate + qty
+    await expect(
+      repos.estRev.updateDraftPayload(created.metadata.revisionId, orgId, newPayload),
+    ).rejects.toThrow(/Test: payload update blocked/i)
+
+    // Remove the blocking trigger
+    await db.execRaw(`DROP TRIGGER IF EXISTS trg_block_payload_update_test ON estimate_revision_payloads;`)
+
+    // Verify the OLD content_hash is preserved (not changed to the new hash)
+    const loadedRev = await repos.estRev.getById(created.metadata.revisionId, orgId)
+    expect(loadedRev).not.toBeNull()
+    expect(loadedRev!.metadata.contentHash).toBe(originalHash) // hash unchanged
+
+    // Verify the OLD payload is preserved (not changed to the new payload)
+    expect(loadedRev!.payload.lines[0]!.quantity.value).toBe(100) // original qty, not 200
+    expect(loadedRev!.payload.lines[0]!.rate.amount).toBe(500) // original rate, not 600
+
+    // Verify the replay still matches the original
+    const replayedTotals = replayEstimateRevision(loadedRev!)
+    expect(replayedTotals.totalLineCost.amount).toBe(50000) // 500 × 100, not 600 × 200
+  })
+})

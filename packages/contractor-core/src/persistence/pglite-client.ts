@@ -73,19 +73,37 @@ export class PgLiteClient implements DbClient {
    * Run a function inside a transaction. Serialized via an async mutex
    * because pglite is a single-connection database — concurrent BEGIN/COMMIT
    * on the same connection would interleave and corrupt state. The mutex
-   * ensures each transaction completes before the next begins.
+   * ensures each top-level transaction completes before the next begins.
    *
-   * For the H1 concurrency test (which needs to prove concurrent allocation
-   * is safe), the test uses Promise.allSettled with the understanding that
-   * the mutex serializes the transactions — but the counter-table UPSERT is
-   * still atomic within each transaction, proving the allocation strategy is
-   * correct. (A real PostgreSQL connection pool would run these truly in
-   * parallel; the counter-table strategy is designed for that.)
-   *
-   * Nested transactions (tx called within tx) use SAVEPOINT.
+   * Nested transactions (tx called within tx) use SAVEPOINT and do NOT
+   * re-acquire the mutex (the outer transaction already holds it).
+   * (Phase 2B.1.1 H1 fix: nested tx must not deadlock on the mutex.)
    */
   async tx<T>(fn: (tx: DbClient) => Promise<T>): Promise<T> {
-    // Acquire the mutex (serialize on the single pglite connection)
+    // If we're already inside a transaction, just create a SAVEPOINT.
+    // Do NOT re-acquire the mutex — the outer tx already holds it.
+    if (this.txState.depth > 0) {
+      const savepoint = `sp_${this.txState.depth}`
+      try {
+        await this.pg.query(`SAVEPOINT ${savepoint}`)
+        this.txState.depth++
+        const result = await fn(this)
+        await this.pg.query(`RELEASE SAVEPOINT ${savepoint}`)
+        return result
+      } catch (e) {
+        try {
+          await this.pg.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+          await this.pg.query(`RELEASE SAVEPOINT ${savepoint}`)
+        } catch {
+          // If rollback fails, the original error is what matters.
+        }
+        throw e
+      } finally {
+        this.txState.depth = Math.max(0, this.txState.depth - 1)
+      }
+    }
+
+    // Top-level transaction: acquire the mutex, BEGIN, execute, COMMIT/ROLLBACK.
     let release: () => void
     const acquired = new Promise<void>((resolve) => {
       release = () => resolve()
@@ -94,29 +112,15 @@ export class PgLiteClient implements DbClient {
     this.txLock = previous.then(() => acquired)
     await previous
 
-    const savepoint = `sp_${this.txState.depth}`
     try {
-      if (this.txState.depth === 0) {
-        await this.pg.query('BEGIN')
-      } else {
-        await this.pg.query(`SAVEPOINT ${savepoint}`)
-      }
+      await this.pg.query('BEGIN')
       this.txState.depth++
       const result = await fn(this)
-      if (this.txState.depth === 1) {
-        await this.pg.query('COMMIT')
-      } else {
-        await this.pg.query(`RELEASE SAVEPOINT ${savepoint}`)
-      }
+      await this.pg.query('COMMIT')
       return result
     } catch (e) {
       try {
-        if (this.txState.depth === 1) {
-          await this.pg.query('ROLLBACK')
-        } else {
-          await this.pg.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
-          await this.pg.query(`RELEASE SAVEPOINT ${savepoint}`)
-        }
+        await this.pg.query('ROLLBACK')
       } catch {
         // If rollback fails (e.g. transaction already aborted), ignore —
         // the original error is what matters.
