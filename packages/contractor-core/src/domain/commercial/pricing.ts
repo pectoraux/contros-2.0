@@ -124,28 +124,25 @@ export function grossMargin(sellPrice: Money, cost: Money): Ratio {
 
 /**
  * Markup = grossProfit / cost.
- * Returns a Ratio (0..∞, but typically 0..1). Returns 0 if cost is 0.
+ * Returns the actual mathematical ratio (may exceed 1 = 100%).
+ * Returns 0 if cost is 0.
+ *
+ * NOTE: markup is NOT bounded to [0, 1]. A 300% markup is 3.0, not 1.0.
+ * If a bounded Ratio is needed (e.g. for a policy input), use `ratio()`
+ * at the appropriate input boundary to validate. (Phase 2A.1 M1 fix:
+ * no silent clamping of financial results.)
  */
-export function markup(sellPrice: Money, cost: Money): Ratio {
-  if (cost.amount === 0) return ratio(0)
-  const profit = subtract(sellPrice, cost)
-  const markupFraction = profit.amount / cost.amount
-  // Markup can exceed 1 (e.g. cost=10, sell=30 → markup=2.0=200%); cap at 1
-  // only if the caller expects a Ratio 0..1. For the raw markup, return
-  // the value but note it may exceed 1. We clamp to [0, 1] for the Ratio
-  // type safety; callers needing unbounded markup should use markupRaw().
-  return ratio(Math.max(0, Math.min(1, markupFraction)))
-}
-
-/**
- * Raw markup (may exceed 1 = 100%). Returned as a plain number, NOT a Ratio,
- * because markup is not bounded to 0..1.
- */
-export function markupRaw(sellPrice: Money, cost: Money): number {
+export function markup(sellPrice: Money, cost: Money): number {
   if (cost.amount === 0) return 0
   const profit = subtract(sellPrice, cost)
   return profit.amount / cost.amount
 }
+
+/**
+ * Alias for `markup()` — kept for backward compatibility. Returns the
+ * actual markup ratio (may exceed 1).
+ */
+export const markupRaw = markup
 
 // ── Estimate totals ───────────────────────────────────────────
 

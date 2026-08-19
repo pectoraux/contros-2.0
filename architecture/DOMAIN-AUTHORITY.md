@@ -100,21 +100,50 @@ Phase 1 canonical `contentHash` function. Same payload + same algorithmVersion
 createdBy, createdAt, finalizedAt, status, revisionNumber) is NOT part of the
 content hash — it is identity/audit. (Phase 2A §13; ADR-0007 Decision 5.)
 
-**Estimate-level totals:**
+**Single-currency invariant (Phase 2A.1 M2):** `estimateRevisionPayload()`
+enforces that every EstimateLine's currency matches the payload's currency.
+A mixed-currency payload throws at construction time — it NEVER becomes
+hashable canonical content.
+
+**EstimatePricingPolicy (Phase 2A.1 H2):** the canonical pricing authority
+is estimate-level, NOT per-line. The `EstimatePricingPolicy` carries:
+`overheadPct`, `contingencyPct`, `targetProfitMode` ('markup' | 'margin'),
+`targetProfitRatio`. Per-line `pricingStrategy` + `pricingRatio` are
+adjustment metadata, NOT the canonical sell price authority.
+
+**Estimate-level totals (Phase 2A.1 — hardened):**
 ```
 totalLineCost   = sum(lineCost = quantity × rate)
-overhead        = totalLineCost × overheadPct
-contingency     = totalLineCost × contingencyPct
+contingency     = totalLineCost × contingencyPct   (H1: on DIRECT COST only)
+overhead        = totalLineCost × overheadPct       (H1: on DIRECT COST only)
 totalCost       = totalLineCost + overhead + contingency
-totalSellPrice  = sum(lineSellPrice)
-totalGrossProfit = totalSellPrice - totalCost
-grossMargin     = totalGrossProfit / totalSellPrice
-```
-(Phase 2A §7; ADR-0007 Decision 6.)
 
-**Bid:** references a finalized EstimateRevision by revisionId +
-contentHash. Does NOT duplicate the estimate payload. (Phase 2A §15;
-ADR-0007 Decision 7.)
+markup mode:  profit = totalCost × targetProfitRatio; sellPrice = totalCost + profit
+margin mode:  sellPrice = totalCost / (1 - targetProfitRatio); profit = sellPrice - totalCost
+
+grossProfit     = sellPrice - totalCost
+grossMargin     = grossProfit / sellPrice
+```
+(Phase 2A.1 H1 + H2; ADR-0007 Decisions 6, 11.)
+
+**H1: Overhead on direct cost only (INTENTIONAL CHANGE from legacy):**
+legacy Contros calculated overhead on (direct + contingency). The new model
+calculates overhead on direct cost only. Contingency is a separate cost
+component. (ADR-0007 Decision 11.)
+
+**Bid: explicit commercial decision (Phase 2A.1):** references a finalized
+EstimateRevision by revisionId + contentHash. Does NOT duplicate the payload.
+`finalPrice` is an explicit commercial submission decision — NOT derived from
+the revision's sellPrice. A Bid may intentionally differ because of director
+adjustment, commercial negotiation, or customer strategy. (ADR-0007 Decision 7.)
+
+**Line order is canonical (Phase 2A.1):** line order IS part of canonical
+commercial content. Same lines in different order → different content hash.
+(ADR-0007 Decision 13.)
+
+**BOQ quantity snapshot (Phase 2A.1):** EstimateLine.quantity is a commercial
+snapshot, NOT a live reference to BOQItem.quantity. A finalized EstimateRevision
+is immune to later BOQ changes. (ADR-0007 Decision 14.)
 
 **Code location:** `packages/contractor-core/src/domain/commercial/`.
 Pure, zero external deps, zero Electron, zero persistence.

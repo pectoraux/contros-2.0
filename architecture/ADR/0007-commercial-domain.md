@@ -90,60 +90,129 @@ Sell price from cost:
 `expectedMarginPct` vs `marginPct` (spread) separation. (Legacy
 `pricing-engine.ts` lines 165-174, 600-608.)
 
-## Decision 4 — EstimateLine carries its own pricing strategy
+## Decision 4 — EstimateLine: rate is unit COST; pricing is adjustment metadata
 
-**DECIDED.**
+**DECIDED (Phase 2A.1 — hardened).**
 
 Each `EstimateLine` carries:
 - `quantity` (Quantity — 4-decimal banker's-rounded)
 - `costBasis` ('unit-rate' | 'lump-sum' | 'provisional' | 'scheduled')
-- `rate` (Money per unit, or total for lump-sum)
-- `pricingStrategy` ('markup' | 'margin')
+- `rate` (Money per unit — **unit COST**, not sell price. For lump-sum, this is the total cost.)
+- `pricingStrategy` ('markup' | 'margin') — **line-level pricing adjustment/input**
 - `pricingRatio` (Ratio 0..1; the markup or margin percentage)
+- `currency` (derived from `rate.currency`)
 
-The line's sell price is computed deterministically from cost + strategy.
-This makes the estimate self-contained and replayable. (Phase 2A §7.)
+**CRITICAL (Phase 2A.1 H2 decision):** The line-level `pricingStrategy` +
+`pricingRatio` are **adjustment metadata**, NOT the canonical sell price
+authority. The CANONICAL sell price is estimate-level (see Decision 6).
+The per-line pricing may be used for informational/adjustment purposes,
+but it must NOT silently redefine the estimate's canonical profit authority.
 
-## Decision 5 — EstimateRevision payload + content hash
+The `rate` field has ONE unambiguous meaning: **unit cost**. It is not a
+sell rate or a base rate. (Phase 2A.1 §4.)
 
-**DECIDED.**
+## Decision 5 — EstimateRevision payload + content hash + single-currency
+
+**DECIDED (Phase 2A.1 — hardened).**
 
 `EstimateRevisionPayload`:
 - `projectId`
-- `currency` (CurrencyCode)
-- `policy` (EstimatePolicy: overheadPct + contingencyPct)
-- `lines` (readonly EstimateLine[])
+- `currency` (CurrencyCode — **single currency for the entire revision**)
+- `policy` (EstimatePricingPolicy: overheadPct + contingencyPct + targetProfitMode + targetProfitRatio)
+- `lines` (readonly EstimateLine[] — **all must match payload.currency**)
 - `note` (string | null)
 - `pricingAlgorithmVersion` (string)
 
+**Single-currency invariant (Phase 2A.1 M2 fix):** `estimateRevisionPayload()`
+enforces that every EstimateLine's `currency` matches the payload's
+`currency`. A mixed-currency payload throws at construction time — it
+NEVER becomes hashable canonical content. (Phase 2A.1 §6.)
+
 The content hash is computed from the payload using the Phase 1 canonical
 `contentHash` function (canonicalize → SHA-256). Same payload + same
-algorithmVersion = same content hash → same historical result. (Phase 2A §13;
-master §13/§14/§15.)
+algorithmVersion = same content hash → same historical result.
 
 **Excludes from content hash:** revisionId, tenantId, createdBy, createdAt,
 finalizedAt, status, revisionNumber — those are metadata (identity/audit),
 not content. (master §15: content integrity separate from authorship.)
 
-## Decision 6 — Estimate-level totals
+## Decision 6 — Estimate-level profit model (Phase 2A.1 H2 — INTENTIONAL CHANGE)
 
 **DECIDED.**
 
+The CANONICAL sell price is **estimate-level**, not per-line. This is an
+INTENTIONAL CHANGE from the Phase 2A per-line model. The canonical
+commercial model is:
+
 ```
-totalLineCost   = sum(lineCost)                    [sum of quantity × rate]
-overhead        = totalLineCost × overheadPct       [estimate-level recovery]
-contingency     = totalLineCost × contingencyPct   [estimate-level risk]
+DIRECT COST
+    ↓
+CONTINGENCY
+    ↓
+OVERHEAD
+    ↓
+TARGET PROFIT / SELL PRICE
+```
+
+### EstimatePricingPolicy
+
+```
+EstimatePricingPolicy:
+  overheadPct        = Ratio (0..1)
+  contingencyPct      = Ratio (0..1)
+  targetProfitMode     = 'markup' | 'margin'
+  targetProfitRatio    = Ratio (0..1)
+```
+
+### Canonical computation
+
+```
+totalLineCost   = sum(lineCost = rate × quantity)
+contingency     = totalLineCost × contingencyPct   (H1: on DIRECT COST only)
+overhead        = totalLineCost × overheadPct       (H1: on DIRECT COST only)
 totalCost       = totalLineCost + overhead + contingency
-totalSellPrice  = sum(lineSellPrice)               [sum of per-line sell prices]
-totalGrossProfit = totalSellPrice - totalCost
-grossMargin     = totalGrossProfit / totalSellPrice
+
+markup mode:
+  profit       = totalCost × targetProfitRatio
+  sellPrice    = totalCost + profit
+
+margin mode:
+  sellPrice    = totalCost / (1 - targetProfitRatio)
+  profit       = sellPrice - totalCost
+
+grossProfit     = sellPrice - totalCost
+grossMargin     = grossProfit / sellPrice
 ```
 
-Per-line sell price is computed from the line's pricingStrategy (markup or
-margin). Overhead + contingency are estimate-level (applied to total line
-cost, not per-line). (Phase 2A §7; legacy `pricing-engine.ts` cost buildup.)
+### Why this is preferred over the per-line model
 
-## Decision 7 — Bid references EstimateRevision
+The per-line model (`sellPrice = sum(lineCost × (1 + markup))`) makes
+overall profitability depend accidentally on line-level pricing choices.
+If per-line markup is insufficient to cover overhead + contingency, the
+estimate can produce a negative gross profit — an accidental loss.
+
+The estimate-level model makes profitability EXPLICIT: the target profit
+ratio is a deliberate commercial decision, not an emergent property of
+line-level adjustments. Per-line pricing remains as adjustment metadata.
+
+### Negative-profit policy
+
+If `targetProfitRatio > 0` and `targetProfitMode = 'markup'`, then
+`sellPrice >= totalCost` (profit is always non-negative). A bid below
+cost is represented as an explicit commercial decision on the Bid (a
+negative `directorAdjustment`), not an accidental consequence of
+line-level markup. (Phase 2A.1 §5.)
+
+### Line-level pricing role
+
+Line-level `pricingStrategy` + `pricingRatio` remain on `EstimateLine` as
+adjustment metadata. They are part of the content hash (captured for
+reproducibility) but do NOT determine the canonical sell price. The exact
+interaction between per-line pricing and the estimate-level policy is a
+boundary that may be refined when Pricing Knowledge is introduced. The
+canonical authority is the estimate-level policy.
+
+## Decision 7 — Bid: explicit commercial decision (Phase 2A.1 — hardened)
 
 **DECIDED.**
 
@@ -152,6 +221,12 @@ A `Bid` references a finalized `EstimateRevision` by `estimateRevisionId` +
 estimate payload. The Bid carries: status (draft/submitted/won/lost/withdrawn),
 finalPrice (may include director adjustment), directorAdjustment,
 adjustmentRationale, submittedAt, outcomeAt, outcomeNote.
+
+**finalPrice is an explicit commercial submission decision** — it is NOT
+automatically derived from `EstimateRevision.totalSellPrice`. A Bid may
+intentionally differ from the estimate because of director adjustment,
+commercial negotiation, or customer strategy. The difference is explicit
+and auditable. (Phase 2A.1 §10.)
 
 `validateBidSubmission` enforces: estimateRevisionId set, revision exists +
 is finalized, finalPrice set. (Phase 2A §15; legacy `validateBidSubmission`.)
@@ -177,27 +252,92 @@ is finalized, finalPrice set. (Phase 2A §15; legacy `validateBidSubmission`.)
   `CandidateBOQLine` — but these are suggestions. AI cannot establish
   EstimateRevision or Bid authority. (Phase 2A §17; ARCHITECTURE.md invariant 8.)
 
-## Decision 10 — No persistence in Phase 2A
+## Decision 10 — No persistence in Phase 2A/2A.1
 
 **DECIDED.**
 
-Phase 2A is DOMAIN MODE only. No SQL, no Prisma, no migrations, no HTTP, no
+Phase 2A/2A.1 is DOMAIN MODE only. No SQL, no Prisma, no migrations, no HTTP, no
 UI. The commercial contracts are pure TypeScript + deterministic algorithms
-+ replay tests. Persistence + application services + API come in a later
-phase, building on these contracts. (Phase 2A §21.)
++ replay tests. Persistence + application services + API come in Phase 2B,
+building on these hardened contracts. (Phase 2A §21; Phase 2A.1 §15.)
+
+## Decision 11 — H1: Overhead on direct cost only (INTENTIONAL CHANGE)
+
+**DECIDED (Phase 2A.1).**
+
+### QUESTION
+Should overhead be calculated on direct cost only, or on direct cost +
+contingency (legacy behavior)?
+
+### EVIDENCE
+Legacy Contros: `overhead = (directCost + riskCost) × overheadPct` where
+`riskCost = directCost × contingencyPct`. The overhead base includes
+contingency.
+
+### OPTIONS
+1. Legacy: `overhead = (directCost + contingency) × overheadPct`.
+2. New: `overhead = directCost × overheadPct` (contingency excluded from base).
+
+### TRADE-OFFS
+Legacy compounds contingency into the overhead base, which increases the
+total cost. The new approach treats overhead and contingency as independent
+cost components on the same direct-cost base, which is simpler and more
+transparent.
+
+### DECISION
+**Option 2 — overhead on direct cost only.** Contingency is a separate
+cost component. This is an INTENTIONAL CHANGE from legacy.
+
+### CONSEQUENCES
+For the same inputs, the new model produces a lower total cost than legacy
+(by `contingency × overheadPct`). Example: direct=1000, contingency=50,
+overhead=10% → legacy overhead=105, new overhead=100 (difference: 5 GHS).
+This is documented and tested. Future reconciliation with legacy estimates
+must account for this difference.
+
+## Decision 12 — M1: markup() returns actual ratio (no clamping)
+
+**DECIDED (Phase 2A.1).**
+
+The `markup()` function returns the actual mathematical ratio (a plain
+`number`, which may exceed 1 = 100%). It does NOT silently clamp to [0, 1].
+If a bounded Ratio is needed (e.g. for a policy input), use `ratio()` at
+the appropriate input boundary to validate. (Phase 2A.1 §7.)
+
+## Decision 13 — Line order is canonical (ACCEPT)
+
+**DECIDED (Phase 2A.1).**
+
+EstimateRevision line order IS part of canonical commercial content.
+An EstimateRevision represents an ordered commercial document (matching
+legacy `RevisionSnapshot.lines` which is an ordered array). Same lines in
+different order → different content hash. (Phase 2A.1 §8.)
+
+## Decision 14 — BOQ quantity snapshot (not live reference)
+
+**DECIDED (Phase 2A.1).**
+
+`EstimateLine.quantity` is a commercial SNAPSHOT taken at estimate creation.
+It is NOT a live reference to `BOQItem.quantity`. A finalized
+`EstimateRevision` is immune to later BOQ changes. The link between a
+`BOQItem` and an `EstimateLine` is by reference (`boqItemId`), not by
+live value. (Phase 2A.1 §9.)
 
 ## Legacy Contros findings
 
 | Legacy behavior | Current contract | Decision |
 | --- | --- | --- |
 | `round2` — banker's rounding at 2 decimals, GHS | `bankerRound` + Money (minor units, currency-specific decimals) | ADOPT (generalized to any currency's decimals) |
-| `priceLine` — cost buildup: material+labour+plant+subcontract+fee → directCost → risk → overhead → profit → sellPrice | `EstimateLine` carries rate+strategy; `computeEstimateRevisionTotals` computes line cost + sell + overhead + contingency | ADOPT (simplified: per-line markup/margin instead of full recipe engine; recipe engine deferred to Pricing Knowledge) |
+| Cost buildup: material+labour+plant+subcontract+fee → directCost | `EstimateLine` carries rate (unit cost); `lineCost = rate × qty` | INTENTIONAL CHANGE (simplified cost model; recipe engine deferred to Pricing Knowledge) |
+| `overhead = (directCost + riskCost) × overheadPct` (includes contingency in base) | `overhead = totalLineCost × overheadPct` (direct cost only) | **INTENTIONAL CHANGE** (H1: overhead on direct cost only) |
+| `profit = estimatedTotalCost × profitPct` (estimate-level markup) | `profit = totalCost × targetProfitRatio` (estimate-level, markup or margin mode) | ADOPT (estimate-level profit model preserved, with explicit mode) |
+| `sellPrice = estimatedTotalCost + profit` (estimate-level) | `sellPrice = totalCost + profit` (markup) or `totalCost / (1 - ratio)` (margin) | ADOPT (estimate-level sell price; per-line sell removed as canonical authority) |
 | `expectedMarginPct` vs `marginPct` (spread) distinction | `grossMargin` (profit/sell) vs `markup` (profit/cost) | ADOPT (explicit margin vs markup distinction) |
 | `finalizeRevision` — captures immutable snapshot JSON | `EstimateRevisionPayload` + content hash | ADOPT (same pattern: immutable payload + hash) |
 | `replayRevision` — reconstructs result from snapshot | `replayEstimateRevision` — reconstructs totals from payload | ADOPT (same replay pattern) |
 | `validateBidSubmission` — gate before submit | `validateBidSubmission` — same gate | ADOPT |
-| `PricingEngine` — full recipe (CostRecipeLine, WorkDefinitionVersion, ExecutionSegment, SubcontractQuote) | NOT ported in Phase 2A — EstimateLine carries rate+strategy directly | DEFER (recipe-based pricing belongs to Pricing Knowledge, not the estimate contract) |
-| Legacy Prisma schema, Next.js routes, UI | NOT ported | REJECT (per master prompt §28: port behavior/contracts, not implementation boundaries) |
+| `PricingEngine` — full recipe (CostRecipeLine, WorkDefinitionVersion, ExecutionSegment, SubcontractQuote) | NOT ported — EstimateLine carries rate directly | DEFER (recipe-based pricing belongs to Pricing Knowledge) |
+| Legacy Prisma schema, Next.js routes, UI | NOT ported | REJECT (per master prompt §28) |
 
 ## Consequences
 
@@ -228,9 +368,15 @@ phase, building on these contracts. (Phase 2A §21.)
 
 ## Verification
 
-- 65 new Commercial tests pass (money 21, pricing 18, estimate-revision 13,
+- 80 Commercial tests pass (money 21, pricing 18, estimate-revision 28,
   bid 6, architecture 7).
-- Full suite: 196/196 pass (131 foundation + 65 commercial). Zero regressions.
+- Full suite: 211/211 pass (131 foundation + 80 commercial). Zero regressions.
 - TypeScript clean (`tsc --noEmit`, 0 errors).
 - All tests pure (no DB, no network, no filesystem, no Electron, no mocks).
 - Replay tests prove: same payload → same content hash → same totals.
+- H1 regression test: overhead = totalLineCost × overheadPct (NOT (totalLineCost + contingency) × overheadPct).
+- H2 regression test: estimate-level profit (markup + margin modes); positive profit ratio → sellPrice >= totalCost.
+- M1 regression test: markup() returns 3.0 for 300% markup (not clamped to 1.0).
+- M2 regression test: mixed-currency payload throws at construction time (never hashable).
+- Line-order regression test: same lines, different order → different hash.
+- BOQ snapshot regression test: EstimateLine quantity is independent of BOQItem quantity.

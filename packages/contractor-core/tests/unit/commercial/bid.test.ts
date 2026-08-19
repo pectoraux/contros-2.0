@@ -19,7 +19,7 @@ import type { RevisionMetadata } from '../../../src/domain/types.js'
 function makeFinalizedRevision(): EstimateRevision {
   const payload = estimateRevisionPayload({
     projectId: 'proj_1', currency: currencyCode('GHS'),
-    policy: { overheadPct: ratio(0.10), contingencyPct: ratio(0.05) },
+    policy: { overheadPct: ratio(0.10), contingencyPct: ratio(0.05), targetProfitMode: 'markup', targetProfitRatio: ratio(0.10) },
     lines: [estimateLine({
       lineId: 'l1', boqItemId: null, description: 'Concrete',
       quantity: quantity(100, UNITS.SQUARE_METRE),
