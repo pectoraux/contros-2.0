@@ -1,9 +1,11 @@
 # ADR-0007: Commercial Domain Contracts
 
-> **Status: PROPOSED.** Phase 2A — Commercial domain contracts. Pure domain
-> contracts + deterministic algorithms + replay tests. No persistence, no UI,
-> no HTTP, no schema. This ADR records the commercial authority model and the
-> pricing/money/rounding decisions.
+> **Status: PROPOSED (Phase 2A); extended in Phase 2A.1, 2A.2, 2B.1,
+> 2B.1.1, 2B.2, 2B.2.1.** Decisions 1-17 record the commercial authority
+> model and the pricing/money/rounding/audit-atomicity decisions. Decision 18
+> (Audit Atomicity) and Decision 19 (Draft Bid Reference) were added in
+> Phase 2B.2.1 and are implemented by the Commercial application services +
+> committed audit-failure rollback tests.
 
 ## Context
 
@@ -362,6 +364,174 @@ Margin mode with `targetProfitRatio >= 1` is rejected with a
 less than 100%". This prevents the generic "Money divide by zero" error
 from reaching the caller. (Phase 2A.2 §7.)
 
+## Decision 18 — Audit Atomicity (Phase 2B.2.1)
+
+**DECIDED (Phase 2B.2.1).**
+
+### QUESTION
+
+When an authority-changing Commercial operation mutates a business row
+(e.g. a draft revision becomes finalized, a draft bid becomes submitted),
+must the required audit event commit in the same database transaction as
+the business mutation, or may the audit be emitted afterwards (business
+commit, then audit, eventually consistent)?
+
+### EVIDENCE
+
+- The constitution's priority order is **correctness > architectural
+  integrity > historical correctness > auditability > determinism >
+  tenant isolation**. An audit event that commits while the business
+  mutation rolled back (or vice versa) breaks both correctness and
+  auditability.
+- The Phase 2B.2.1 independent audit found that the Commercial services
+  emitted audit events **after** the business commit — a separate write.
+  If the audit write failed, the business mutation persisted with **no
+  audit record**, producing an un-auditable authority change (the exact
+  failure mode the constitution forbids).
+- The `DbClient.tx()` contract supports nested transactions via
+  SAVEPOINT (Phase 2B.1.1), and every repository + the
+  `AuditRepository.append()` share the same `DbClient` instance, so an
+  audit write issued inside an outer service transaction participates in
+  the same transaction without any new abstraction.
+
+### OPTIONS
+
+1. **Atomic (same transaction):** business mutation + required audit
+   event commit in ONE `db.tx()`. If either fails, both roll back.
+2. **Eventual consistency (outbox / event bus / audit-later):** business
+   commits first; audit is emitted asynchronously; a reconciliation
+   process repairs gaps.
+3. **Sequential (business commit, then audit, best-effort):** no
+   transaction boundary around both; an audit failure leaves the
+   business mutation persisted without an audit record.
+
+### TRADE-OFFS
+
+- Option 1 ties audit emission to the transaction's commit. It makes an
+  audit-write failure (trigger, constraint, disk) **fail the entire
+  authority change**, which is the intended safe behavior: it is better
+  to refuse an authority change than to allow an un-auditable one. The
+  cost is a slightly larger transaction (one extra row + the audit
+  trigger firing inside it).
+- Option 2 (outbox) decouples durability of the business mutation from
+  audit delivery and is attractive for cross-service audit sinks. But it
+  introduces a second durable substrate (the outbox), a delivery loop,
+  and a new failure class (delivered-but-business-rolled-back, or
+  business-committed-but-audit-never-delivered). That complexity is not
+  justified for the single-process, single-database Commercial domain.
+- Option 3 is the pre-Phase-2B.2.1 behavior and is rejected: it is
+  exactly the gap the independent audit identified.
+
+### RECOMMENDATION
+
+Option 1. Authority changes are rare, high-value, and must be auditable.
+The cost of a slightly larger transaction is negligible; the cost of an
+un-auditable authority change is a constitutional violation.
+
+### DECISION
+
+**Option 1 — atomic.** Every authority-changing Commercial operation
+and its required audit event must commit in the **same database
+transaction**:
+
+```text
+business mutation + required audit event = one atomic commit
+```
+
+If either fails:
+
+```text
+ROLLBACK (both)
+```
+
+Concretely, each authority-changing `*Service` method is structured:
+
+```text
+requirePermission(ctx, …)          // authorization (before tx)
+validate / load / hash-check        // validation (before tx)
+db.tx(async () => {
+  business mutation                 // repository write(s)
+  audit.append({ … })               // audit write — same transaction
+})
+```
+
+Authorization and validation run **before** the transaction opens, so a
+permission or validation failure produces **zero** business writes and
+**zero** audit writes. The transaction boundary owns the atomicity of
+the mutation + audit pair.
+
+**Rejected for the current architecture:** business commit → audit
+later → eventual consistency (Option 3), and the outbox / event bus /
+queue (Option 2). No outbox is introduced in this phase.
+
+### CONSEQUENCES
+
+- An audit-insert failure (trigger, constraint, disk) now rolls back
+  the entire authority change. This is verified by committed
+  audit-failure rollback tests against real PostgreSQL (pglite) for
+  every authority-changing Commercial operation: finalize, update,
+  supersede, bid submit, bid outcome, bid withdraw, BOQ item mutation,
+  PlanMeasurement creation.
+- A successful authority change produces **exactly one** audit event
+  for the operation. Existing success-path tests assert
+  `toHaveLength(1)` rather than `find(...).toBeDefined()`.
+- `Bid.submittedAt` and `Bid.outcomeAt` are populated by the **same**
+  UPDATE that sets `status`, inside the same transaction as the audit
+  write — so a submitted Bid can never exist without `submittedAt`, and
+  an outcome can never exist without `outcomeAt`. (Phase 2B.2.1 Me2 fix.)
+- Timestamps are **server/application-controlled** (`new Date().toISOString()`
+  captured once per operation, used for both the business mutation and
+  the audit event). No client-supplied timestamp path is introduced.
+- No new transaction abstraction, no outbox, no event bus, no second
+  audit repository. The approved invariant is implemented with the
+  existing `DbClient.tx()` + shared-`db` `AuditRepository`.
+
+### DEFERRED QUESTIONS
+
+- Cross-service audit sinks (e.g. an external SIEM consuming audit
+  events) are out of scope. If required, they would consume the
+  committed `audit_events` table via replication/CDC, NOT via an outbox
+  in the authority-change transaction.
+- Outbox semantics for **non-authority** events (e.g. notification
+  side-effects) are not addressed here; this decision applies only to
+  authority-changing Commercial operations and their required audit.
+
+## Decision 19 — Draft Bid Reference (Phase 2B.2.1)
+
+**DECIDED (Phase 2B.2.1).**
+
+A **draft** `Bid` may reference a **draft** `EstimateRevision`. This is
+deliberate and supports the commercial workflow of drafting a bid before
+the estimate is finalized.
+
+`BidService.submitBid()` enforces the authority gate:
+
+```text
+EstimateRevision.status = finalized
+AND
+Bid.estimateRevisionContentHash = actual revision content hash
+```
+
+A submission that references a non-finalized revision, or whose stored
+content hash no longer matches the actual revision content hash, is
+rejected with `ValidationError` / `ConflictError` before the
+authority-changing transaction opens.
+
+This separates **drafting** (cheap, reversible, may point at a draft
+estimate) from **submission** (the authority-changing transition, which
+requires a finalized, hash-matching estimate).
+
+### CONSEQUENCES
+
+- `createBid` does NOT require the referenced revision to be finalized;
+  it only requires same-tenant + same-project existence.
+- `submitBid` requires `finalized` + hash match. The content hash is
+  computed from the **actual** revision at submit time (not a
+  client-supplied hash), so a tampered bid hash or a revision that
+  changed after the bid was drafted is detected.
+- A draft bid referencing a draft estimate can be withdrawn without
+  ever being submitted.
+
 ## Legacy Contros findings
 
 | Legacy behavior | Current contract | Decision |
@@ -407,11 +577,22 @@ from reaching the caller. (Phase 2A.2 §7.)
 
 ## Verification
 
-- 93 Commercial tests pass (money 21, pricing 18, estimate-revision 41,
-  bid 6, architecture 7).
-- Full suite: 224/224 pass (131 foundation + 93 commercial). Zero regressions.
+- 93 Commercial domain tests pass (money 21, pricing 18, estimate-revision 41,
+  bid 6, architecture 7) — pure unit tests, no DB.
+- Commercial persistence + application-service integration tests run against
+  REAL PostgreSQL (pglite — PostgreSQL 16 WASM). No mocks of the database,
+  transaction, or audit boundary.
+- Audit-atomicity regression tests (Phase 2B.2.1, Decision 18): forcing
+  `INSERT INTO audit_events` to fail via a temporary trigger proves the
+  business mutation rolls back for every authority-changing Commercial
+  operation — finalize, update, supersede, bid submit, bid outcome, bid
+  withdraw, BOQ item mutation, PlanMeasurement creation.
+- Success-path audit tests assert **exactly one** audit event per
+  authority-changing operation (`toHaveLength(1)`), not merely `>= 1`.
+- `Bid.submittedAt` / `Bid.outcomeAt` success-path assertions: a submitted
+  Bid always has `submittedAt != null`; an outcome always has
+  `outcomeAt != null` and preserves `outcomeNote`.
 - TypeScript clean (`tsc --noEmit`, 0 errors).
-- All tests pure (no DB, no network, no filesystem, no Electron, no mocks).
 - Replay tests prove: same payload → same content hash → same totals.
 - H1 regression test: overhead = totalLineCost × overheadPct (NOT (totalLineCost + contingency) × overheadPct).
 - H2 regression test: estimate-level profit (markup + margin modes); positive profit ratio → sellPrice >= totalCost.

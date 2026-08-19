@@ -47,7 +47,11 @@ Every request crosses every layer. No layer is skipped.
 - Calls pure domain functions for deterministic algorithms.
 - Calls adapters to mediate external engines (Univer, scheduling, BIM viewer).
 - Finalizes AI candidates into authorities (AI never finalizes directly).
-- Emits audit events for every authority-changing action.
+- Emits audit events for every authority-changing action. The audit
+  event commits in the **same database transaction** as the business
+  mutation (ADR-0007 Decision 18 — Audit Atomicity). If either fails, both
+  roll back. No outbox, no audit-later, no eventual consistency for
+  authority changes.
 
 ### Repository
 
@@ -185,7 +189,8 @@ section 8):
 
 ```
 cloud planner -> untrusted command DSL -> local validation + dry-run
-            -> user approval -> atomic commit -> audit
+            -> user approval -> atomic commit (business mutation + audit
+                                   in ONE transaction — ADR-0007 D18)
 ```
 
 Contractor GenOffice inherits this. Specifically:

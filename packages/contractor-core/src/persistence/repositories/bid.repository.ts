@@ -91,4 +91,31 @@ export class BidRepository {
     )
     return rows[0] ? mapRow(rows[0]) : null
   }
+
+  /**
+   * Submit a bid: set status=submitted + submitted_at atomically.
+   * (Phase 2B.2.1 Me2 fix: submittedAt populated.)
+   */
+  async submit(bidId: string, tenantId: string, submittedAt: string): Promise<Bid | null> {
+    const rows = await this.db.queryReturning<BidRow>(
+      `UPDATE bids SET status = 'submitted', submitted_at = $3
+       WHERE bid_id = $1 AND tenant_id = $2 AND status = 'draft'
+       RETURNING *`,
+      [bidId, tenantId, submittedAt],
+    )
+    return rows[0] ? mapRow(rows[0]) : null
+  }
+
+  /**
+   * Record bid outcome: set status + outcome_at + outcome_note atomically.
+   */
+  async recordOutcome(bidId: string, tenantId: string, outcome: 'won' | 'lost', outcomeAt: string, note?: string): Promise<Bid | null> {
+    const rows = await this.db.queryReturning<BidRow>(
+      `UPDATE bids SET status = $3, outcome_at = $4, outcome_note = $5
+       WHERE bid_id = $1 AND tenant_id = $2 AND status = 'submitted'
+       RETURNING *`,
+      [bidId, tenantId, outcome, outcomeAt, note ?? null],
+    )
+    return rows[0] ? mapRow(rows[0]) : null
+  }
 }

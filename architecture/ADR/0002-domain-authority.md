@@ -74,8 +74,10 @@ User edits estimate workbook (Univer UI)
   -> WorkbookAdapter.plan(change)        # representation-level plan
   -> user approves
   -> application service.finalizeEstimateRevision(inputs, audit)
-  -> EstimateRevision repository.create(...)   # immutable authority
-  -> audit event emitted
+       └─ ONE db.tx(): repository.create(...) + audit.append(...) commit
+          together (ADR-0007 Decision 18 — Audit Atomicity). If either
+          fails, both roll back.
+  -> EstimateRevision (immutable authority) + audit event persist together
 ```
 
 The `.xlsx` file on disk is still byte-preserved by `xlsx-gateway`. The

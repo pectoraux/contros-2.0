@@ -113,3 +113,55 @@ describe('architecture: domain does not import persistence', () => {
     expect(violations.map((v) => v.rel)).toEqual([])
   })
 })
+
+/**
+ * Architecture: services must NOT contain raw SQL. SQL belongs in the
+ * persistence/repository layer; the service orchestrates repositories + audit
+ * inside a transaction. This keeps the service layer testable without a
+ * database and prevents SQL from leaking across the boundary.
+ *
+ * To avoid false positives from comments and docstrings, this test inspects
+ * only non-comment, code lines and matches SQL statements that are actually
+ * executed or passed as string literals to a query function. The recognized
+ * patterns are leading-keyword SQL statements (INSERT INTO, UPDATE ... SET,
+ * DELETE FROM, SELECT ... FROM) at the start of a string literal or template
+ * literal — the forms the repositories actually use.
+ * (Phase 2B.2.1 audit §19 gap closure.)
+ */
+describe('architecture: service layer contains no raw SQL', () => {
+  it('src/service/ does NOT contain INSERT/UPDATE/DELETE/SELECT SQL statements', () => {
+    const serviceFiles = readSrcFiles().filter((f) => f.rel.startsWith('service/'))
+    // Match SQL statements inside string/template literals, ignoring comment lines.
+    // Patterns are anchored to a quote/backtick to reduce false positives.
+    const sqlStatement = /['"`]\s*(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|SELECT\s+[\s\S]*?\s+FROM)/i
+    const violations = serviceFiles.filter((f) => {
+      const lines = f.content.split('\n')
+      return lines.some((line) => {
+        // Skip comment-only lines (// or * or /*) — these never execute.
+        const trimmed = line.trim()
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return false
+        return sqlStatement.test(line)
+      })
+    })
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})
+
+/**
+ * Architecture: repositories must NOT import services. The dependency
+ * direction is service → repository (the service orchestrates repositories),
+ * never the reverse. A repository importing a service would create a cycle
+ * and invert the layering.
+ * (Phase 2B.2.1 audit §19 gap closure.)
+ */
+describe('architecture: repositories do not import services', () => {
+  it('src/persistence/repositories/ does NOT import from src/service/', () => {
+    const repoFiles = readSrcFiles().filter((f) => f.rel.startsWith('persistence/repositories/'))
+    const violations = repoFiles.filter((f) =>
+      /from\s+['"](\.\.\/){1,}service/.test(f.content) ||
+      /from\s+['"]@contractor\/core\/service['"]/.test(f.content) ||
+      /from\s+['"]\.\.\/\.\.\/service/.test(f.content),
+    )
+    expect(violations.map((v) => v.rel)).toEqual([])
+  })
+})

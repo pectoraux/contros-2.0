@@ -117,10 +117,10 @@ beforeAll(async () => {
   }
 
   services = {
-    estimates: new EstimateService(repos.estRev, repos.projects, repos.audit),
-    boqs: new BOQService(repos.boq, repos.projects, repos.audit),
-    bids: new BidService(repos.bids, repos.estRev, repos.audit),
-    measurements: new PlanMeasurementService(repos.pm, repos.projects, repos.audit),
+    estimates: new EstimateService(db, repos.estRev, repos.projects, repos.audit),
+    boqs: new BOQService(db, repos.boq, repos.projects, repos.audit),
+    bids: new BidService(db, repos.bids, repos.estRev, repos.audit),
+    measurements: new PlanMeasurementService(db, repos.pm, repos.projects, repos.audit),
   }
 })
 
@@ -317,13 +317,13 @@ describe('EstimateService', () => {
     expect(draft.metadata.contentHash).toBe(estimateRevisionContentHash(payload))
     expect(draft.metadata.revisionNumber).toBeGreaterThanOrEqual(1)
 
-    // Audit was emitted (estimate.draft_created action)
+    // Audit was emitted (estimate.draft_created action) — exactly one
     const events = await auditEventsFor(orgId, 'revision', draft.metadata.revisionId)
-    const created = events.find((e) => e.action === 'estimate.draft_created')
-    expect(created, 'audit event estimate.draft_created must be emitted').toBeDefined()
-    expect(created!.actorId).toBe(user.id)
-    expect(created!.operation).toBe('create_draft')
-    expect(created!.metadata).toMatchObject({ projectId: projId })
+    const created = events.filter((e) => e.action === 'estimate.draft_created')
+    expect(created, 'audit event estimate.draft_created must be emitted').toHaveLength(1)
+    expect(created[0]!.actorId).toBe(user.id)
+    expect(created[0]!.operation).toBe('create_draft')
+    expect(created[0]!.metadata).toMatchObject({ projectId: projId })
 
     // Project existence is verified — a non-existent project throws NotFoundError
     await expect(
@@ -372,12 +372,12 @@ describe('EstimateService', () => {
     expect(updated.payload.lines[0]!.quantity.value).toBe(200)
     expect(updated.payload.lines[0]!.rate.amount).toBe(600)
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'revision', draft.metadata.revisionId)
-    expect(events.find((e) => e.action === 'estimate.draft_updated')).toBeDefined()
+    expect(events.filter((e) => e.action === 'estimate.draft_updated')).toHaveLength(1)
   })
 
-  it('finalizeEstimate: draft→finalized; audit emitted', async () => {
+  it('finalizeEstimate: draft→finalized; exactly one audit; finalizedAt set', async () => {
     const { projId, ctx } = await bootstrap('ES_Finalize')
     const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
 
@@ -385,12 +385,12 @@ describe('EstimateService', () => {
     expect(finalized.metadata.status).toBe('finalized')
     expect(finalized.metadata.finalizedAt).not.toBeNull()
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'revision', draft.metadata.revisionId)
-    expect(events.find((e) => e.action === 'estimate.finalized')).toBeDefined()
+    expect(events.filter((e) => e.action === 'estimate.finalized')).toHaveLength(1)
   })
 
-  it('supersedeEstimate: only finalized→superseded', async () => {
+  it('supersedeEstimate: only finalized→superseded; exactly one audit', async () => {
     const { projId, ctx } = await bootstrap('ES_Supersede')
     const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
     const finalized = await services.estimates.finalizeEstimate(ctx, draft.metadata.revisionId)
@@ -398,9 +398,9 @@ describe('EstimateService', () => {
     const superseded = await services.estimates.supersedeEstimate(ctx, finalized.metadata.revisionId)
     expect(superseded.metadata.status).toBe('superseded')
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'revision', draft.metadata.revisionId)
-    expect(events.find((e) => e.action === 'estimate.superseded')).toBeDefined()
+    expect(events.filter((e) => e.action === 'estimate.superseded')).toHaveLength(1)
   })
 
   it('replayEstimate: load→reconstruct→verify hash→compute totals; contentHashMatches=true', async () => {
@@ -453,9 +453,9 @@ describe('BidService', () => {
     // The bid's hash MUST match the actual revision's hash (computed by service)
     expect(bid.estimateRevisionContentHash).toBe(finalized.metadata.contentHash)
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
-    expect(events.find((e) => e.action === 'bid.created')).toBeDefined()
+    expect(events.filter((e) => e.action === 'bid.created')).toHaveLength(1)
 
     // Cross-tenant bid: Tenant B tries to create a bid referencing Tenant A's
     // revision. The revision lookup is tenant-scoped → NotFoundError (existence
@@ -476,17 +476,31 @@ describe('BidService', () => {
     ).rejects.toBeInstanceOf(NotFoundError)
   })
 
-  it('submitBid: verifies finalized revision, runs validateBidSubmission, status→submitted', async () => {
+  it('submitBid: verifies finalized revision, runs validateBidSubmission, status→submitted, submittedAt set, exactly one audit', async () => {
     const { projId, ctx } = await bootstrap('Bid_Submit')
     const finalized = await createFinalizedEstimate(ctx, projId)
     const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
 
     const submitted = await services.bids.submitBid(ctx, bid.bidId)
     expect(submitted.status).toBe('submitted')
+    // Phase 2B.2.1 Me2 fix: submittedAt populated atomically with status
+    expect(submitted.submittedAt).not.toBeNull()
+    expect(typeof submitted.submittedAt).toBe('string')
+    // ISO 8601 sanity
+    expect(() => new Date(submitted.submittedAt!).toISOString()).not.toThrow()
 
-    // Audit emitted
+    // Reload from DB to verify the persisted domain value (not just the return value)
+    const reloaded = await services.bids.getBid(ctx, bid.bidId)
+    expect(reloaded.status).toBe('submitted')
+    expect(reloaded.submittedAt).not.toBeNull()
+    expect(reloaded.submittedAt).toBe(submitted.submittedAt)
+
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
-    expect(events.find((e) => e.action === 'bid.submitted')).toBeDefined()
+    const submitEvents = events.filter((e) => e.action === 'bid.submitted')
+    expect(submitEvents).toHaveLength(1)
+    // The audit timestamp is the same authoritative value used for the business mutation
+    expect(submitEvents[0]!.timestamp).toBe(submitted.submittedAt)
   })
 
   it('submitBid rejects when revision is not finalized', async () => {
@@ -500,7 +514,7 @@ describe('BidService', () => {
     await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ValidationError)
   })
 
-  it('recordBidOutcome: submitted→won/lost; terminal states rejected', async () => {
+  it('recordBidOutcome: submitted→won; outcomeAt set, outcomeNote preserved, exactly one audit', async () => {
     const { projId, ctx } = await bootstrap('Bid_Outcome')
     const finalized = await createFinalizedEstimate(ctx, projId)
     const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
@@ -509,18 +523,32 @@ describe('BidService', () => {
     const won = await services.bids.recordBidOutcome(ctx, bid.bidId, 'won', 'Awarded')
     expect(won.status).toBe('won')
     expect(won.bidId).toBe(submitted.bidId)
+    // Phase 2B.2.1: outcomeAt populated atomically with status; outcomeNote preserved
+    expect(won.outcomeAt).not.toBeNull()
+    expect(typeof won.outcomeAt).toBe('string')
+    expect(won.outcomeNote).toBe('Awarded')
+
+    // Reload from DB to verify persisted domain values
+    const reloaded = await services.bids.getBid(ctx, bid.bidId)
+    expect(reloaded.status).toBe('won')
+    expect(reloaded.outcomeAt).not.toBeNull()
+    expect(reloaded.outcomeAt).toBe(won.outcomeAt)
+    expect(reloaded.outcomeNote).toBe('Awarded')
 
     // Cannot record outcome again (terminal state) → ConflictError
     await expect(
       services.bids.recordBidOutcome(ctx, bid.bidId, 'lost'),
     ).rejects.toBeInstanceOf(ConflictError)
 
-    // Audit emitted for the won outcome
+    // Audit emitted — exactly one for the won outcome (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
-    expect(events.find((e) => e.action === 'bid.won')).toBeDefined()
+    const wonEvents = events.filter((e) => e.action === 'bid.won')
+    expect(wonEvents).toHaveLength(1)
+    expect(wonEvents[0]!.timestamp).toBe(won.outcomeAt)
+    expect(wonEvents[0]!.metadata).toMatchObject({ note: 'Awarded' })
   })
 
-  it('recordBidOutcome: submitted→lost', async () => {
+  it('recordBidOutcome: submitted→lost; outcomeAt set, exactly one audit', async () => {
     const { projId, ctx } = await bootstrap('Bid_Lost')
     const finalized = await createFinalizedEstimate(ctx, projId)
     const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
@@ -528,6 +556,19 @@ describe('BidService', () => {
 
     const lost = await services.bids.recordBidOutcome(ctx, bid.bidId, 'lost')
     expect(lost.status).toBe('lost')
+    expect(lost.outcomeAt).not.toBeNull()
+    expect(typeof lost.outcomeAt).toBe('string')
+    // No note for the lost case here
+    expect(lost.outcomeNote).toBeNull()
+
+    // Reload to verify persisted
+    const reloaded = await services.bids.getBid(ctx, bid.bidId)
+    expect(reloaded.status).toBe('lost')
+    expect(reloaded.outcomeAt).toBe(lost.outcomeAt)
+
+    // Exactly one audit for the lost outcome
+    const events = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
+    expect(events.filter((e) => e.action === 'bid.lost')).toHaveLength(1)
   })
 
   it('withdrawBid: non-terminal→withdrawn; terminal rejected', async () => {
@@ -542,9 +583,9 @@ describe('BidService', () => {
     // Withdrawn is terminal — cannot withdraw again
     await expect(services.bids.withdrawBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ConflictError)
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
-    expect(events.find((e) => e.action === 'bid.withdrawn')).toBeDefined()
+    expect(events.filter((e) => e.action === 'bid.withdrawn')).toHaveLength(1)
   })
 
   it('withdrawBid rejects on terminal state (won)', async () => {
@@ -618,12 +659,12 @@ describe('BOQService', () => {
     const itemsAfter = await services.boqs.getBOQItems(ctx, boq.boqId)
     expect(itemsAfter[0]!.quantity.value).toBe(120)
 
-    // Audit emitted for BOQ + item operations
+    // Audit emitted for BOQ + item operations — exactly one each (audit-atomic: ADR-0007 D18)
     const boqEvents = await auditEventsFor(orgId, 'boq', boq.boqId)
-    expect(boqEvents.find((e) => e.action === 'boq.created')).toBeDefined()
+    expect(boqEvents.filter((e) => e.action === 'boq.created')).toHaveLength(1)
     const itemEvents = await auditEventsFor(orgId, 'boq_item', item.itemId)
-    expect(itemEvents.find((e) => e.action === 'boq.item_added')).toBeDefined()
-    expect(itemEvents.find((e) => e.action === 'boq.item_quantity_updated')).toBeDefined()
+    expect(itemEvents.filter((e) => e.action === 'boq.item_added')).toHaveLength(1)
+    expect(itemEvents.filter((e) => e.action === 'boq.item_quantity_updated')).toHaveLength(1)
 
     // Non-existent BOQ → NotFoundError
     await expect(services.boqs.getBOQ(ctx, 'ws_does_not_exist')).rejects.toBeInstanceOf(NotFoundError)
@@ -734,9 +775,9 @@ describe('PlanMeasurementService', () => {
     expect(list.length).toBe(1)
     expect(list[0]!.measurementId).toBe(pm.measurementId)
 
-    // Audit emitted
+    // Audit emitted — exactly one (audit-atomic: ADR-0007 D18)
     const events = await auditEventsFor(orgId, 'plan_measurement', pm.measurementId)
-    expect(events.find((e) => e.action === 'plan.measurement_created')).toBeDefined()
+    expect(events.filter((e) => e.action === 'plan.measurement_created')).toHaveLength(1)
 
     // Non-existent project → NotFoundError
     await expect(
@@ -1234,6 +1275,358 @@ describe('Bid hash verification on submission', () => {
       ['TAMPERED_BID_HASH', bid.bidId],
     )
 
+    await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ConflictError)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════
+// §11 Audit-atomicity — forced audit failure rolls back the business
+//     mutation (ADR-0007 Decision 18). A temporary trigger makes
+//     INSERT INTO audit_events fail; we then verify the business mutation
+//     did NOT persist and the audit event did NOT persist. NO MOCKS —
+//     real PostgreSQL (pglite), real transaction, real rollback.
+// ═════════════════════════════════════════════════════════════
+
+/**
+ * Install a trigger that blocks INSERT into audit_events (raises mid-tx).
+ * Each authority-changing operation wraps business + audit in one db.tx(),
+ * so the audit failure must ROLLBACK the whole transaction.
+ */
+async function installAuditBlock(): Promise<void> {
+  await db.execRaw(`
+    CREATE OR REPLACE FUNCTION block_audit_insert_test() RETURNS TRIGGER AS $$
+    BEGIN
+      RAISE EXCEPTION 'Test: audit insert blocked';
+    END;
+    $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS trg_block_audit_insert_test ON audit_events;
+    CREATE TRIGGER trg_block_audit_insert_test BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION block_audit_insert_test();
+  `)
+}
+
+/** Remove the audit-block trigger. */
+async function removeAuditBlock(): Promise<void> {
+  await db.execRaw(`DROP TRIGGER IF EXISTS trg_block_audit_insert_test ON audit_events;`)
+  await db.execRaw(`DROP FUNCTION IF EXISTS block_audit_insert_test();`)
+}
+
+describe('Audit atomicity (ADR-0007 D18): forced audit failure → business rollback', () => {
+  it('Estimate finalize: audit fail → status stays draft, no finalize audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_EstFin')
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const rid = draft.metadata.revisionId
+
+    await installAuditBlock()
+    await expect(services.estimates.finalizeEstimate(ctx, rid)).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Business mutation rolled back: status still draft
+    const after = await services.estimates.getEstimateRevision(ctx, rid)
+    expect(after!.metadata.status).toBe('draft')
+    // Audit did not persist
+    const ev = await auditEventsFor(orgId, 'revision', rid)
+    expect(ev.filter((e) => e.action === 'estimate.finalized')).toHaveLength(0)
+  })
+
+  it('Estimate update draft: audit fail → old payload + contentHash preserved, no update audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_EstUpd')
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const rid = draft.metadata.revisionId
+    const oldHash = draft.metadata.contentHash
+
+    // A different payload that would change the content hash
+    const newPayload = makePayload(projId, 9999, 7)
+    expect(estimateRevisionContentHash(newPayload)).not.toBe(oldHash)
+
+    await installAuditBlock()
+    await expect(services.estimates.updateEstimateDraft(ctx, rid, newPayload)).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Old payload + hash preserved
+    const after = await services.estimates.getEstimateRevision(ctx, rid)
+    expect(after!.metadata.contentHash).toBe(oldHash)
+    expect(after!.payload.lines[0]!.description).toBe('Concrete')
+    expect(after!.payload.lines[0]!.rate.amount).toBe(500)
+    expect(after!.payload.lines[0]!.quantity.value).toBe(100)
+    // No update audit persisted
+    const ev = await auditEventsFor(orgId, 'revision', rid)
+    expect(ev.filter((e) => e.action === 'estimate.draft_updated')).toHaveLength(0)
+  })
+
+  it('Estimate supersede: audit fail → status stays finalized, no supersede audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_EstSup')
+    const finalized = await createFinalizedEstimate(ctx, projId)
+    const rid = finalized.metadata.revisionId
+
+    await installAuditBlock()
+    await expect(services.estimates.supersedeEstimate(ctx, rid)).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Business mutation rolled back: status still finalized (NOT superseded)
+    const after = await services.estimates.getEstimateRevision(ctx, rid)
+    expect(after!.metadata.status).toBe('finalized')
+    // No supersede audit persisted
+    const ev = await auditEventsFor(orgId, 'revision', rid)
+    expect(ev.filter((e) => e.action === 'estimate.superseded')).toHaveLength(0)
+  })
+
+  it('Bid submit: audit fail → status stays draft, submittedAt null, no submit audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BidSub')
+    const finalized = await createFinalizedEstimate(ctx, projId)
+    const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
+
+    await installAuditBlock()
+    await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Business mutation rolled back: status still draft, submittedAt null
+    const after = await services.bids.getBid(ctx, bid.bidId)
+    expect(after!.status).toBe('draft')
+    expect(after!.submittedAt).toBeNull()
+    // No submit audit persisted
+    const ev = await auditEventsFor(orgId, 'bid', bid.bidId)
+    expect(ev.filter((e) => e.action === 'bid.submitted')).toHaveLength(0)
+  })
+
+  it('Bid outcome (won): audit fail → status stays submitted, outcomeAt null, outcomeNote null, no outcome audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BidWon')
+    const finalized = await createFinalizedEstimate(ctx, projId)
+    const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
+    await services.bids.submitBid(ctx, bid.bidId)
+
+    await installAuditBlock()
+    await expect(services.bids.recordBidOutcome(ctx, bid.bidId, 'won', 'Awarded')).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Business mutation rolled back: status still submitted, no outcome fields
+    const after = await services.bids.getBid(ctx, bid.bidId)
+    expect(after!.status).toBe('submitted')
+    expect(after!.outcomeAt).toBeNull()
+    expect(after!.outcomeNote).toBeNull()
+    // No won audit persisted
+    const ev = await auditEventsFor(orgId, 'bid', bid.bidId)
+    expect(ev.filter((e) => e.action === 'bid.won')).toHaveLength(0)
+  })
+
+  it('Bid outcome (lost): audit fail → status stays submitted, no outcome audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BidLost')
+    const finalized = await createFinalizedEstimate(ctx, projId)
+    const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
+    await services.bids.submitBid(ctx, bid.bidId)
+
+    await installAuditBlock()
+    await expect(services.bids.recordBidOutcome(ctx, bid.bidId, 'lost')).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    const after = await services.bids.getBid(ctx, bid.bidId)
+    expect(after!.status).toBe('submitted')
+    expect(after!.outcomeAt).toBeNull()
+    const ev = await auditEventsFor(orgId, 'bid', bid.bidId)
+    expect(ev.filter((e) => e.action === 'bid.lost')).toHaveLength(0)
+  })
+
+  it('Bid withdraw: audit fail → status stays at previous state (submitted), no withdraw audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BidWd')
+    const finalized = await createFinalizedEstimate(ctx, projId)
+    const bid = await services.bids.createBid(ctx, projId, finalized.metadata.revisionId, money(700, 'GHS'))
+    await services.bids.submitBid(ctx, bid.bidId)
+
+    await installAuditBlock()
+    await expect(services.bids.withdrawBid(ctx, bid.bidId)).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Business mutation rolled back: status still submitted (NOT withdrawn)
+    const after = await services.bids.getBid(ctx, bid.bidId)
+    expect(after!.status).toBe('submitted')
+    // No withdraw audit persisted
+    const ev = await auditEventsFor(orgId, 'bid', bid.bidId)
+    expect(ev.filter((e) => e.action === 'bid.withdrawn')).toHaveLength(0)
+  })
+
+  it('BOQ item add: audit fail → item not persisted, no item_added audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BOQAdd')
+    const boq = await services.boqs.createBOQ(ctx, projId, 'BOQ')
+    const before = await services.boqs.getBOQItems(ctx, boq.boqId)
+    expect(before.length).toBe(0)
+
+    await installAuditBlock()
+    await expect(
+      services.boqs.addBOQItem(ctx, boq.boqId, {
+        itemCode: '1.1', description: 'Concrete', unit: 'm2',
+        quantityValue: 100, quantityUnit: 'm2', provenance: 'manual',
+      }),
+    ).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Item did not persist
+    const after = await services.boqs.getBOQItems(ctx, boq.boqId)
+    expect(after.length).toBe(0)
+    // No item_added audit (no entity to query, so scan tenant-wide for the action)
+    const allTenant = await repos.audit.listForTenant(orgId, 500)
+    expect(allTenant.filter((e) => e.action === 'boq.item_added')).toHaveLength(0)
+  })
+
+  it('BOQ item quantity update: audit fail → old quantity preserved, no update audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_BOQUpd')
+    const boq = await services.boqs.createBOQ(ctx, projId, 'BOQ')
+    const item = await services.boqs.addBOQItem(ctx, boq.boqId, {
+      itemCode: '1.1', description: 'Concrete', unit: 'm2',
+      quantityValue: 100, quantityUnit: 'm2', provenance: 'manual',
+    })
+
+    await installAuditBlock()
+    await expect(
+      services.boqs.updateBOQItemQuantity(ctx, item.itemId, 777, 'm2'),
+    ).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Old quantity preserved (NOT 777)
+    const after = await services.boqs.getBOQItems(ctx, boq.boqId)
+    expect(after[0]!.quantity.value).toBe(100)
+    // No quantity-updated audit
+    const ev = await auditEventsFor(orgId, 'boq_item', item.itemId)
+    expect(ev.filter((e) => e.action === 'boq.item_quantity_updated')).toHaveLength(0)
+  })
+
+  it('PlanMeasurement creation: audit fail → measurement row does not exist, no audit', async () => {
+    const { orgId, projId, ctx } = await bootstrap('AuditFail_PM')
+    const before = await services.measurements.listMeasurements(ctx, projId)
+    expect(before.length).toBe(0)
+
+    await installAuditBlock()
+    await expect(
+      services.measurements.createMeasurement(ctx, projId, {
+        sourceArtifactId: 'art', sourceArtifactHash: 'h', sheetId: 's1', sheetRevision: 'r1',
+        elementReference: 'el', quantityValue: 3, quantityUnit: 'm2',
+        measurementMethod: 'manual-takeoff', measurementBasis: 'count', measurementEngineVersion: 'v1',
+      }),
+    ).rejects.toThrow(/audit insert blocked/i)
+    await removeAuditBlock()
+
+    // Measurement row did not persist
+    const after = await services.measurements.listMeasurements(ctx, projId)
+    expect(after.length).toBe(0)
+    // No measurement_created audit
+    const allTenant = await repos.audit.listForTenant(orgId, 500)
+    expect(allTenant.filter((e) => e.action === 'plan.measurement_created')).toHaveLength(0)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════
+// §12 Transaction failure order — authorization + validation
+//     failures produce ZERO business writes and ZERO audit writes.
+//     Asserts against database state, not only thrown exceptions.
+// ═════════════════════════════════════════════════════════════
+
+describe('Transaction failure order (ADR-0007 D18): pre-tx failures produce zero writes', () => {
+  it('authorization failure → zero business writes, zero audit writes', async () => {
+    const { projId, ctx } = await bootstrap('FailOrder_Auth', 'member')
+    // member can create/update drafts but CANNOT finalize (estimate:finalize)
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const rid = draft.metadata.revisionId
+
+    // Count all audit events for this revision before the failed call
+    const eventsBefore = await auditEventsFor(ctx.tenantId, 'revision', rid)
+
+    // Authorization fails BEFORE the transaction opens
+    await expect(services.estimates.finalizeEstimate(ctx, rid)).rejects.toBeInstanceOf(UnauthorizedError)
+
+    // Business state unchanged: still draft
+    const after = await services.estimates.getEstimateRevision(ctx, rid)
+    expect(after!.metadata.status).toBe('draft')
+    // No new audit event was written
+    const eventsAfter = await auditEventsFor(ctx.tenantId, 'revision', rid)
+    expect(eventsAfter.length).toBe(eventsBefore.length)
+  })
+
+  it('validation failure → zero business writes, zero audit writes', async () => {
+    const { projId, ctx } = await bootstrap('FailOrder_Val')
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const rid = draft.metadata.revisionId
+    const oldHash = draft.metadata.contentHash
+
+    // A payload whose projectId does NOT match the revision's project → ValidationError
+    // (this is checked before the transaction opens)
+    const wrongProjectPayload = makePayload('proj_other_project')
+    const eventsBefore = await auditEventsFor(ctx.tenantId, 'revision', rid)
+
+    await expect(
+      services.estimates.updateEstimateDraft(ctx, rid, wrongProjectPayload),
+    ).rejects.toBeInstanceOf(ValidationError)
+
+    // Business state unchanged: old hash preserved
+    const after = await services.estimates.getEstimateRevision(ctx, rid)
+    expect(after!.metadata.contentHash).toBe(oldHash)
+    expect(after!.payload.lines[0]!.description).toBe('Concrete')
+    // No new audit event
+    const eventsAfter = await auditEventsFor(ctx.tenantId, 'revision', rid)
+    expect(eventsAfter.length).toBe(eventsBefore.length)
+  })
+
+  it('bid validation failure (revision not finalized) → zero writes, zero audit', async () => {
+    const { projId, ctx } = await bootstrap('FailOrder_BidVal')
+    // Create a DRAFT revision (not finalized) — submitBid must reject
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const bid = await services.bids.createBid(ctx, projId, draft.metadata.revisionId, money(100, 'GHS'))
+    const eventsBefore = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
+
+    await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ValidationError)
+
+    // Bid unchanged: still draft, submittedAt null
+    const after = await services.bids.getBid(ctx, bid.bidId)
+    expect(after!.status).toBe('draft')
+    expect(after!.submittedAt).toBeNull()
+    // No new audit
+    const eventsAfter = await auditEventsFor(ctx.tenantId, 'bid', bid.bidId)
+    expect(eventsAfter.length).toBe(eventsBefore.length)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════
+// §13 Bid draft-revision reference (ADR-0007 Decision 19) — a draft
+//     Bid may reference a draft EstimateRevision; submission requires
+//     finalized + hash match.
+// ═════════════════════════════════════════════════════════════
+
+describe('Draft Bid reference (ADR-0007 D19): draft Bid may reference draft EstimateRevision', () => {
+  it('createBid succeeds referencing a DRAFT revision; submitBid rejects until finalized', async () => {
+    const { projId, ctx } = await bootstrap('DraftBidRef')
+    // DRAFT revision (not finalized)
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+
+    // A draft Bid referencing the draft revision is allowed at create time
+    const bid = await services.bids.createBid(ctx, projId, draft.metadata.revisionId, money(100, 'GHS'))
+    expect(bid.status).toBe('draft')
+    expect(bid.estimateRevisionId).toBe(draft.metadata.revisionId)
+    expect(bid.estimateRevisionContentHash).toBe(draft.metadata.contentHash)
+
+    // Submission fails: revision is not finalized → ValidationError (before tx)
+    await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ValidationError)
+    // Bid still draft
+    const stillDraft = await services.bids.getBid(ctx, bid.bidId)
+    expect(stillDraft.status).toBe('draft')
+    expect(stillDraft.submittedAt).toBeNull()
+
+    // Finalize the revision → now submission succeeds
+    const finalized = await services.estimates.finalizeEstimate(ctx, draft.metadata.revisionId)
+    expect(finalized.metadata.status).toBe('finalized')
+    // Hash unchanged by finalization (content hash is over payload, not status)
+    expect(finalized.metadata.contentHash).toBe(draft.metadata.contentHash)
+
+    const submitted = await services.bids.submitBid(ctx, bid.bidId)
+    expect(submitted.status).toBe('submitted')
+    expect(submitted.submittedAt).not.toBeNull()
+  })
+
+  it('a draft Bid referencing a draft EstimateRevision can be withdrawn without submission', async () => {
+    const { projId, ctx } = await bootstrap('DraftBidWithdraw')
+    const draft = await services.estimates.createEstimateDraft(ctx, projId, makePayload(projId))
+    const bid = await services.bids.createBid(ctx, projId, draft.metadata.revisionId, money(100, 'GHS'))
+
+    const withdrawn = await services.bids.withdrawBid(ctx, bid.bidId)
+    expect(withdrawn.status).toBe('withdrawn')
+    // Withdrawn is terminal
     await expect(services.bids.submitBid(ctx, bid.bidId)).rejects.toBeInstanceOf(ConflictError)
   })
 })
