@@ -32,6 +32,7 @@ import {
   PlanMeasurementRepository, BOQRepository, EstimateRevisionRepository, BidRepository,
   MagicLinkRepository, WaitlistRepository,
 } from '@contractor/core/persistence'
+import type { AuditRepository as AuditRepoType } from '@contractor/core/persistence'
 import {
   IdentityService, OrganizationService, WorkspaceService, ProjectService,
   AuditService, RevisionService, PlanMeasurementService, BOQService, EstimateService, BidService,
@@ -68,6 +69,7 @@ interface CachedDeps {
   magicLinkAuth: MagicLinkAuthService
   passwordAuth: PasswordAuthService
   waitlist: WaitlistRepository
+  audit: AuditRepoType
   config: ReturnType<typeof loadSessionConfigFromEnv>
   magicLinkConfig: { linkSecret: string; linkTtlSeconds: number; appBaseUrl: string }
 }
@@ -121,10 +123,10 @@ async function getDeps(): Promise<CachedDeps> {
     }
   }
   const magicLinkAuth = new MagicLinkAuthService(users, magicLinks, magicLinkConfig)
-  const passwordAuth = new PasswordAuthService({ db, users, memberships, organizations, waitlist })
+  const passwordAuth = new PasswordAuthService({ db, users, memberships, organizations, waitlist, audit })
   cachedDeps = {
     coreApi, resolver, users, memberships, organizations, magicLinks, magicLinkAuth, passwordAuth,
-    waitlist, config, magicLinkConfig,
+    waitlist, audit, config, magicLinkConfig,
   }
   return cachedDeps
 }
@@ -397,10 +399,15 @@ async function handleDemoLogin(req: IncomingMessage, res: ServerResponse, deps: 
 async function handleListWaitlist(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
   const payload = deps.resolver.resolvePayload(req.headers.cookie)
   if (!payload) return sendJson(res, 401, { error: 'unauthenticated', message: 'Not authenticated' })
-  // Verify admin role
-  const memberships = await deps.memberships.listTenantsForUser(payload.userId)
-  const adminM = memberships.find((m) => m.role === 'admin' || m.role === 'owner')
-  if (!adminM) return sendJson(res, 403, { error: 'forbidden', message: 'Admin access required' })
+  // H4: use the session's SELECTED membership for admin verification
+  if (!payload.selectedMembershipId) {
+    return sendJson(res, 403, { error: 'forbidden', message: 'No tenant selected' })
+  }
+  const userMemberships = await deps.memberships.listTenantsForUser(payload.userId)
+  const selectedM = userMemberships.find((m) => m.id === payload.selectedMembershipId)
+  if (!selectedM || selectedM.status !== 'active' || (selectedM.role !== 'admin' && selectedM.role !== 'owner')) {
+    return sendJson(res, 403, { error: 'forbidden', message: 'Admin or owner role required for the selected tenant' })
+  }
   const entries = await deps.waitlist.listAll()
   return sendJson(res, 200, { entries })
 }
@@ -408,9 +415,23 @@ async function handleListWaitlist(req: IncomingMessage, res: ServerResponse, dep
 async function handleApproveWaitlist(req: IncomingMessage, res: ServerResponse, deps: CachedDeps): Promise<void> {
   const payload = deps.resolver.resolvePayload(req.headers.cookie)
   if (!payload) return sendJson(res, 401, { error: 'unauthenticated', message: 'Not authenticated' })
-  const memberships = await deps.memberships.listTenantsForUser(payload.userId)
-  const adminM = memberships.find((m) => m.role === 'admin' || m.role === 'owner')
-  if (!adminM) return sendJson(res, 403, { error: 'forbidden', message: 'Admin access required' })
+  // H4 FIX: use the session's SELECTED membership, NOT the first admin/owner membership.
+  // This ensures the approval creates the user in the tenant the admin actually selected.
+  if (!payload.selectedMembershipId) {
+    return sendJson(res, 403, { error: 'forbidden', message: 'No tenant selected' })
+  }
+  // Verify the selected membership belongs to the authenticated user + is active + is admin/owner.
+  const userMemberships = await deps.memberships.listTenantsForUser(payload.userId)
+  const selectedM = userMemberships.find((m) => m.id === payload.selectedMembershipId)
+  if (!selectedM) {
+    return sendJson(res, 403, { error: 'forbidden', message: 'Selected membership not found or revoked' })
+  }
+  if (selectedM.status !== 'active') {
+    return sendJson(res, 403, { error: 'forbidden', message: 'Selected membership is not active' })
+  }
+  if (selectedM.role !== 'admin' && selectedM.role !== 'owner') {
+    return sendJson(res, 403, { error: 'forbidden', message: 'Admin or owner role required for the selected tenant' })
+  }
   const body = await readJsonBody(req)
   if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'validation', message: 'Invalid body' })
   const b = body as Record<string, unknown>
@@ -420,10 +441,20 @@ async function handleApproveWaitlist(req: IncomingMessage, res: ServerResponse, 
     return sendJson(res, 400, { error: 'validation', message: 'waitlistId and password (min 6 chars) required' })
   }
   try {
-    const result = await deps.passwordAuth.approveWaitlistEntry(waitlistId, payload.userId, adminM.organizationId, password)
+    // H4: tenantId comes from the SELECTED membership — never client-supplied.
+    const result = await deps.passwordAuth.approveWaitlistEntry(
+      waitlistId, payload.userId, selectedM.organizationId, password,
+    )
     return sendJson(res, 200, { userId: result.userId, email: result.email, message: 'User created. They can now login with their email + the password you set.' })
   } catch (e) {
-    return sendJson(res, 400, { error: 'validation', message: e instanceof Error ? e.message : 'Failed to approve' })
+    // H6 FIX: map expected validation/conflict errors appropriately;
+    // unexpected DB/internal failures → 500 with sanitized message (no SQL/stack/schema leak).
+    const msg = e instanceof Error ? e.message : 'Failed to approve'
+    if (msg.includes('not found') || msg.includes('already') || msg.includes('could not be approved')) {
+      return sendJson(res, 409, { error: 'conflict', message: msg })
+    }
+    // Unexpected error — do not leak details
+    return sendJson(res, 500, { error: 'internal_error', message: 'Failed to approve waitlist entry' })
   }
 }
 

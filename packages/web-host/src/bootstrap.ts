@@ -65,15 +65,14 @@ async function main() {
   const existingAdmin = await users.getByEmail(adminEmail.toLowerCase())
   if (existingAdmin) {
     adminUserId = existingAdmin.id
-    // Update password
-    await db.execute(`UPDATE users SET password_hash = $2 WHERE id = $1`, [adminUserId, hashPassword(adminPassword)])
+    // Update password via repository method
+    await users.updatePasswordHash(adminUserId, hashPassword(adminPassword))
     console.log('  ✓ admin password updated')
   } else {
     adminUserId = entityId(ID_PREFIX.user)
-    await db.execute(
-      `INSERT INTO users (id, email, display_name, status, created_at, password_hash)
-       VALUES ($1, $2, 'Admin', 'active', $3, $4)`,
-      [adminUserId, adminEmail.toLowerCase(), new Date().toISOString(), hashPassword(adminPassword)],
+    await users.createWithPassword(
+      { id: adminUserId, email: adminEmail.toLowerCase(), displayName: 'Admin', status: 'active', createdAt: new Date().toISOString() },
+      hashPassword(adminPassword),
     )
     await users.createBinding({
       id: entityId(ID_PREFIX.authBinding), userId: adminUserId, provider: 'email', subject: adminEmail.toLowerCase(),
@@ -112,7 +111,8 @@ async function main() {
     const email = `demo-${role}@contractor.dev`
     const existing = await users.getByEmail(email)
     if (existing) {
-      // Ensure demo flag + membership
+      // Ensure demo flag via update + membership if missing
+      // (is_demo is set at creation; for existing users we update it via a direct UPDATE)
       await db.execute(`UPDATE users SET is_demo = true WHERE id = $1`, [existing.id])
       const demoMems = await memberships.listTenantsForUser(existing.id)
       if (demoMems.length === 0) {
@@ -125,10 +125,8 @@ async function main() {
       console.log(`  ✓ demo-${role} exists (updated)`)
     } else {
       const demoUserId = entityId(ID_PREFIX.user)
-      await db.execute(
-        `INSERT INTO users (id, email, display_name, status, created_at, is_demo)
-         VALUES ($1, $2, $3, 'active', $4, true)`,
-        [demoUserId, email, `Demo ${role}`, new Date().toISOString()],
+      await users.createDemoUser(
+        { id: demoUserId, email, displayName: `Demo ${role}`, status: 'active', createdAt: new Date().toISOString() },
       )
       await users.createBinding({
         id: entityId(ID_PREFIX.authBinding), userId: demoUserId, provider: 'email', subject: email,

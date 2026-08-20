@@ -159,7 +159,7 @@ beforeAll(async () => {
   await bootstrapAdmin()
   await bootstrapDemoUsers(adminOrgId)
 
-  passwordAuth = new PasswordAuthService({ db, users: repos.users, memberships: repos.memberships, organizations: repos.orgs, waitlist: repos.waitlist })
+  passwordAuth = new PasswordAuthService({ db, users: repos.users, memberships: repos.memberships, organizations: repos.orgs, waitlist: repos.waitlist, audit: repos.audit })
 
   const identity = new IdentityService(repos.users, repos.memberships)
   const orgService = new OrganizationService(repos.orgs, repos.memberships, repos.audit)
@@ -186,7 +186,7 @@ beforeAll(async () => {
   setCachedDepsForTesting({
     coreApi, resolver: resolver2, users: repos.users, memberships: repos.memberships,
     organizations: repos.orgs, magicLinks: repos.magicLinks, magicLinkAuth: new MagicLinkAuthService(repos.users, repos.magicLinks, { linkSecret: 'f'.repeat(64), linkTtlSeconds: 900, appBaseUrl: 'http://test' }),
-    passwordAuth, waitlist: repos.waitlist, config, magicLinkConfig: { linkSecret: 'f'.repeat(64), linkTtlSeconds: 900, appBaseUrl: 'http://test' },
+    passwordAuth, waitlist: repos.waitlist, audit: repos.audit, config, magicLinkConfig: { linkSecret: 'f'.repeat(64), linkTtlSeconds: 900, appBaseUrl: 'http://test' },
   })
   server = createServer(vercelHandler)
   server.listen(PORT)
@@ -343,9 +343,9 @@ describe('Admin approval (Phase 2C.3.1 H2)', () => {
     const selectedCookie = await selectTenant(adminCookie, adminMemb.membershipId)
     const wl = await listWaitlist(selectedCookie)
     const entry = wl.body.entries.find((e: any) => e.email === 'approvee@test.com')!
-    // Try to approve again → 400 (entry is already approved)
+    // Try to approve again → 409 (conflict: entry is already approved)
     const r = await approveWaitlist(selectedCookie, entry.id, 'AnotherPass123')
-    expect(r.status).toBe(400)
+    expect(r.status).toBe(409)
   })
 
   it('approval with short password → 400', async () => {
@@ -409,5 +409,155 @@ describe('Production DEV-auth guard (Phase 2C.3.1 H2)', () => {
       body: JSON.stringify({ credential: 'anything' }),
     })
     expect(r.status).toBe(404)
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 2C.3.2 — H3/H4/H5/H6 regression tests
+// ════════════════════════════════════════════════════════════════════════
+
+describe('H4: multi-tenant approval uses SELECTED membership', () => {
+  it('approval creates user in the SELECTED tenant, not a different admin tenant', async () => {
+    // Create a 2nd org + admin membership for the admin user (so they have 2 tenants)
+    const orgB = entityId(ID_PREFIX.organization)
+    await repos.orgs.create({ id: orgB, tenantId: orgB, name: 'OrgB', slug: 'orgb', status: 'active', createdAt: new Date().toISOString() })
+    const mB: Membership = { id: entityId(ID_PREFIX.membership), userId: adminUserId, organizationId: orgB, role: 'admin', status: 'active', createdAt: new Date().toISOString() }
+    await repos.memberships.create(mB)
+    // Signup a new user
+    await signup('multitenant@test.com', 'MultiTenant')
+    // Login as admin + select Tenant A (adminOrgId)
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string; organizationId: string }[] }
+    const tenantAMemb = memberships.memberships.find((m) => m.organizationId === adminOrgId)!
+    const selectedCookie = await selectTenant(adminLogin.cookie!, tenantAMemb.membershipId)
+    // Approve → should create the user in Tenant A (adminOrgId), NOT Tenant B
+    const wl = await listWaitlist(selectedCookie)
+    const entry = wl.body.entries.find((e: any) => e.email === 'multitenant@test.com')!
+    const approveR = await approveWaitlist(selectedCookie, entry.id, 'MultiPass123')
+    expect(approveR.status).toBe(200)
+    // Verify the user's membership is in Tenant A (adminOrgId), NOT Tenant B
+    const createdUser = await repos.users.getByEmail('multitenant@test.com')
+    const userMemberships = await repos.memberships.listTenantsForUser(createdUser!.id)
+    expect(userMemberships).toHaveLength(1)
+    expect(userMemberships[0]!.organizationId).toBe(adminOrgId) // SELECTED tenant
+    expect(userMemberships[0]!.organizationId).not.toBe(orgB) // NOT the other tenant
+  })
+
+  it('admin without selected membership → 403', async () => {
+    // Login but don't select a tenant
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const wl = await listWaitlist(adminLogin.cookie!)
+    expect(wl.status).toBe(403) // No tenant selected
+  })
+})
+
+describe('H3: audit atomicity in approval', () => {
+  it('forced audit failure → all approval writes roll back', async () => {
+    // Signup a new user for this test
+    await signup('auditfail@test.com', 'AuditFail')
+    // Login as admin + select tenant
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(adminLogin.cookie!, memberships.memberships[0]!.membershipId)
+    // Get the waitlist entry
+    const wl = await listWaitlist(selectedCookie)
+    const entry = wl.body.entries.find((e: any) => e.email === 'auditfail@test.com')!
+    // Install a trigger that blocks audit INSERT
+    await db.execRaw(`
+      CREATE OR REPLACE FUNCTION block_audit_approval() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.action = 'waitlist.approved' THEN
+          RAISE EXCEPTION 'Test: audit blocked for approval';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS trg_block_audit_approval ON audit_events;
+      CREATE TRIGGER trg_block_audit_approval BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION block_audit_approval();
+    `)
+    try {
+      // Attempt approval → should fail (audit INSERT fails → tx rolls back)
+      const r = await approveWaitlist(selectedCookie, entry.id, 'AuditFailPass123')
+      expect(r.status).toBeGreaterThanOrEqual(400) // 500 or 409
+      // Verify NO user was created
+      const u = await repos.users.getByEmail('auditfail@test.com')
+      expect(u).toBeNull()
+      // Verify waitlist entry is still pending
+      const updatedEntry = await repos.waitlist.getById(entry.id)
+      expect(updatedEntry!.status).toBe('pending')
+      // Verify NO audit event for this approval
+      const events = await repos.audit.listForEntity(adminOrgId, 'waitlist', entry.id, 50)
+      expect(events.filter((e: any) => e.action === 'waitlist.approved')).toHaveLength(0)
+    } finally {
+      await db.execRaw(`DROP TRIGGER IF EXISTS trg_block_audit_approval ON audit_events;`)
+      await db.execRaw(`DROP FUNCTION IF EXISTS block_audit_approval();`)
+    }
+  })
+})
+
+describe('H3: success path — audit emitted', () => {
+  it('approval produces exactly ONE audit event with correct tenantId + actorId', async () => {
+    await signup('auditsuccess@test.com', 'AuditSuccess')
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(adminLogin.cookie!, memberships.memberships[0]!.membershipId)
+    const wl = await listWaitlist(selectedCookie)
+    const entry = wl.body.entries.find((e: any) => e.email === 'auditsuccess@test.com')!
+    const approveR = await approveWaitlist(selectedCookie, entry.id, 'SuccessPass123')
+    expect(approveR.status).toBe(200)
+    // Verify exactly ONE audit event
+    const events = await repos.audit.listForEntity(adminOrgId, 'waitlist', entry.id, 50)
+    const approvalEvents = events.filter((e: any) => e.action === 'waitlist.approved')
+    expect(approvalEvents).toHaveLength(1)
+    // Verify audit metadata
+    expect(approvalEvents[0]!.tenantId).toBe(adminOrgId) // matches selected membership's tenant
+    expect(approvalEvents[0]!.actorId).toBe(adminUserId) // matches authenticated admin
+    expect(approvalEvents[0]!.operation).toBe('approve')
+  })
+})
+
+describe('H6: error mapping', () => {
+  it('invalid waitlistId → 409 (conflict: not found)', async () => {
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(adminLogin.cookie!, memberships.memberships[0]!.membershipId)
+    const r = await approveWaitlist(selectedCookie, 'nonexistent-waitlist-id', 'SomePass123')
+    expect(r.status).toBe(409)
+    expect(r.body.error).toBe('conflict')
+  })
+
+  it('short password → 400 (validation)', async () => {
+    await signup('shortpass2@test.com', 'Short2')
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(adminLogin.cookie!, memberships.memberships[0]!.membershipId)
+    const wl = await listWaitlist(selectedCookie)
+    const entry = wl.body.entries.find((e: any) => e.email === 'shortpass2@test.com')!
+    const r = await approveWaitlist(selectedCookie, entry.id, 'short')
+    expect(r.status).toBe(400)
+    expect(r.body.error).toBe('validation')
+  })
+
+  it('unauthenticated → 401', async () => {
+    const r = await approveWaitlist('', 'some-id', 'SomePass123')
+    expect(r.status).toBe(401)
+  })
+
+  it('non-admin role → 403', async () => {
+    const viewerLogin = await demoLogin('viewer')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: viewerLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(viewerLogin.cookie!, memberships.memberships[0]!.membershipId)
+    const wl = await listWaitlist(selectedCookie)
+    expect(wl.status).toBe(403)
+  })
+
+  it('error response does not leak SQL/stack/schema', async () => {
+    const adminLogin = await passwordLogin('admin@test.com', 'AdminPass123')
+    const memberships = await (await fetch(`${baseUrl}/api/auth/memberships`, { headers: { cookie: adminLogin.cookie! } })).json() as { memberships: { membershipId: string }[] }
+    const selectedCookie = await selectTenant(adminLogin.cookie!, memberships.memberships[0]!.membershipId)
+    const r = await approveWaitlist(selectedCookie, 'nonexistent-id', 'SomePass123')
+    const bodyStr = JSON.stringify(r.body)
+    expect(bodyStr).not.toMatch(/SELECT|INSERT|UPDATE.*FROM|pg_|stack|at \/home|node_modules/i)
   })
 })
