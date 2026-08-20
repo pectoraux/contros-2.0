@@ -3,21 +3,7 @@
   "version": 2,
   "buildCommand": "bun run build -w @contractor/web",
   "outputDirectory": "apps/web/dist",
-  "functions": {
-    "packages/web-host/src/vercel-handler.ts": {
-      "maxDuration": 30
-    }
-  },
-  "routes": [
-    { "src": "/api/(.*)", "dest": "packages/web-host/src/vercel-handler.ts" },
-    { "handle": "filesystem" }
-  ],
-  "env": {
-    "CG_APP_BASE_URL": "Set via Vercel project settings (production URL)"
-  },
-  "build": {
-    "env": {
-      "CG_APP_BASE_URL": "Set via Vercel project settings (production URL)"
-    }
-  }
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/serverless.ts" }
+  ]
 }
