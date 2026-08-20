@@ -135,3 +135,88 @@ describe('architecture: web-host SQL boundary regression', () => {
     expect(lines.some((line) => sqlRe.test(line))).toBe(false)
   })
 })
+
+// ── CoreApi delegation boundary (Phase 2C.3.5) ─────────────────────────────
+//
+// The web-host is the composition root: it wires repositories into services
+// and CoreApi, then delegates commercial /api/* requests to CoreApi.handle().
+// What is FORBIDDEN in the HTTP transport layer (server.ts, vercel-handler.ts):
+//  - direct commercial service invocation (EstimateService, BidService, etc.)
+//  - direct createTenantContext construction
+//  - repository mutation calls from request handlers (mutations go through CoreApi → service → tx)
+//
+// Auth routes (/api/auth/*) are handled directly — they establish/manage sessions.
+
+describe('architecture: web-host commercial request handlers delegate to CoreApi', () => {
+  // The two HTTP transport files that handle requests
+  const transportFiles = ['server.ts', 'vercel-handler.ts']
+
+  // Resolve the source dir relative to this test file
+  const srcDir = resolve(__dirname, '..', '..', 'src')
+
+  function getTransportFile(fname: string): string {
+    return readFileSync(join(srcDir, fname), 'utf8')
+  }
+
+  it('transport files delegate non-auth /api/* to coreApi.handle()', () => {
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      expect(content).toMatch(/coreApi\.handle\s*\(/)
+    }
+  })
+
+  it('transport files do NOT import commercial services directly', () => {
+    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      const lines = nonCommentLines(content)
+      const violations = lines.filter((line) =>
+        commercialServiceRe.test(line) && /from\s+['"]/.test(line),
+      )
+      expect(violations).toEqual([])
+    }
+  })
+
+  it('transport files do NOT use createTenantContext', () => {
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      const lines = nonCommentLines(content)
+      const violations = lines.filter((line) => /createTenantContext/.test(line))
+      expect(violations).toEqual([])
+    }
+  })
+
+  it('auth routes (/api/auth/*) may be handled directly — this is allowed', () => {
+    const handlerContent = getTransportFile('vercel-handler.ts')
+    expect(handlerContent).toMatch(/\/api\/auth\//)
+  })
+})
+
+/**
+ * Regression: a future transport module that bypasses CoreApi for commercial
+ * routes should be caught by the regex patterns.
+ */
+describe('architecture: CoreApi delegation boundary regression', () => {
+  it('would catch a direct EstimateService import in a transport file', () => {
+    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    const fakeImport = "import { EstimateService } from '@contractor/core/service'"
+    expect(commercialServiceRe.test(fakeImport)).toBe(true)
+  })
+
+  it('would catch a direct createTenantContext call in a transport file', () => {
+    const fakeCall = "const ctx = createTenantContext(orgId, userId, membership)"
+    expect(/createTenantContext/.test(fakeCall)).toBe(true)
+  })
+
+  it('would NOT flag a coreApi.handle() delegation', () => {
+    const fakeDelegation = "const apiRes = await deps.coreApi.handle(apiReq)"
+    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    expect(commercialServiceRe.test(fakeDelegation)).toBe(false)
+  })
+
+  it('would NOT flag an auth route handler', () => {
+    const fakeAuthHandler = "if (path === '/api/auth/password-login')"
+    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    expect(commercialServiceRe.test(fakeAuthHandler)).toBe(false)
+  })
+})
