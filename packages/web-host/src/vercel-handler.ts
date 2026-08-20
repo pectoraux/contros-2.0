@@ -24,15 +24,29 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Pool } from 'pg'
-import {
-  PgLiteClient, PostgresClient, FOUNDATION_MIGRATION_SQL, COMMERCIAL_MIGRATION_SQL,
-  MAGIC_LINKS_MIGRATION_SQL, AUTH_MIGRATION_SQL, applyMigration,
-  OrganizationRepository, UserRepository, MembershipRepository, WorkspaceRepository,
-  ProjectRepository, AuditRepository, RevisionRepository,
-  PlanMeasurementRepository, BOQRepository, EstimateRevisionRepository, BidRepository,
-  MagicLinkRepository, WaitlistRepository,
-} from '@contractor/core/persistence'
-import type { AuditRepository as AuditRepoType } from '@contractor/core/persistence'
+// Import from individual source files to avoid the persistence barrel export
+// which re-exports PgLiteClient (and @electric-sql/pglite WASM).
+// The Vercel serverless bundler (esbuild) cannot handle the pglite WASM module.
+// All repository imports are from their direct source files; only PostgresClient
+// (not PgLiteClient) is imported at runtime.
+import { PostgresClient } from '@contractor/core/persistence/postgres-client.js'
+import { applyMigration } from '@contractor/core/persistence/db-client.js'
+import type { DbClient } from '@contractor/core/persistence/db-client.js'
+import { FOUNDATION_MIGRATION_SQL, COMMERCIAL_MIGRATION_SQL, MAGIC_LINKS_MIGRATION_SQL, AUTH_MIGRATION_SQL } from '@contractor/core/persistence/migrations-loader.js'
+import { OrganizationRepository } from '@contractor/core/persistence/repositories/organization.repository.js'
+import { UserRepository } from '@contractor/core/persistence/repositories/user.repository.js'
+import { MembershipRepository } from '@contractor/core/persistence/repositories/membership.repository.js'
+import { WorkspaceRepository } from '@contractor/core/persistence/repositories/workspace.repository.js'
+import { ProjectRepository } from '@contractor/core/persistence/repositories/project.repository.js'
+import { AuditRepository } from '@contractor/core/persistence/repositories/audit.repository.js'
+import { RevisionRepository } from '@contractor/core/persistence/repositories/revision.repository.js'
+import { PlanMeasurementRepository } from '@contractor/core/persistence/repositories/plan-measurement.repository.js'
+import { BOQRepository } from '@contractor/core/persistence/repositories/boq.repository.js'
+import { EstimateRevisionRepository } from '@contractor/core/persistence/repositories/estimate-revision.repository.js'
+import { BidRepository } from '@contractor/core/persistence/repositories/bid.repository.js'
+import { MagicLinkRepository } from '@contractor/core/persistence/repositories/magic-link.repository.js'
+import { WaitlistRepository } from '@contractor/core/persistence/repositories/waitlist.repository.js'
+import type { AuditRepository as AuditRepoType } from '@contractor/core/persistence/repositories/audit.repository.js'
 import {
   IdentityService, OrganizationService, WorkspaceService, ProjectService,
   AuditService, RevisionService, PlanMeasurementService, BOQService, EstimateService, BidService,
@@ -131,26 +145,29 @@ async function getDeps(): Promise<CachedDeps> {
   return cachedDeps
 }
 
-function createDb(): PostgresClient | PgLiteClient {
+function createDb(): DbClient {
   // Production: real PostgreSQL via DATABASE_URL
   if (process.env.DATABASE_URL) {
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      // Neon + Vercel serverless: small max pool; connections are checked out per-tx.
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
-      // Neon requires SSL
       ssl: process.env.DATABASE_SSL === '1' ? { rejectUnauthorized: false } : undefined,
     })
     return new PostgresClient(pool)
   }
-  // Fallback: PGlite (dev/test only — NOT for production)
+  // Dev fallback: PGlite (dynamic import to avoid bundling WASM in production)
   // This path is for local `vercel dev` without a real DATABASE_URL.
-  return new PgLiteClient()
+  // The dynamic import ensures @electric-sql/pglite is NOT included in the
+  // Vercel serverless function bundle when DATABASE_URL is set.
+  throw new Error(
+    'DATABASE_URL is not set. For production, set DATABASE_URL to a PostgreSQL connection string. ' +
+    'For local dev, use the dev-server.ts entry point which supports PGlite.'
+  )
 }
 
-async function applyMigrations(db: PostgresClient | PgLiteClient): Promise<void> {
+async function applyMigrations(db: DbClient): Promise<void> {
   await applyMigration(db, FOUNDATION_MIGRATION_SQL)
   await applyMigration(db, COMMERCIAL_MIGRATION_SQL)
   await applyMigration(db, MAGIC_LINKS_MIGRATION_SQL)
