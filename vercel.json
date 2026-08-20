@@ -3,7 +3,9 @@
   "buildCommand": "cd apps/web && bun run build",
   "outputDirectory": "apps/web/dist",
   "installCommand": "bun install --ignore-scripts",
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/serverless.ts" }
-  ]
+  "functions": {
+    "api/serverless.ts": {
+      "maxDuration": 30
+    }
+  }
 }
