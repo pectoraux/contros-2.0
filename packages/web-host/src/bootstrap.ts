@@ -111,9 +111,8 @@ async function main() {
     const email = `demo-${role}@contractor.dev`
     const existing = await users.getByEmail(email)
     if (existing) {
-      // Ensure demo flag via update + membership if missing
-      // (is_demo is set at creation; for existing users we update it via a direct UPDATE)
-      await db.execute(`UPDATE users SET is_demo = true WHERE id = $1`, [existing.id])
+      // Ensure demo flag via repository method (no raw SQL in bootstrap — H5)
+      await users.setDemoFlag(existing.id, true)
       const demoMems = await memberships.listTenantsForUser(existing.id)
       if (demoMems.length === 0) {
         const m: Membership = {

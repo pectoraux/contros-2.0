@@ -120,46 +120,44 @@ async function main() {
 
 /**
  * Seed a dev org + user + membership if they don't already exist.
- * Idempotent — safe to run on every start.
+ * Idempotent — safe to run on every start. Uses repository methods only (no raw SQL).
  */
 async function seedDevUser(db: DbClient, email: string): Promise<void> {
+  const { UserRepository, MembershipRepository, OrganizationRepository, WorkspaceRepository } = await import('@contractor/core/persistence')
+  const users = new UserRepository(db)
+  const memberships = new MembershipRepository(db)
+  const orgs = new OrganizationRepository(db)
+  const workspaces = new WorkspaceRepository(db)
+
   // Check if the user already exists
-  const existing = await db.query<{ id: string }>(
-    `SELECT id FROM users WHERE email = $1`, [email],
-  )
+  let user = await users.getByEmail(email)
   let userId: string
-  if (existing.length > 0) {
-    userId = existing[0]!.id
+  if (user) {
+    userId = user.id
   } else {
     userId = entityId(ID_PREFIX.user)
-    await db.execute(
-      `INSERT INTO users (id, email, display_name, status, created_at)
-       VALUES ($1, $2, $3, 'active', $4)`,
-      [userId, email, 'Dev User', new Date().toISOString()],
-    )
+    await users.create({
+      id: userId, email, displayName: 'Dev User',
+      status: 'active', createdAt: new Date().toISOString(),
+    })
   }
   // Check if the user already has a membership
-  const existingM = await db.query<{ id: string }>(
-    `SELECT id FROM memberships WHERE user_id = $1 AND status = 'active'`, [userId],
-  )
-  if (existingM.length > 0) return
+  const userMemberships = await memberships.listTenantsForUser(userId)
+  if (userMemberships.length > 0) return
   // Seed a dev org + workspace + membership (owner role)
   const orgId = entityId(ID_PREFIX.organization)
-  await db.execute(
-    `INSERT INTO organizations (id, tenant_id, name, slug, status, created_at)
-     VALUES ($1, $2, $3, $4, 'active', $5)`,
-    [orgId, orgId, 'Dev Organization', 'dev-org', new Date().toISOString()],
-  )
-  await db.execute(
-    `INSERT INTO memberships (id, user_id, organization_id, tenant_id, role, status, created_at)
-     VALUES ($1, $2, $3, $4, 'owner', 'active', $5)`,
-    [entityId(ID_PREFIX.membership), userId, orgId, orgId, new Date().toISOString()],
-  )
-  await db.execute(
-    `INSERT INTO workspaces (id, tenant_id, organization_id, name, created_at)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [entityId(ID_PREFIX.workspace), orgId, orgId, 'Default', new Date().toISOString()],
-  )
+  await orgs.create({
+    id: orgId, tenantId: orgId, name: 'Dev Organization', slug: 'dev-org',
+    status: 'active', createdAt: new Date().toISOString(),
+  })
+  await memberships.create({
+    id: entityId(ID_PREFIX.membership), userId, organizationId: orgId,
+    role: 'owner', status: 'active', createdAt: new Date().toISOString(),
+  })
+  await workspaces.create({
+    id: entityId(ID_PREFIX.workspace), tenantId: orgId, organizationId: orgId,
+    name: 'Default', createdAt: new Date().toISOString(),
+  })
 }
 
 main().catch((e) => {

@@ -157,4 +157,15 @@ export class UserRepository {
     )
     return mapUser(rows[0]!)
   }
+
+  /**
+   * Set the is_demo flag for an existing user. Used by the bootstrap script
+   * to ensure demo users created before the is_demo column existed get the flag.
+   */
+  async setDemoFlag(userId: string, isDemo: boolean): Promise<void> {
+    await this.db.execute(
+      `UPDATE users SET is_demo = $2 WHERE id = $1`,
+      [userId, isDemo],
+    )
+  }
 }
