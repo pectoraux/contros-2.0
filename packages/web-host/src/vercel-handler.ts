@@ -50,6 +50,14 @@ import { PasswordAuthService } from './password-auth.js'
 // out per-tx and released in finally (see postgres-client.ts).
 let cachedDeps: CachedDeps | null = null
 
+/**
+ * Inject deps for testing (bypasses the lazy getDeps() initialization).
+ * Allows tests to share a single PGlite instance with the handler.
+ */
+export function setCachedDepsForTesting(deps: CachedDeps): void {
+  cachedDeps = deps
+}
+
 interface CachedDeps {
   coreApi: CoreApi
   resolver: WebSessionResolver
@@ -113,7 +121,7 @@ async function getDeps(): Promise<CachedDeps> {
     }
   }
   const magicLinkAuth = new MagicLinkAuthService(users, magicLinks, magicLinkConfig)
-  const passwordAuth = new PasswordAuthService({ users, memberships, organizations, waitlist })
+  const passwordAuth = new PasswordAuthService({ db, users, memberships, organizations, waitlist })
   cachedDeps = {
     coreApi, resolver, users, memberships, organizations, magicLinks, magicLinkAuth, passwordAuth,
     waitlist, config, magicLinkConfig,

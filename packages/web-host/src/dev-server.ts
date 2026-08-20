@@ -20,6 +20,7 @@ import {
   ProjectRepository, AuditRepository, RevisionRepository,
   PlanMeasurementRepository, BOQRepository, EstimateRevisionRepository, BidRepository,
 } from '@contractor/core/persistence'
+import type { DbClient } from '@contractor/core/persistence'
 import {
   IdentityService, OrganizationService, WorkspaceService, ProjectService,
   AuditService, RevisionService, PlanMeasurementService, BOQService, EstimateService, BidService,
@@ -121,7 +122,7 @@ async function main() {
  * Seed a dev org + user + membership if they don't already exist.
  * Idempotent — safe to run on every start.
  */
-async function seedDevUser(db: PgLiteClient, email: string): Promise<void> {
+async function seedDevUser(db: DbClient, email: string): Promise<void> {
   // Check if the user already exists
   const existing = await db.query<{ id: string }>(
     `SELECT id FROM users WHERE email = $1`, [email],

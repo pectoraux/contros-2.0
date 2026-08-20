@@ -6,9 +6,9 @@
  * Usage:
  *   DATABASE_URL='postgresql://...' bun packages/web-host/src/bootstrap.ts
  *
- * The admin email/password come from env:
- *   CG_ADMIN_EMAIL (default: ekontetevi@gmail)
- *   CG_ADMIN_PASSWORD (default: Payswap123456)
+ * The admin email/password come from env (REQUIRED — no hardcoded defaults):
+ *   CG_ADMIN_EMAIL
+ *   CG_ADMIN_PASSWORD (min 8 characters)
  */
 
 import { Pool } from 'pg'
@@ -28,8 +28,16 @@ async function main() {
     console.error('DATABASE_URL must be a postgresql:// connection string')
     process.exit(1)
   }
-  const adminEmail = process.env.CG_ADMIN_EMAIL ?? 'ekontetevi@gmail'
-  const adminPassword = process.env.CG_ADMIN_PASSWORD ?? 'Payswap123456'
+  const adminEmail = process.env.CG_ADMIN_EMAIL
+  const adminPassword = process.env.CG_ADMIN_PASSWORD
+  if (!adminEmail || !adminPassword) {
+    console.error('CG_ADMIN_EMAIL and CG_ADMIN_PASSWORD must be set in the environment. Refusing to use hardcoded credentials.')
+    process.exit(1)
+  }
+  if (adminPassword.length < 8) {
+    console.error('CG_ADMIN_PASSWORD must be at least 8 characters. Refusing to use a weak password.')
+    process.exit(1)
+  }
 
   console.log('Connecting to PostgreSQL...')
   const pool = new Pool({

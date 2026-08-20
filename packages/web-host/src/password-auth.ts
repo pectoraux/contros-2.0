@@ -4,13 +4,14 @@
  * Uses Node's built-in crypto.scrypt (no bcrypt dependency needed).
  * Passwords are stored as `salt:hash` in the users.password_hash column.
  *
- * The admin user is bootstrapped by the deploy script (ekontetevi@gmail /
- * password from env). Approved waitlist users get a password set by the admin.
+ * The admin user is bootstrapped by the deploy script (email + password from
+ * env: CG_ADMIN_EMAIL / CG_ADMIN_PASSWORD). Approved waitlist users get a
+ * password set by the admin.
  * Demo accounts have a flag (is_demo) and use the demo-login endpoint (no password).
  */
 
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
-import type { UserRepository, MembershipRepository, OrganizationRepository } from '@contractor/core/persistence'
+import type { DbClient, UserRepository, MembershipRepository, OrganizationRepository } from '@contractor/core/persistence'
 import type { WaitlistRepository } from '@contractor/core/persistence'
 import { entityId, ID_PREFIX } from '@contractor/core/domain'
 import type { Membership } from '@contractor/core/domain'
@@ -33,6 +34,7 @@ export function verifyPassword(password: string, stored: string): boolean {
 }
 
 export interface PasswordAuthDeps {
+  readonly db: DbClient
   readonly users: UserRepository
   readonly memberships: MembershipRepository
   readonly organizations: OrganizationRepository
@@ -48,8 +50,7 @@ export class PasswordAuthService {
   async login(email: string, password: string): Promise<{ userId: string } | null> {
     const user = await this.deps.users.getByEmail(email.toLowerCase())
     if (!user || user.status !== 'active') return null
-    // Need to get password_hash — the User type doesn't have it; query directly
-    const rows = await (this.deps.users as unknown as { db: { query: <T>(sql: string, params: unknown[]) => Promise<T[]> } }).db.query<{ password_hash: string | null }>(
+    const rows = await this.deps.db.query<{ password_hash: string | null }>(
       `SELECT password_hash FROM users WHERE id = $1`, [user.id],
     )
     const passwordHash = rows[0]?.password_hash
@@ -70,6 +71,8 @@ export class PasswordAuthService {
   /**
    * Admin approves a waitlist entry. Creates a user with the given password,
    * adds them to the admin's org as a member, marks the waitlist entry approved.
+   * ALL writes are in ONE transaction (db.tx) — if any fails, all roll back.
+   * No orphaned user/membership can persist.
    */
   async approveWaitlistEntry(waitlistId: string, adminUserId: string, adminOrgId: string, password: string): Promise<{
     userId: string
@@ -78,29 +81,37 @@ export class PasswordAuthService {
     const entry = await this.deps.waitlist.getById(waitlistId)
     if (!entry) throw new Error('waitlist entry not found')
     if (entry.status !== 'pending') throw new Error(`entry is already ${entry.status}`)
-    // Create the user
-    const userId = entityId(ID_PREFIX.user)
-    const email = entry.email
-    const displayName = entry.displayName ?? email.split('@')[0] ?? email
-    await (this.deps.users as unknown as { db: { execute: (sql: string, params: unknown[]) => Promise<unknown> } }).db.execute(
-      `INSERT INTO users (id, email, display_name, status, created_at, password_hash)
-       VALUES ($1, $2, $3, 'active', $4, $5)`,
-      [userId, email, displayName, new Date().toISOString(), hashPassword(password)],
-    )
-    // Create an auth binding for email auth
-    await this.deps.users.createBinding({
-      id: entityId(ID_PREFIX.authBinding), userId, provider: 'email', subject: email,
-      createdAt: new Date().toISOString(), lastUsedAt: null,
+    // Transactional: user + binding + membership + waitlist-approve all-or-nothing
+    return this.deps.db.tx(async (tx) => {
+      const userId = entityId(ID_PREFIX.user)
+      const email = entry.email
+      const displayName = entry.displayName ?? email.split('@')[0] ?? email
+      await tx.execute(
+        `INSERT INTO users (id, email, display_name, status, created_at, password_hash)
+         VALUES ($1, $2, $3, 'active', $4, $5)`,
+        [userId, email, displayName, new Date().toISOString(), hashPassword(password)],
+      )
+      await tx.execute(
+        `INSERT INTO auth_provider_bindings (id, user_id, provider, subject, created_at, last_used_at)
+         VALUES ($1, $2, 'email', $3, $4, NULL)`,
+        [entityId(ID_PREFIX.authBinding), userId, email, new Date().toISOString()],
+      )
+      const membership: Membership = {
+        id: entityId(ID_PREFIX.membership), userId, organizationId: adminOrgId,
+        role: 'member', status: 'active', createdAt: new Date().toISOString(),
+      }
+      await tx.execute(
+        `INSERT INTO memberships (id, user_id, organization_id, tenant_id, role, status, created_at)
+         VALUES ($1, $2, $3, $3, $4, $5, $6)`,
+        [membership.id, membership.userId, membership.organizationId, membership.role, membership.status, membership.createdAt],
+      )
+      await tx.execute(
+        `UPDATE waitlist SET status = 'approved', approved_by = $2, approved_at = now(), created_user_id = $3
+         WHERE id = $1 AND status = 'pending'`,
+        [waitlistId, adminUserId, userId],
+      )
+      return { userId, email }
     })
-    // Add as member of the admin's org
-    const membership: Membership = {
-      id: entityId(ID_PREFIX.membership), userId, organizationId: adminOrgId,
-      role: 'member', status: 'active', createdAt: new Date().toISOString(),
-    }
-    await this.deps.memberships.create(membership)
-    // Mark waitlist entry approved
-    await this.deps.waitlist.approve(waitlistId, adminUserId, userId)
-    return { userId, email }
   }
 
   /**
@@ -112,7 +123,7 @@ export class PasswordAuthService {
     const user = await this.deps.users.getByEmail(email)
     if (!user) return null
     // Verify it's actually a demo user
-    const rows = await (this.deps.users as unknown as { db: { query: <T>(sql: string, params: unknown[]) => Promise<T[]> } }).db.query<{ is_demo: boolean }>(
+    const rows = await this.deps.db.query<{ is_demo: boolean }>(
       `SELECT is_demo FROM users WHERE id = $1`, [user.id],
     )
     if (!rows[0]?.is_demo) return null
@@ -129,13 +140,13 @@ export class PasswordAuthService {
     if (existing) {
       userId = existing.id
       // Update password
-      await (this.deps.users as unknown as { db: { execute: (sql: string, params: unknown[]) => Promise<unknown> } }).db.execute(
+      await this.deps.db.execute(
         `UPDATE users SET password_hash = $2 WHERE id = $1`,
         [userId, hashPassword(password)],
       )
     } else {
       userId = entityId(ID_PREFIX.user)
-      await (this.deps.users as unknown as { db: { execute: (sql: string, params: unknown[]) => Promise<unknown> } }).db.execute(
+      await this.deps.db.execute(
         `INSERT INTO users (id, email, display_name, status, created_at, password_hash)
          VALUES ($1, $2, 'Admin', 'active', $3, $4)`,
         [userId, email.toLowerCase(), new Date().toISOString(), hashPassword(password)],
@@ -183,7 +194,7 @@ export class PasswordAuthService {
         userId = existing.id
       } else {
         userId = entityId(ID_PREFIX.user)
-        await (this.deps.users as unknown as { db: { execute: (sql: string, params: unknown[]) => Promise<unknown> } }).db.execute(
+        await this.deps.db.execute(
           `INSERT INTO users (id, email, display_name, status, created_at, is_demo)
            VALUES ($1, $2, $3, 'active', $4, true)`,
           [userId, email, `Demo ${role}`, new Date().toISOString()],
