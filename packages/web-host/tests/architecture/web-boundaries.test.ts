@@ -136,7 +136,7 @@ describe('architecture: web-host SQL boundary regression', () => {
   })
 })
 
-// ── CoreApi delegation boundary (Phase 2C.3.5) ─────────────────────────────
+// ── CoreApi delegation boundary (Phase 2C.3.5 / 2C.3.6) ─────────────────────
 //
 // The web-host is the composition root: it wires repositories into services
 // and CoreApi, then delegates commercial /api/* requests to CoreApi.handle().
@@ -144,8 +144,10 @@ describe('architecture: web-host SQL boundary regression', () => {
 //  - direct commercial service invocation (EstimateService, BidService, etc.)
 //  - direct createTenantContext construction
 //  - repository mutation calls from request handlers (mutations go through CoreApi → service → tx)
+//  - a second commercial router before the coreApi.handle() fallback
 //
 // Auth routes (/api/auth/*) are handled directly — they establish/manage sessions.
+// ALL other /api/* routes must fall through to coreApi.handle().
 
 describe('architecture: web-host commercial request handlers delegate to CoreApi', () => {
   // The two HTTP transport files that handle requests
@@ -158,10 +160,37 @@ describe('architecture: web-host commercial request handlers delegate to CoreApi
     return readFileSync(join(srcDir, fname), 'utf8')
   }
 
-  it('transport files delegate non-auth /api/* to coreApi.handle()', () => {
+  it('transport files contain exactly one coreApi.handle() call for non-auth /api/*', () => {
     for (const fname of transportFiles) {
       const content = getTransportFile(fname)
-      expect(content).toMatch(/coreApi\.handle\s*\(/)
+      // Count occurrences of coreApi.handle( — there must be exactly 1
+      const matches = content.match(/coreApi\.handle\s*\(/g)
+      expect(matches, `${fname} should have exactly 1 coreApi.handle() call`).toHaveLength(1)
+    }
+  })
+
+  it('non-auth /api/* routes fall through to coreApi.handle() (no second commercial router)', () => {
+    // The pattern is: a series of /api/auth/* if-blocks, then a single
+    // if (path.startsWith('/api/')) { ... coreApi.handle() ... } fallback.
+    // We verify there's no commercial route handler between the auth blocks
+    // and the coreApi.handle() fallback.
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      const lines = nonCommentLines(content)
+      // Find the line index of the coreApi.handle() call
+      const handleIdx = lines.findIndex((l) => /coreApi\.handle\s*\(/.test(l))
+      expect(handleIdx).toBeGreaterThan(-1)
+      // Check that every /api/ route reference BEFORE coreApi.handle() is an auth route
+      const beforeHandle = lines.slice(0, handleIdx)
+      const apiRouteRefs = beforeHandle.filter((l) => /\/api\//.test(l))
+      const nonAuthApiRefs = apiRouteRefs.filter((l) => !/\/api\/auth\//.test(l))
+      // Non-auth /api/ references before coreApi.handle() are NOT route handlers
+      // (they can be comments, the startsWith check, or the slice — all OK)
+      // The key invariant: no second commercial router (e.g. if path === '/api/projects')
+      const commercialRouteHandlers = nonAuthApiRefs.filter((l) =>
+        /path\s*(===|startsWith\()\s*['"`]\/api\/(projects|estimates|bids|boqs|boq-items|measurements)/.test(l),
+      )
+      expect(commercialRouteHandlers, `${fname} must not have a commercial route handler before coreApi.handle()`).toEqual([])
     }
   })
 
@@ -174,6 +203,41 @@ describe('architecture: web-host commercial request handlers delegate to CoreApi
         commercialServiceRe.test(line) && /from\s+['"]/.test(line),
       )
       expect(violations).toEqual([])
+    }
+  })
+
+  it('transport files do NOT invoke commercial services directly (no .createEstimateDraft, .submitBid, etc.)', () => {
+    // Check for direct commercial service method calls in transport files
+    const commercialMethodRe = /\.(createEstimateDraft|finalizeEstimate|supersedeEstimate|replayEstimate|updateEstimateDraft|createBid|submitBid|recordBidOutcome|withdrawBid|createBOQ|addBOQItem|updateBOQItemQuantity|createMeasurement)\s*\(/;
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      const lines = nonCommentLines(content)
+      const violations = lines.filter((line) => commercialMethodRe.test(line))
+      expect(violations, `${fname} must not call commercial service methods directly`).toEqual([])
+    }
+  })
+
+  it('transport files do NOT call repository mutation methods directly', () => {
+    // Repository mutation methods that should go through CoreApi → service → tx
+    const repoMutationRe = /\.(create|update|delete|approve|submit|finalize|supersede|withdraw|addItem|updateItemQuantity)\s*\(/;
+    for (const fname of transportFiles) {
+      const content = getTransportFile(fname)
+      const lines = nonCommentLines(content)
+      // Filter out: constructor calls (new X(...)), non-mutation context (e.g. .createBinding)
+      // and composition-root wiring (where repos are constructed, not mutated in request handling)
+      // We check for repo mutation calls that are NOT inside the composition-root (getDeps) function
+      // The transport files handle requests in the handler function, not in getDeps
+      // So we look for mutation calls AFTER the handler function starts
+      const handlerIdx = lines.findIndex((l) => /export default|async function handleRequest|async function handle/.test(l))
+      if (handlerIdx === -1) continue // server.ts uses startWebHost which delegates
+      const handlerLines = lines.slice(handlerIdx)
+      const violations = handlerLines.filter((line) =>
+        repoMutationRe.test(line) &&
+        !/createBinding|setDemoFlag|createDemoUser|createWithPassword|updatePasswordHash/.test(line) && // auth-infrastructure methods
+        !/new\s+\w+Repository/.test(line) && // constructor calls
+        !/deps\.(coreApi|resolver|passwordAuth|magicLinkAuth|users|memberships|organizations|magicLinks|waitlist|audit|config|magicLinkConfig)\b/.test(line), // deps access
+      )
+      expect(violations, `${fname} handler must not call repository mutation methods`).toEqual([])
     }
   })
 
@@ -193,30 +257,41 @@ describe('architecture: web-host commercial request handlers delegate to CoreApi
 })
 
 /**
- * Regression: a future transport module that bypasses CoreApi for commercial
- * routes should be caught by the regex patterns.
+ * Regression: patterns that would catch future bypasses.
  */
 describe('architecture: CoreApi delegation boundary regression', () => {
-  it('would catch a direct EstimateService import in a transport file', () => {
-    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+  it('would catch a direct EstimateService import', () => {
+    const re = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
     const fakeImport = "import { EstimateService } from '@contractor/core/service'"
-    expect(commercialServiceRe.test(fakeImport)).toBe(true)
+    expect(re.test(fakeImport)).toBe(true)
   })
 
-  it('would catch a direct createTenantContext call in a transport file', () => {
-    const fakeCall = "const ctx = createTenantContext(orgId, userId, membership)"
-    expect(/createTenantContext/.test(fakeCall)).toBe(true)
+  it('would catch a direct createTenantContext call', () => {
+    expect(/createTenantContext/.test("const ctx = createTenantContext(orgId, userId, membership)")).toBe(true)
+  })
+
+  it('would catch a second commercial router before coreApi.handle()', () => {
+    const re = /path\s*(===|startsWith\()\s*['"`]\/api\/(projects|estimates|bids|boqs|boq-items|measurements)/
+    expect(re.test("if (path === '/api/projects') { return ... }")).toBe(true)
+  })
+
+  it('would catch a direct boqs.addBOQItem(...) call', () => {
+    const re = /\.(createEstimateDraft|finalizeEstimate|supersedeEstimate|replayEstimate|updateEstimateDraft|createBid|submitBid|recordBidOutcome|withdrawBid|createBOQ|addBOQItem|updateBOQItemQuantity|createMeasurement)\s*\(/;
+    expect(re.test("await boqs.addBOQItem(item, boqId, ctx.tenantId)")).toBe(true)
   })
 
   it('would NOT flag a coreApi.handle() delegation', () => {
-    const fakeDelegation = "const apiRes = await deps.coreApi.handle(apiReq)"
-    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
-    expect(commercialServiceRe.test(fakeDelegation)).toBe(false)
+    const re = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    expect(re.test("const apiRes = await deps.coreApi.handle(apiReq)")).toBe(false)
   })
 
   it('would NOT flag an auth route handler', () => {
-    const fakeAuthHandler = "if (path === '/api/auth/password-login')"
-    const commercialServiceRe = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
-    expect(commercialServiceRe.test(fakeAuthHandler)).toBe(false)
+    const re = /\b(EstimateService|BidService|BOQService|PlanMeasurementService)\b/
+    expect(re.test("if (path === '/api/auth/password-login')")).toBe(false)
+  })
+
+  it('would NOT flag a composition-root constructor call', () => {
+    const re = /\.(create|update|delete|approve|submit|finalize|supersede|withdraw|addItem|updateItemQuantity)\s*\(/;
+    expect(re.test("const users = new UserRepository(db)")).toBe(false)
   })
 })
