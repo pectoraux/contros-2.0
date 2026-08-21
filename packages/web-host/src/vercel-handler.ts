@@ -218,7 +218,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return handleSelectTenant(req, res, deps)
     }
     if (path === '/api/auth/logout' && method === 'POST') {
-      res.setHeader('Set-Cookie', clearSessionCookieHeader(true))
+      res.setHeader('Set-Cookie', clearSessionCookieHeader(process.env.NODE_ENV === "production"))
       return sendJson(res, 200, { ok: true })
     }
     if (path === '/api/auth/session' && method === 'GET') {
@@ -282,7 +282,7 @@ async function handleDevLogin(req: IncomingMessage, res: ServerResponse, deps: C
   }
   const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
   const token = signSession({ userId: user.id, selectedMembershipId: null, exp }, deps.config.sessionSecret)
-  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, process.env.NODE_ENV === "production"))
   return sendJson(res, 200, { userId: user.id, email: user.email, displayName: user.displayName })
 }
 
@@ -315,7 +315,7 @@ async function handleVerify(req: IncomingMessage, res: ServerResponse, deps: Cac
     const result = await deps.magicLinkAuth.verifyLink(token)
     const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
     const sessionToken = signSession({ userId: result.userId, selectedMembershipId: null, exp }, deps.config.sessionSecret)
-    res.setHeader('Set-Cookie', sessionCookieHeader(sessionToken, deps.config.sessionTtlSeconds, true))
+    res.setHeader('Set-Cookie', sessionCookieHeader(sessionToken, deps.config.sessionTtlSeconds, process.env.NODE_ENV === "production"))
     // Redirect to the app root (tenant selection follows)
     res.writeHead(302, { Location: '/' })
     res.end()
@@ -353,7 +353,7 @@ async function handleSelectTenant(req: IncomingMessage, res: ServerResponse, dep
   if (!found) return sendJson(res, 403, { error: 'forbidden', message: 'Membership not found or not yours' })
   const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
   const token = signSession({ userId: payload.userId, selectedMembershipId: membershipId, exp }, deps.config.sessionSecret)
-  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, process.env.NODE_ENV === "production"))
   return sendJson(res, 200, { tenantId: found.organizationId, membershipId: found.id, role: found.role })
 }
 
@@ -381,7 +381,7 @@ async function handlePasswordLogin(req: IncomingMessage, res: ServerResponse, de
   if (!result) return sendJson(res, 401, { error: 'unauthenticated', message: 'Invalid email or password' })
   const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
   const token = signSession({ userId: result.userId, selectedMembershipId: null, exp }, deps.config.sessionSecret)
-  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, process.env.NODE_ENV === "production"))
   return sendJson(res, 200, { userId: result.userId })
 }
 
@@ -409,7 +409,7 @@ async function handleDemoLogin(req: IncomingMessage, res: ServerResponse, deps: 
   if (!result) return sendJson(res, 401, { error: 'unauthenticated', message: 'Demo user not found. Run the bootstrap script.' })
   const exp = Math.floor(Date.now() / 1000) + deps.config.sessionTtlSeconds
   const token = signSession({ userId: result.userId, selectedMembershipId: null, exp }, deps.config.sessionSecret)
-  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, true))
+  res.setHeader('Set-Cookie', sessionCookieHeader(token, deps.config.sessionTtlSeconds, process.env.NODE_ENV === "production"))
   return sendJson(res, 200, { userId: result.userId, role })
 }
 
