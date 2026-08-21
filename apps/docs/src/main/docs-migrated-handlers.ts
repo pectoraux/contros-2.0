@@ -122,10 +122,13 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
         windowFromSender(event), auto === true))
 
   // ── docs:save-as ────────────────────────────────────────────────────
+  // Increment 2E: pass callerWindow so the save dialog is parented to the
+  // caller's window (NOT getFocusedWindow()).
   ipcMain.removeHandler('docs:save-as')
   ipcMain.handle('docs:save-as',
     async (event: IpcMainInvokeEvent, defaultName: string, data: ArrayBuffer) =>
-      coordinator.saveDocxAs(event.sender.id, defaultName, new Uint8Array(data)))
+      coordinator.saveDocxAs(event.sender.id, defaultName, new Uint8Array(data),
+        windowFromSender(event)))
 
   // ── docs:save-new ───────────────────────────────────────────────────
   ipcMain.removeHandler('docs:save-new')
@@ -144,8 +147,13 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.handle('docs:recent', () => docsService.recentFiles())
 
   // ── docs:pick-image ─────────────────────────────────────────────────
+  // Increment 2E: route through the coordinator so the open dialog is
+  // parented to the caller's window (NOT getFocusedWindow()). Previously
+  // this bypassed the coordinator and called docsService.pickImage() with
+  // no parent — the dialog was parented to the global active window.
   ipcMain.removeHandler('docs:pick-image')
-  ipcMain.handle('docs:pick-image', () => docsService.pickImage())
+  ipcMain.handle('docs:pick-image', async (event: IpcMainInvokeEvent) =>
+    coordinator.pickImage(event.sender.id, windowFromSender(event)))
 
   // ── docs:font-metrics ───────────────────────────────────────────────
   ipcMain.removeHandler('docs:font-metrics')
@@ -158,12 +166,14 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
     coordinator.print(event.sender))
 
   // ── docs:export-pdf ─────────────────────────────────────────────────
+  // Increment 2E: pass callerWindow so the save dialog is parented to the
+  // caller's window (NOT getFocusedWindow()).
   ipcMain.removeHandler('docs:export-pdf')
   ipcMain.handle('docs:export-pdf',
     async (event: IpcMainInvokeEvent, defaultName: string, pageWidthTwips: number,
       pageHeightTwips: number, outPath?: string) =>
       coordinator.exportPdf(event.sender.id, defaultName, pageWidthTwips,
-        pageHeightTwips, outPath, event.sender))
+        pageHeightTwips, outPath, event.sender, windowFromSender(event)))
 
   // ── docs:print-pdf-buffer ───────────────────────────────────────────
   ipcMain.removeHandler('docs:print-pdf-buffer')
@@ -172,9 +182,12 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
       coordinator.printPdfBuffer(event.sender, pageWidthTwips, pageHeightTwips))
 
   // ── docs:save-merged-pdf ───────────────────────────────────────────
+  // Increment 2E: pass callerWindow so the save dialog is parented to the
+  // caller's window (NOT getFocusedWindow()).
   ipcMain.removeHandler('docs:save-merged-pdf')
   ipcMain.handle('docs:save-merged-pdf',
     async (event: IpcMainInvokeEvent, defaultName: string, base64Parts: string[],
       outPath?: string) =>
-      coordinator.saveMergedPdf(event.sender.id, defaultName, base64Parts, outPath))
+      coordinator.saveMergedPdf(event.sender.id, defaultName, base64Parts, outPath,
+        windowFromSender(event)))
 }

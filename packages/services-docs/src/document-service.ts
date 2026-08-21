@@ -27,6 +27,7 @@ import type {
   Printing,
   Settings,
   FileStat,
+  DialogParent,
 } from '@genoffice/platform'
 import type { DocumentService, DocumentSession } from '@genoffice/runtime-contracts'
 import type {
@@ -107,8 +108,8 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── File lifecycle (session-scoped) ───────────────────────────────────
 
-  async openDialog(): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
-    const handles = await this.deps.files.pickOpen({
+  async openDialog(parent?: DialogParent | null): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
+    const handles = await this.deps.files.pickOpen(parent, {
       accept: ['docx'],
       multiple: false,
     })
@@ -189,8 +190,9 @@ export class DocumentServiceImpl implements DocumentService {
     session: DocumentSession,
     defaultName: string,
     data: Uint8Array,
+    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }> {
-    const path = await this.deps.files.pickSave({
+    const path = await this.deps.files.pickSave(parent, {
       defaultName,
       accept: ['docx'],
     })
@@ -264,8 +266,8 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── Images & attachments ─────────────────────────────────────────────
 
-  async pickImage(): Promise<DocumentPickImageResult | null> {
-    const handles = await this.deps.files.pickOpen({
+  async pickImage(parent?: DialogParent | null): Promise<DocumentPickImageResult | null> {
+    const handles = await this.deps.files.pickOpen(parent, {
       accept: ['png', 'jpg', 'jpeg', 'gif'],
       multiple: false,
     })
@@ -282,8 +284,8 @@ export class DocumentServiceImpl implements DocumentService {
     }
   }
 
-  async pickAttachments(): Promise<DocumentAttachmentAddResult | null> {
-    const handles = await this.deps.files.pickOpen({
+  async pickAttachments(parent?: DialogParent | null): Promise<DocumentAttachmentAddResult | null> {
+    const handles = await this.deps.files.pickOpen(parent, {
       accept: [...ATTACHMENT_EXTS],
       multiple: true,
     })
@@ -368,10 +370,11 @@ export class DocumentServiceImpl implements DocumentService {
     pageWidthTwips: number,
     pageHeightTwips: number,
     outPath?: string,
+    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
     let filePath = outPath ?? null
     if (!filePath) {
-      filePath = (await this.deps.files.pickSave({
+      filePath = (await this.deps.files.pickSave(parent, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
         accept: ['pdf'],
       })) as string | null
@@ -396,10 +399,11 @@ export class DocumentServiceImpl implements DocumentService {
     defaultName: string,
     base64Parts: string[],
     outPath?: string,
+    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
     let filePath = outPath ?? null
     if (!filePath) {
-      filePath = (await this.deps.files.pickSave({
+      filePath = (await this.deps.files.pickSave(parent, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
         accept: ['pdf'],
       })) as string | null

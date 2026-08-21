@@ -99,7 +99,24 @@ export interface DocsShellCoordinatorImplDeps {
     focusTab(id: string): void
     closeActiveTab(): void
   }
-  files: { pickSave(opts: { defaultName: string; accept?: string[] }): Promise<string | null> }
+  /**
+   * Caller-specific file-picker wrappers.
+   *
+   * Increment 2E: each method takes a `parent: BrowserWindow | null` so the
+   * coordinator can pass the IPC caller's window through. The coordinator
+   * derives the parent from event.sender via `windowFromSender()` (see
+   * docs-migrated-handlers.ts). NEVER uses getFocusedWindow() as a fallback.
+   */
+  files: {
+    pickOpen(
+      parent: BrowserWindow | null,
+      opts?: { accept?: string[]; multiple?: boolean },
+    ): Promise<string[] | null>
+    pickSave(
+      parent: BrowserWindow | null,
+      opts: { defaultName: string; accept?: string[] },
+    ): Promise<string | null>
+  }
   printToPDF: (wc: WebContents, opts: never) => Promise<Buffer>
   print: (wc: WebContents, opts: never) => Promise<{ ok: boolean; error?: string }>
 }
@@ -121,24 +138,16 @@ export class DocsShellCoordinatorImpl {
   async openDocx(wcId: number, callerWindow: BrowserWindow | null):
     Promise<{ result: DocumentOpenResult } | null> {
     if (tornDownWcIds.has(wcId)) return null
-    const r = await this.deps.docs.openDialog()
-    if (!r) return null
-    // Recovery dialog uses the CALLER's window (NOT getFocusedWindow)
-    const originalBytes = new Uint8Array(r.result.data)
-    const recoveredBytes = await maybeRecoverDocBytes(
-      this.deps.userDataDir, r.session.filePath, originalBytes, callerWindow)
-    if (recoveredBytes !== originalBytes) {
-      r.result.data = recoveredBytes.buffer.slice(
-        recoveredBytes.byteOffset, recoveredBytes.byteOffset + recoveredBytes.byteLength) as ArrayBuffer
-    }
-    allowDocWrite(wcId, r.session.filePath)
-    wcSessions.set(wcId, r.session)
-    // Per-wcId routing: send docs:opened ONLY to the renderer that initiated
-    // this open. The service fires the domain `opened` event too (for any
-    // shell-level subscribers), but the IPC push to the renderer is routed
-    // here — never broadcast.
-    this.sendOpened(wcId, r.result)
-    return { result: r.result }
+    // Increment 2E: caller-specific file-picker dialog. The parent is the
+    // BrowserWindow derived from event.sender (NOT getFocusedWindow()).
+    const handles = await this.deps.files.pickOpen(callerWindow, {
+      accept: ['docx'],
+      multiple: false,
+    })
+    if (tornDownWcIds.has(wcId)) return null
+    if (!handles || handles.length === 0) return null
+    const filePath = handles[0]
+    return this.openDocxPath(wcId, filePath, callerWindow)
   }
 
   async openDocxPath(wcId: number, filePath: string, callerWindow: BrowserWindow | null):
@@ -195,11 +204,14 @@ export class DocsShellCoordinatorImpl {
     return { ok: result.ok, error: result.error }
   }
 
-  async saveDocxAs(wcId: number, defaultName: string, data: Uint8Array):
+  async saveDocxAs(wcId: number, defaultName: string, data: Uint8Array,
+    callerWindow: BrowserWindow | null):
     Promise<{ ok: boolean; path?: string; error?: string }> {
     if (tornDownWcIds.has(wcId)) return { ok: false }
     const session = wcSessions.get(wcId) ?? { filePath: '', hash: '' }
-    const result = await this.deps.docs.saveAs(session, defaultName, data)
+    // Increment 2E: caller-specific save dialog. The parent is the BrowserWindow
+    // derived from event.sender (NOT getFocusedWindow()).
+    const result = await this.deps.docs.saveAs(session, defaultName, data, callerWindow)
     if (tornDownWcIds.has(wcId)) return { ok: false }
     if (result.ok && result.path) {
       allowDocWrite(wcId, result.path)
@@ -239,17 +251,19 @@ export class DocsShellCoordinatorImpl {
     return { ok: true }
   }
 
-  // ── PDF export (authorize BEFORE write) ─────────────────────────────
+  // ── PDF export (authorize BEFORE write, caller-specific dialog) ────
 
   async exportPdf(wcId: number, defaultName: string, pageWidthTwips: number,
-    pageHeightTwips: number, outPath: string | undefined, wc: WebContents):
+    pageHeightTwips: number, outPath: string | undefined, wc: WebContents,
+    callerWindow: BrowserWindow | null):
     Promise<{ ok: boolean; path?: string; error?: string }> {
     if (tornDownWcIds.has(wcId)) return { ok: false }
     let filePath = outPath ?? null
     if (filePath && !canPdfWrite(wcId, filePath))
       return { ok: false, error: 'export target is not an authorized path' }
     if (!filePath) {
-      const picked = await this.deps.files.pickSave({
+      // Increment 2E: caller-specific save dialog (NOT getFocusedWindow()).
+      const picked = await this.deps.files.pickSave(callerWindow, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf', accept: ['pdf'],
       })
       if (tornDownWcIds.has(wcId)) return { ok: false }
@@ -272,14 +286,15 @@ export class DocsShellCoordinatorImpl {
   }
 
   async saveMergedPdf(wcId: number, defaultName: string, base64Parts: string[],
-    outPath: string | undefined):
+    outPath: string | undefined, callerWindow: BrowserWindow | null):
     Promise<{ ok: boolean; path?: string; error?: string }> {
     if (tornDownWcIds.has(wcId)) return { ok: false }
     let filePath = outPath ?? null
     if (filePath && !canPdfWrite(wcId, filePath))
       return { ok: false, error: 'export target is not an authorized path' }
     if (!filePath) {
-      const picked = await this.deps.files.pickSave({
+      // Increment 2E: caller-specific save dialog (NOT getFocusedWindow()).
+      const picked = await this.deps.files.pickSave(callerWindow, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf', accept: ['pdf'],
       })
       if (tornDownWcIds.has(wcId)) return { ok: false }
@@ -307,6 +322,22 @@ export class DocsShellCoordinatorImpl {
 
   async print(wc: WebContents): Promise<{ ok: boolean; error?: string }> {
     return this.deps.print(wc, { margins: { marginType: 'none' } } as never)
+  }
+
+  /**
+   * Pick an image via a caller-specific file-picker dialog.
+   *
+   * Increment 2E: the parent is the BrowserWindow derived from event.sender
+   * (NOT getFocusedWindow()). The coordinator calls `docs.pickImage(parent)`
+   * which forwards to `files.pickOpen(parent, ...)`.
+   */
+  async pickImage(wcId: number, callerWindow: BrowserWindow | null):
+    Promise<{ base64?: string; mime?: string; name?: string } | null> {
+    if (tornDownWcIds.has(wcId)) return null
+    const result = await this.deps.docs.pickImage(callerWindow)
+    if (tornDownWcIds.has(wcId)) return null
+    if (!result) return null
+    return { base64: result.base64, mime: result.mime, name: result.name }
   }
 
   async printPdfBuffer(wc: WebContents, pageWidthTwips: number, pageHeightTwips: number):

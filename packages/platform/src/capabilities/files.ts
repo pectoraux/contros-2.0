@@ -4,16 +4,39 @@
  * Electron: dialog.showOpenDialog/showSaveDialog + node:fs + shell.trashItem/showItemInFolder/openPath.
  * Web: showOpenFilePicker/showSaveFilePicker (FS Access API) + FileSystemFileHandle;
  *      trash/reveal degrade to download (no backend) or call backend (when available).
+ *
+ * Increment 2E: pickOpen/pickSave/pickDirectory accept an optional per-call
+ * `parent: DialogParent`. This is the caller-specific dialog parent (the
+ * BrowserWindow that owns the IPC sender, or the shell window for
+ * WebContentsView tabs). When omitted, the adapter falls back to its
+ * constructor-configured default (which may be null — modeless dialog).
+ *
+ * The capability NEVER silently substitutes BrowserWindow.getFocusedWindow()
+ * for a missing parent. The coordinator is responsible for deriving the parent
+ * from the IPC sender and passing it through.
  */
-import type { FileHandle, DirectoryHandle, FileStat, SaveResult } from '../types.js'
+import type { FileHandle, DirectoryHandle, FileStat, SaveResult, DialogParent } from '../types.js'
 
 export interface Files {
-  /** Pick one or more files to open; null when canceled. */
-  pickOpen(opts?: { accept?: string[]; multiple?: boolean }): Promise<FileHandle[] | null>
-  /** Pick a save destination; null when canceled. */
-  pickSave(opts: { defaultName: string; accept?: string[] }): Promise<FileHandle | null>
-  /** Pick a directory; null when canceled. */
-  pickDirectory(): Promise<DirectoryHandle | null>
+  /**
+   * Pick one or more files to open; null when canceled.
+   * `parent` is the caller-specific dialog parent (opaque). When omitted,
+   * the adapter uses its default (which may be null → modeless).
+   */
+  pickOpen(
+    parent?: DialogParent | null,
+    opts?: { accept?: string[]; multiple?: boolean },
+  ): Promise<FileHandle[] | null>
+  /**
+   * Pick a save destination; null when canceled.
+   * `parent` is the caller-specific dialog parent (opaque).
+   */
+  pickSave(
+    parent: DialogParent | null,
+    opts: { defaultName: string; accept?: string[] },
+  ): Promise<FileHandle | null>
+  /** Pick a directory; null when canceled. `parent` is the caller-specific dialog parent (opaque). */
+  pickDirectory(parent?: DialogParent | null): Promise<DirectoryHandle | null>
 
   /** Read file bytes + stat. */
   read(handle: FileHandle | string): Promise<{ bytes: Uint8Array; stat: FileStat }>

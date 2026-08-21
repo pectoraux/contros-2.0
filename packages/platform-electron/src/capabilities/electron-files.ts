@@ -10,16 +10,26 @@
  *
  * For Phase 1 increment 1, file handles are absolute path strings. The Web
  * adapter (in a later phase) will use FileSystemFileHandle instead.
+ *
+ * Increment 2E: pickOpen/pickSave/pickDirectory accept a per-call `parent`
+ * (DialogParent = unknown). The adapter casts it to BrowserWindow | null at
+ * runtime. When the per-call parent is `undefined` (not provided), the
+ * adapter falls back to the constructor-configured `parentWindow` callback
+ * (which may itself return null → modeless dialog).
+ *
+ * The adapter NEVER calls BrowserWindow.getFocusedWindow(). The coordinator
+ * is responsible for deriving the parent from the IPC sender.
  */
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { Buffer } from 'node:buffer'
+import type { BrowserWindow } from 'electron'
 import {
   showOpenDialogWithMemory,
   showSaveDialogWithMemory,
 } from '@genoffice/electron-utils'
-import type { Files, FileHandle, DirectoryHandle, FileStat } from '@genoffice/platform'
+import type { Files, FileHandle, DirectoryHandle, FileStat, DialogParent } from '@genoffice/platform'
 
 export interface ElectronFilesDeps {
   /** The Electron dialog module (electron.dialog) — injected for testability. */
@@ -33,22 +43,69 @@ export interface ElectronFilesDeps {
     showItemInFolder: (path: string) => void
     openPath: (path: string) => Promise<string>
   }
-  /** The Electron BrowserWindow (for dialog parent), or null. Passed as `any` to avoid coupling. */
+  /**
+   * The default BrowserWindow (for dialog parent) when no per-call parent
+   * is supplied. May return null (modeless fallback). Passed as `any` to
+   * avoid coupling the platform-electron public surface to BrowserWindow
+   * at the type level — the cast happens here, in the adapter.
+   *
+   * IMPORTANT: this callback MUST NOT call BrowserWindow.getFocusedWindow().
+   * The caller (docs-runtime.ts) is responsible for providing a resolver
+   * that returns the correct window for the current context, or null.
+   */
   parentWindow: (() => any | null) | null
   /** Fallback directory for the dialog-memory (the default save dir). */
   fallbackDir?: string
 }
 
+/**
+ * Cast the opaque `DialogParent` (unknown) to `BrowserWindow | null`.
+ *
+ * `DialogParent` is `unknown` in the platform package (no Electron dep).
+ * In this adapter, the value passed by the coordinator is always either:
+ *   - a `BrowserWindow` (when the IPC sender resolved to one), or
+ *   - `null` (when resolution failed — modeless fallback).
+ *
+ * The cast is safe because the coordinator only ever passes values derived
+ * from `BrowserWindow.fromWebContents()` or `callerWindowResolver()` — both
+ * of which return `BrowserWindow | null`.
+ */
+function asBrowserWindow(parent: DialogParent | null | undefined): BrowserWindow | null {
+  if (parent == null) return null
+  // The coordinator guarantees this is a BrowserWindow (or null). We cast
+  // through `unknown` because DialogParent is `unknown` — no runtime check
+  // is needed; the coordinator is the only caller.
+  return parent as BrowserWindow
+}
+
 export class ElectronFiles implements Files {
   constructor(private readonly deps: ElectronFilesDeps) {}
 
-  async pickOpen(opts?: {
-    accept?: string[]
-    multiple?: boolean
-  }): Promise<FileHandle[] | null> {
+  /**
+   * Resolve the dialog parent: per-call parent wins; otherwise fall back to
+   * the constructor-configured `parentWindow` callback; otherwise null
+   * (modeless). NEVER calls BrowserWindow.getFocusedWindow().
+   */
+  private resolveParent(parent: DialogParent | null | undefined): BrowserWindow | null {
+    const perCall = asBrowserWindow(parent)
+    if (perCall !== null) return perCall
+    // perCall was explicitly null OR parent was undefined — use the default
+    if (parent === undefined) {
+      // parent was not provided — use the constructor default
+      const def = this.deps.parentWindow?.() ?? null
+      return asBrowserWindow(def)
+    }
+    // parent was explicitly null — modeless
+    return null
+  }
+
+  async pickOpen(
+    parent?: DialogParent | null,
+    opts?: { accept?: string[]; multiple?: boolean },
+  ): Promise<FileHandle[] | null> {
     const result = await showOpenDialogWithMemory(
       this.deps.dialog as any,
-      this.deps.parentWindow?.() ?? null,
+      this.resolveParent(parent),
       {
         title: 'Open',
         filters: opts?.accept
@@ -65,13 +122,13 @@ export class ElectronFiles implements Files {
     return result.filePaths
   }
 
-  async pickSave(opts: {
-    defaultName: string
-    accept?: string[]
-  }): Promise<FileHandle | null> {
+  async pickSave(
+    parent: DialogParent | null,
+    opts: { defaultName: string; accept?: string[] },
+  ): Promise<FileHandle | null> {
     const result = await showSaveDialogWithMemory(
       this.deps.dialog as any,
-      this.deps.parentWindow?.() ?? null,
+      this.resolveParent(parent),
       {
         title: 'Save As',
         defaultPath: opts.defaultName,
@@ -85,10 +142,10 @@ export class ElectronFiles implements Files {
     return result.filePath
   }
 
-  async pickDirectory(): Promise<DirectoryHandle | null> {
+  async pickDirectory(parent?: DialogParent | null): Promise<DirectoryHandle | null> {
     const result = await showOpenDialogWithMemory(
       this.deps.dialog as any,
-      this.deps.parentWindow?.() ?? null,
+      this.resolveParent(parent),
       {
         title: 'Choose Directory',
         properties: ['openDirectory'],

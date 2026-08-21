@@ -32,6 +32,20 @@ export function initDocsRuntime(): DocsRuntimeBundle {
   const userDataDir = app.getPath('userData')
 
   // ── 1. Capabilities (NO setRuntime) ────────────────────────────────
+  //
+  // Increment 2E: the getActiveWindow / getActiveWebContents callbacks
+  // below are ONLY used as the default parent for the Files capability
+  // (when the coordinator doesn't pass a per-call parent) and for the
+  // Printing capability's print()/exportPdf() (which are NOT called from
+  // the migrated IPC path — the coordinator passes event.sender directly
+  // to printToPDF/print).
+  //
+  // These callbacks return null instead of falling back to
+  // BrowserWindow.getFocusedWindow(). The focused window is unrelated to
+  // the IPC caller — using it would attribute dialogs to the wrong window
+  // in multi-renderer scenarios. The coordinator ALWAYS passes a per-call
+  // parent derived from event.sender; these defaults are only a safety net
+  // for non-migrated call paths.
   const caps = createElectronCapabilities({
     appKind: 'docs',
     broadcast: (channel: string, ...args: unknown[]) => {
@@ -39,14 +53,8 @@ export function initDocsRuntime(): DocsRuntimeBundle {
         if (!wc.isDestroyed()) wc.webContents.send(channel, ...args)
       }
     },
-    getActiveWebContents: () => {
-      const win = BrowserWindow.getFocusedWindow()
-      return win && !win.isDestroyed() ? win.webContents : null
-    },
-    getActiveWindow: () => {
-      const win = BrowserWindow.getFocusedWindow()
-      return win && !win.isDestroyed() ? win : null
-    },
+    getActiveWebContents: () => null,
+    getActiveWindow: () => null,
   })
 
   // ── 2. Per-wcId push-event routing (NOT global activeWc, NOT broadcast) ─
@@ -98,14 +106,29 @@ export function initDocsRuntime(): DocsRuntimeBundle {
   )
 
   // ── 4. Coordinator (using service + capabilities) ──────────────────
+  //
+  // Increment 2E: the coordinator's `files` dep wraps caps.files with
+  // caller-specific pickOpen/pickSave that accept a BrowserWindow parent.
+  // The parent is derived from event.sender by the migrated IPC handlers
+  // (windowFromSender) — NEVER getFocusedWindow().
+  //
+  // The Electron Files capability returns `FileHandle` (string | {kind:'file'}).
+  // In Phase 1 the Electron adapter always returns string paths, so we cast
+  // to `string` here — this is the application-boundary cast (apps/docs),
+  // not a cast inside the platform/runtime-contracts/services-docs layer.
   const coordinator = new DocsShellCoordinatorImpl({
     docs: docsService,
     userDataDir,
     shellHooks: undefined, // Set by docs-main.ts when the shell connects
     files: {
-      pickSave: async (opts: { defaultName: string; accept?: string[] }) => {
-        const result = await caps.files.pickSave(opts)
-        return typeof result === 'string' ? result : null
+      pickOpen: async (parent, opts) => {
+        const handles = await caps.files.pickOpen(parent, opts)
+        if (!handles) return null
+        return handles.map((h) => typeof h === 'string' ? h : String(h))
+      },
+      pickSave: async (parent, opts) => {
+        const handle = await caps.files.pickSave(parent, opts)
+        return typeof handle === 'string' ? handle : handle ? String(handle) : null
       },
     },
     printToPDF: (wc: WebContents, opts: never) => wc.printToPDF(opts),

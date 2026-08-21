@@ -21,6 +21,26 @@ export interface FileStat {
   sizeBytes: number
 }
 
+/**
+ * Opaque dialog parent — a platform-specific handle to the window that
+ * owns a file-picker / message-box dialog.
+ *
+ * On Electron: a `BrowserWindow` (or null for a modeless fallback).
+ * On Web: a reference to the opener iframe / window (or null).
+ *
+ * The platform package does NOT depend on Electron — this is `unknown`,
+ * not `BrowserWindow`. The Electron adapter casts it back to
+ * `BrowserWindow | null` at runtime; the Web adapter will define its
+ * own interpretation.
+ *
+ * Increment 2E: this type exists so the Files capability can accept a
+ * per-call dialog parent WITHOUT putting Electron types in the platform
+ * interface. The coordinator derives it from the IPC sender
+ * (event.sender → BrowserWindow.fromWebContents → callerWindowResolver)
+ * and passes it through.
+ */
+export type DialogParent = unknown
+
 // ── Generic operation results ──────────────────────────────────────────
 
 export interface SaveResult {

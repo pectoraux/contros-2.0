@@ -123,13 +123,23 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true })
 })
 
-function makeCoordinator(): { coordinator: DocsShellCoordinatorImpl; docs: DocumentService } {
+type PickOpenFn = (parent: unknown, opts?: { accept?: string[]; multiple?: boolean }) => Promise<string[] | null>
+type PickSaveFn = (parent: unknown, opts: { defaultName: string; accept?: string[] }) => Promise<string | null>
+
+function makeCoordinator(
+  filesOverride?: Partial<{ pickOpen: ReturnType<typeof vi.fn>; pickSave: ReturnType<typeof vi.fn> }>,
+): { coordinator: DocsShellCoordinatorImpl; docs: DocumentService } {
   const docs = makeMockDocumentService()
+  const defaultPickOpen: PickOpenFn = async () => ['/test/file.docx']
+  const defaultPickSave: PickSaveFn = async () => null
   const coordinator = new DocsShellCoordinatorImpl({
     docs,
     userDataDir: tempDir,
     shellHooks: undefined,
-    files: { pickSave: vi.fn(async () => null) },
+    files: {
+      pickOpen: (filesOverride?.pickOpen as PickOpenFn | undefined) ?? defaultPickOpen,
+      pickSave: (filesOverride?.pickSave as PickSaveFn | undefined) ?? defaultPickSave,
+    },
     printToPDF: vi.fn(async () => Buffer.alloc(0)),
     print: vi.fn(async () => ({ ok: true })),
   })

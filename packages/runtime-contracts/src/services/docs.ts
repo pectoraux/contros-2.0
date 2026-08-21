@@ -17,6 +17,13 @@
  * The byte-preserving DOCX TRANSFORMATION remains in the renderer.
  *
  * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
+ *
+ * Increment 2E (dialog-parent forwarding):
+ *   openDialog, saveAs, pickImage, pickAttachments accept an optional
+ *   `parent: DialogParent` (opaque, from @genoffice/platform — `unknown`).
+ *   The coordinator derives this from the IPC sender and passes it through.
+ *   The service forwards it to the Files capability. NO Electron types
+ *   leak into this package — DialogParent is `unknown`.
  */
 import type {
   AiSettings,
@@ -26,6 +33,7 @@ import type {
   AiStreamChunk,
 } from '@genoffice/ai-provider'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
+import type { DialogParent } from '@genoffice/platform'
 import type {
   DocumentOpenResult,
   DocumentPickImageResult,
@@ -46,7 +54,13 @@ export interface DocumentSession {
 
 export interface DocumentService {
   // ── File lifecycle (session-scoped) ─────────────────────────────────
-  openDialog(): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null>
+  /**
+   * Open via a file-picker dialog. The `parent` is the caller-specific
+   * dialog parent (opaque). When omitted, the Files capability's default
+   * parent is used (which may be null → modeless). The service does NOT
+   * derive the parent itself — the coordinator is responsible.
+   */
+  openDialog(parent?: DialogParent | null): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null>
   open(path: string): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null>
 
   // ── Save (persistence only — renderer produces the bytes) ──────────
@@ -55,10 +69,15 @@ export interface DocumentService {
     data: Uint8Array,
     auto?: boolean,
   ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified'; session?: DocumentSession }>
+  /**
+   * Save via a file-picker "Save As" dialog. The `parent` is the
+   * caller-specific dialog parent (opaque).
+   */
   saveAs(
     session: DocumentSession,
     defaultName: string,
     data: Uint8Array,
+    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
   saveNew(
     defaultName: string,
@@ -68,8 +87,12 @@ export interface DocumentService {
   recentFiles(): Promise<string[]>
 
   // ── Images & attachments ─────────────────────────────────────────────
-  pickImage(): Promise<DocumentPickImageResult | null>
-  pickAttachments(): Promise<DocumentAttachmentAddResult | null>
+  /**
+   * Pick an image via a file-picker dialog. The `parent` is the
+   * caller-specific dialog parent (opaque).
+   */
+  pickImage(parent?: DialogParent | null): Promise<DocumentPickImageResult | null>
+  pickAttachments(parent?: DialogParent | null): Promise<DocumentAttachmentAddResult | null>
   addAttachmentPaths(paths: string[]): Promise<DocumentAttachmentAddResult>
   addPastedImage(data: ArrayBuffer, ext: string): Promise<DocumentAttachmentAddResult>
   readAttachment(
