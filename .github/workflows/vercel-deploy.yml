@@ -1,0 +1,34 @@
+name: Deploy to Vercel
+
+# Auto-deploys every push to main as a production deployment on Vercel.
+# Uses VERCEL_TOKEN, VERCEL_ORG_ID and VERCEL_PROJECT_ID repo secrets.
+# This replaces the Vercel-GitHub App integration (which requires a browser
+# OAuth consent flow) so the fork auto-deploys with only the Vercel token.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: vercel-prod-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy to Vercel (production)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          vercel deploy --prod --yes --token="$VERCEL_TOKEN"
+          echo "Production URL: https://genoffice.vercel.app"
