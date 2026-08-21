@@ -92,6 +92,9 @@
   "dependencies": {
     "@genoffice/electron-utils": "*",
     "@genoffice/font-metrics": "*",
+    "@genoffice/platform-electron": "*",
+    "@genoffice/runtime-contracts": "*",
+    "@genoffice/services-docs": "*",
     "electron-updater": "^6.8.9",
     "pdf-lib": "^1.17.1",
     "@genoffice/pptx-render": "*"
