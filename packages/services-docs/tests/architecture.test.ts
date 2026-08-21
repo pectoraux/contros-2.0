@@ -164,4 +164,25 @@ describe('@genoffice/services-docs architecture boundary', () => {
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
+
+  // Increment 2F: the domain service MUST NOT know that file-picker dialogs exist.
+  // No `DialogParent`, `BrowserWindow`, `parentWindow`, `dialog`, `showOpenDialog`,
+  // `showSaveDialog`, `pickOpen`, `pickSave`, or `pickDirectory` references in source.
+  // The shell (DocsShellCoordinator) owns the dialog; the service receives
+  // already-resolved paths.
+  test('ZERO dialog-parent / window / browser concepts (Increment 2F: domain service is dialog-unaware)', () => {
+    const hits = scanForTokens(SRC, [
+      'DialogParent',
+      'BrowserWindow',
+      'parentWindow',
+      'showOpenDialog',
+      'showSaveDialog',
+      'pickOpen(',
+      'pickSave(',
+      'pickDirectory(',
+      'openDialog(',
+    ])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
 })

@@ -147,10 +147,9 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.handle('docs:recent', () => docsService.recentFiles())
 
   // ── docs:pick-image ─────────────────────────────────────────────────
-  // Increment 2E: route through the coordinator so the open dialog is
-  // parented to the caller's window (NOT getFocusedWindow()). Previously
-  // this bypassed the coordinator and called docsService.pickImage() with
-  // no parent — the dialog was parented to the global active window.
+  // Increment 2F: route through the coordinator which owns the file-picker
+  // dialog. The coordinator calls files.pickOpen(callerWindow, ...) to resolve
+  // a path, then calls docs.readImage(path) — the service never touches a dialog.
   ipcMain.removeHandler('docs:pick-image')
   ipcMain.handle('docs:pick-image', async (event: IpcMainInvokeEvent) =>
     coordinator.pickImage(event.sender.id, windowFromSender(event)))

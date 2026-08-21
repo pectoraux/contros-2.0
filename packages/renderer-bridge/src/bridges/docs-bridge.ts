@@ -73,11 +73,16 @@ export function createDocsDesktopBridge(deps: DocsBridgeDeps): DesktopApi {
     saveDocxNew: (defaultName, data) =>
       coordinator.saveDocxNew(defaultName, new Uint8Array(data)),
 
-    // ── Domain operations (delegate to DocumentService via requireWired) ──
+    // ── Domain operations ──────────────────────────────────────────────
+    // Increment 2F: pickImage/pickAttachments route through the coordinator
+    // (which owns the caller-specific file-picker dialog) instead of calling
+    // the service directly. The service's readImage/collectAttachments take
+    // already-resolved paths — the bridge can't call them directly because
+    // it has no caller window context. The coordinator does.
     getRecentFiles: () => requireWired(runtime.docs, 'DocumentService').recentFiles(),
-    pickImage: () => requireWired(runtime.docs, 'DocumentService').pickImage(),
+    pickImage: () => coordinator.pickImage(),
+    pickAttachments: () => coordinator.pickAttachments(),
     fontMetrics: (family) => requireWired(runtime.docs, 'DocumentService').fontMetrics(family),
-    pickAttachments: () => requireWired(runtime.docs, 'DocumentService').pickAttachments(),
     addAttachmentPaths: (paths) => requireWired(runtime.docs, 'DocumentService').addAttachmentPaths(paths),
     addPastedImage: (data, ext) => requireWired(runtime.docs, 'DocumentService').addPastedImage(data, ext),
     readAttachment: (path, offset, maxChars) =>

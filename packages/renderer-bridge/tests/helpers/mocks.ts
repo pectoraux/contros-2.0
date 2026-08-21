@@ -80,9 +80,12 @@ export const SETTINGS_METHODS = [
 // ── Service method lists (for stable mock caches) ─────────────────────
 
 export const DOCS_SERVICE_METHODS = [
-  'openDialog', 'open', 'consumePendingOpen', 'consumeNewBlank',
+  // Increment 2F: openDialog/pickImage/pickAttachments removed from the service
+  // (the shell owns the file-picker dialog; the service receives already-resolved paths).
+  // Added: readImage(path), collectAttachments(paths).
+  'open', 'consumePendingOpen', 'consumeNewBlank',
   'save', 'saveAs', 'saveNew', 'writeRecovery', 'recentFiles',
-  'pickImage', 'addAttachmentPaths', 'pickAttachments',
+  'readImage', 'addAttachmentPaths', 'collectAttachments',
   'addPastedImage', 'readAttachment', 'readAttachmentImage',
   'fontMetrics', 'print', 'exportPdf', 'printPdfBuffer', 'saveMergedPdf',
   'openNewTab', 'listDocsTabs', 'focusDocsTab',

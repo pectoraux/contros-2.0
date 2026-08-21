@@ -40,8 +40,8 @@ vi.mock('electron', () => ({
 
 // ── Mock DocumentService ─────────────────────────────────────────────────
 //
-// The coordinator calls deps.docs.openDialog() / deps.docs.open(path).
-// We mock these to return a controlled { session, result } without touching
+// The coordinator calls deps.docs.open(path) (the shell owns the dialog).
+// We mock open() to return a controlled { session, result } without touching
 // the real filesystem (except for the recovery-exists check, which we
 // bypass by pointing userDataDir at an empty temp dir).
 
@@ -78,15 +78,16 @@ function makeMockDocumentService(): DocumentService {
   })
 
   return {
-    openDialog: vi.fn(async () => open('/test/file.docx')),
+    // Increment 2F: openDialog/pickImage/pickAttachments removed from the service.
+    // The service receives already-resolved paths.
     open,
     save: vi.fn(async () => ({ ok: true })),
     saveAs: vi.fn(async () => ({ ok: true, path: '/test/saved.docx' })),
     saveNew: vi.fn(async () => ({ ok: true, path: '/test/new.docx' })),
     writeRecovery: vi.fn(async () => ({ ok: true })),
     recentFiles: vi.fn(async () => []),
-    pickImage: vi.fn(async () => null),
-    pickAttachments: vi.fn(async () => null),
+    readImage: vi.fn(async () => null),
+    collectAttachments: vi.fn(async () => ({ accepted: [], rejected: [] })),
     addAttachmentPaths: vi.fn(async () => ({ accepted: [], rejected: [] })),
     addPastedImage: vi.fn(async () => ({ accepted: [], rejected: [] })),
     readAttachment: vi.fn(async () => ({ ok: false, error: 'mock' })),

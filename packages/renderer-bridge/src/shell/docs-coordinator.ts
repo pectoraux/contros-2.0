@@ -105,6 +105,16 @@ export interface DocsShellCoordinator {
   ): Promise<{ ok: boolean; path?: string; error?: string }>
   writeRecovery(path: string, data: Uint8Array): Promise<{ ok: boolean }>
 
+  // ── Image & attachment picking (Increment 2F) ─────────────────────
+  // The bridge (renderer-side window.desktop API) calls these no-arg
+  // methods. The concrete coordinator implementation (apps/docs/src/main/
+  // docs-coordinator-impl.ts) accepts (wcId, callerWindow) for caller-
+  // specific dialog parenting; the bridge-bound coordinator adapter wraps
+  // them with a default wcId/callerWindow (typically the active tab).
+  // The shell owns the file-picker dialog — the service never sees a dialog.
+  pickImage(): Promise<{ base64: string; mime: 'image/png' | 'image/jpeg' | 'image/gif'; name: string } | null>
+  pickAttachments(): Promise<{ accepted: Array<{ path: string; name: string; ext: string; sizeBytes: number }>; rejected: string[] } | null>
+
   // ── Tab operations (shell orchestration) ──────────────────────────
   openNewTab(openPath?: string | null): Promise<void>
   listDocsTabs(): Promise<ShellTabInfo[]>

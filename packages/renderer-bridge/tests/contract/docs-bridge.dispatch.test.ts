@@ -21,6 +21,10 @@ function mockCoordinator(): DocsShellCoordinator {
     saveDocxAs: vi.fn().mockResolvedValue({ ok: false }),
     saveDocxNew: vi.fn().mockResolvedValue({ ok: false }),
     writeRecovery: vi.fn().mockResolvedValue({ ok: true }),
+    // Increment 2F: pickImage/pickAttachments now live on the coordinator
+    // (the shell owns the file-picker dialog).
+    pickImage: vi.fn().mockResolvedValue(null),
+    pickAttachments: vi.fn().mockResolvedValue(null),
     openNewTab: vi.fn().mockResolvedValue(undefined),
     listDocsTabs: vi.fn().mockResolvedValue([]),
     focusDocsTab: vi.fn().mockResolvedValue(undefined),
@@ -43,15 +47,16 @@ function makeBridge(runtime: RuntimeContext) {
 function makeWiredRuntime() {
   const runtime = mockRuntime()
   ;(runtime as any).docs = {
-    openDialog: vi.fn().mockResolvedValue(null),
+    // Increment 2F: openDialog/pickImage/pickAttachments removed from the service.
+    // The service receives already-resolved paths.
     open: vi.fn().mockResolvedValue(null),
     save: vi.fn().mockResolvedValue({ ok: true }),
     saveAs: vi.fn().mockResolvedValue({ ok: false }),
     saveNew: vi.fn().mockResolvedValue({ ok: false }),
     writeRecovery: vi.fn().mockResolvedValue({ ok: true }),
     recentFiles: vi.fn().mockResolvedValue([]),
-    pickImage: vi.fn().mockResolvedValue(null),
-    pickAttachments: vi.fn().mockResolvedValue(null),
+    readImage: vi.fn().mockResolvedValue(null),
+    collectAttachments: vi.fn().mockResolvedValue({ accepted: [], rejected: [] }),
     addAttachmentPaths: vi.fn().mockResolvedValue({ accepted: [], rejected: [] }),
     addPastedImage: vi.fn().mockResolvedValue({ accepted: [], rejected: [] }),
     readAttachment: vi.fn().mockResolvedValue({ ok: false, error: '' }),

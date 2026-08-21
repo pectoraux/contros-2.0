@@ -77,4 +77,26 @@ describe('dependency direction: runtime-contracts must not import from app layer
     ])
     expect(hits).toEqual([])
   })
+
+  // Increment 2F: runtime-contracts (Layer 1) MUST NOT depend on @genoffice/platform
+  // (Layer 3). The previous Increment 2E violated this by importing `DialogParent`
+  // from platform into services/docs.ts. This test enforces the frozen dependency
+  // direction: runtime-contracts → (nothing below it except @genoffice/ai-provider
+  // and @genoffice/font-metrics, which are workspace packages, not platform layers).
+  //
+  // EXCEPTION: src/runtime.ts imports capability INTERFACES (Storage, Files, AI,
+  // Printing, Clipboard, Notifications, Windowing, Settings) from @genoffice/platform
+  // because RuntimeContext AGGREGATES them. This is a pre-existing frozen contract
+  // (ADR-001) — the RuntimeContext type MUST reference the capability interfaces.
+  // The exception is narrowly scoped: ONLY runtime.ts may import from platform,
+  // and ONLY type-only imports (no runtime values). No other file may import
+  // from @genoffice/platform — especially not services/docs.ts (which 2E
+  // incorrectly imported DialogParent from).
+  test('runtime-contracts has ZERO imports from @genoffice/platform EXCEPT runtime.ts (frozen RuntimeContext aggregate)', () => {
+    const SRC = join(__dirname, '..', 'src')
+    const hits = scanForImports(SRC, ['@genoffice/platform'])
+    // Allow ONLY src/runtime.ts (the frozen RuntimeContext aggregate)
+    const violations = hits.filter((h) => !h.file.endsWith('runtime.ts'))
+    expect(violations).toEqual([])
+  })
 })

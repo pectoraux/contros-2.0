@@ -138,8 +138,10 @@ export class DocsShellCoordinatorImpl {
   async openDocx(wcId: number, callerWindow: BrowserWindow | null):
     Promise<{ result: DocumentOpenResult } | null> {
     if (tornDownWcIds.has(wcId)) return null
-    // Increment 2E: caller-specific file-picker dialog. The parent is the
-    // BrowserWindow derived from event.sender (NOT getFocusedWindow()).
+    // Increment 2F: the SHELL owns the file-picker dialog. The coordinator
+    // calls files.pickOpen(callerWindow, ...) to resolve a path, then calls
+    // openDocxPath(wcId, path, callerWindow) which calls docs.open(path).
+    // The service never touches a dialog.
     const handles = await this.deps.files.pickOpen(callerWindow, {
       accept: ['docx'],
       multiple: false,
@@ -209,9 +211,17 @@ export class DocsShellCoordinatorImpl {
     Promise<{ ok: boolean; path?: string; error?: string }> {
     if (tornDownWcIds.has(wcId)) return { ok: false }
     const session = wcSessions.get(wcId) ?? { filePath: '', hash: '' }
-    // Increment 2E: caller-specific save dialog. The parent is the BrowserWindow
-    // derived from event.sender (NOT getFocusedWindow()).
-    const result = await this.deps.docs.saveAs(session, defaultName, data, callerWindow)
+    // Increment 2F: the SHELL owns the file-picker dialog. The coordinator
+    // calls files.pickSave(callerWindow, ...) to resolve the path, then passes
+    // the selected path into the domain service's saveAs(session, selectedPath, data).
+    // The service never knows a dialog existed.
+    const selectedPath = await this.deps.files.pickSave(callerWindow, {
+      defaultName,
+      accept: ['docx'],
+    })
+    if (tornDownWcIds.has(wcId)) return { ok: false }
+    if (!selectedPath) return { ok: false }
+    const result = await this.deps.docs.saveAs(session, selectedPath, data)
     if (tornDownWcIds.has(wcId)) return { ok: false }
     if (result.ok && result.path) {
       allowDocWrite(wcId, result.path)
@@ -262,7 +272,9 @@ export class DocsShellCoordinatorImpl {
     if (filePath && !canPdfWrite(wcId, filePath))
       return { ok: false, error: 'export target is not an authorized path' }
     if (!filePath) {
-      // Increment 2E: caller-specific save dialog (NOT getFocusedWindow()).
+      // Increment 2F: the SHELL owns the file-picker dialog. The coordinator
+      // calls files.pickSave(callerWindow, ...) to resolve the path. The
+      // service receives the already-resolved outPath — it never touches a dialog.
       const picked = await this.deps.files.pickSave(callerWindow, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf', accept: ['pdf'],
       })
@@ -293,7 +305,8 @@ export class DocsShellCoordinatorImpl {
     if (filePath && !canPdfWrite(wcId, filePath))
       return { ok: false, error: 'export target is not an authorized path' }
     if (!filePath) {
-      // Increment 2E: caller-specific save dialog (NOT getFocusedWindow()).
+      // Increment 2F: the SHELL owns the file-picker dialog. The coordinator
+      // calls files.pickSave(callerWindow, ...) to resolve the path.
       const picked = await this.deps.files.pickSave(callerWindow, {
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf', accept: ['pdf'],
       })
@@ -327,17 +340,52 @@ export class DocsShellCoordinatorImpl {
   /**
    * Pick an image via a caller-specific file-picker dialog.
    *
-   * Increment 2E: the parent is the BrowserWindow derived from event.sender
-   * (NOT getFocusedWindow()). The coordinator calls `docs.pickImage(parent)`
-   * which forwards to `files.pickOpen(parent, ...)`.
+   * Increment 2F: the SHELL owns the dialog. The coordinator calls
+   * `files.pickOpen(callerWindow, ...)` to resolve a path, then calls
+   * `docs.readImage(path)` to read the already-picked image. The service
+   * never touches a dialog.
+   *
+   * The parent is the BrowserWindow derived from event.sender
+   * (NOT getFocusedWindow()).
    */
   async pickImage(wcId: number, callerWindow: BrowserWindow | null):
-    Promise<{ base64?: string; mime?: string; name?: string } | null> {
+    Promise<{ base64: string; mime: 'image/png' | 'image/jpeg' | 'image/gif'; name: string } | null> {
     if (tornDownWcIds.has(wcId)) return null
-    const result = await this.deps.docs.pickImage(callerWindow)
+    // Shell-side dialog: resolve the image path with the caller's window.
+    const handles = await this.deps.files.pickOpen(callerWindow, {
+      accept: ['png', 'jpg', 'jpeg', 'gif'],
+      multiple: false,
+    })
+    if (tornDownWcIds.has(wcId)) return null
+    if (!handles || handles.length === 0) return null
+    const selectedPath = handles[0]
+    // Domain call: the service reads the already-picked image. No dialog parent.
+    const result = await this.deps.docs.readImage(selectedPath)
     if (tornDownWcIds.has(wcId)) return null
     if (!result) return null
     return { base64: result.base64, mime: result.mime, name: result.name }
+  }
+
+  /**
+   * Pick attachments via a caller-specific file-picker dialog.
+   *
+   * Increment 2F: the SHELL owns the dialog. The coordinator calls
+   * `files.pickOpen(callerWindow, ...)` to resolve paths, then calls
+   * `docs.collectAttachments(paths)` to validate them. The service never
+   * touches a dialog.
+   */
+  async pickAttachments(wcId: number, callerWindow: BrowserWindow | null):
+    Promise<{ accepted: Array<{ path: string; name: string; ext: string; sizeBytes: number }>; rejected: string[] } | null> {
+    if (tornDownWcIds.has(wcId)) return null
+    const handles = await this.deps.files.pickOpen(callerWindow, {
+      accept: ['docx', 'xlsx', 'pptx', 'pdf', 'txt', 'md', 'markdown', 'csv', 'png', 'jpg', 'jpeg', 'gif', 'webp'],
+      multiple: true,
+    })
+    if (tornDownWcIds.has(wcId)) return null
+    if (!handles || handles.length === 0) return null
+    const result = await this.deps.docs.collectAttachments(handles)
+    if (tornDownWcIds.has(wcId)) return null
+    return result
   }
 
   async printPdfBuffer(wc: WebContents, pageWidthTwips: number, pageHeightTwips: number):

@@ -27,7 +27,6 @@ import type {
   Printing,
   Settings,
   FileStat,
-  DialogParent,
 } from '@genoffice/platform'
 import type { DocumentService, DocumentSession } from '@genoffice/runtime-contracts'
 import type {
@@ -108,15 +107,9 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── File lifecycle (session-scoped) ───────────────────────────────────
 
-  async openDialog(parent?: DialogParent | null): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
-    const handles = await this.deps.files.pickOpen(parent, {
-      accept: ['docx'],
-      multiple: false,
-    })
-    if (!handles || handles.length === 0) return null
-    const path = handles[0] as string
-    return this.open(path)
-  }
+  // NOTE (Increment 2F): there is no openDialog() here. The shell
+  // (DocsShellCoordinator) calls Files.pickOpen(parent, opts) to resolve
+  // a path, then calls open(path). The service never touches a dialog.
 
   async open(path: string): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
     try {
@@ -188,18 +181,13 @@ export class DocumentServiceImpl implements DocumentService {
 
   async saveAs(
     session: DocumentSession,
-    defaultName: string,
+    selectedPath: string,
     data: Uint8Array,
-    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }> {
-    const path = await this.deps.files.pickSave(parent, {
-      defaultName,
-      accept: ['docx'],
-    })
-    if (!path) return { ok: false }
-
+    // The shell already ran the "Save As" file-picker dialog and passed the
+    // selected path. The service just persists — it never touches a dialog.
     try {
-      const filePath = path as string
+      const filePath = selectedPath
       await this.deps.files.write(filePath, data)
       const stat = await this.deps.files.stat(filePath)
       const hash = await this.hashBytes(data)
@@ -266,13 +254,15 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── Images & attachments ─────────────────────────────────────────────
 
-  async pickImage(parent?: DialogParent | null): Promise<DocumentPickImageResult | null> {
-    const handles = await this.deps.files.pickOpen(parent, {
-      accept: ['png', 'jpg', 'jpeg', 'gif'],
-      multiple: false,
-    })
-    if (!handles || handles.length === 0) return null
-    const filePath = handles[0] as string
+  // NOTE (Increment 2F): there are no pickImage()/pickAttachments() methods
+  // that take a dialog parent. The shell (DocsShellCoordinator) runs the
+  // file-picker dialog (Files.pickOpen with the caller-specific parent)
+  // and passes the SELECTED PATH(S) here:
+  //   - readImage(path) — read an already-picked image file as base64
+  //   - collectAttachments(paths) — validate already-picked attachment paths
+
+  async readImage(path: string): Promise<DocumentPickImageResult | null> {
+    const filePath = path
     const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
     const mime = IMAGE_MIME[ext]
     if (!mime) return null
@@ -284,17 +274,12 @@ export class DocumentServiceImpl implements DocumentService {
     }
   }
 
-  async pickAttachments(parent?: DialogParent | null): Promise<DocumentAttachmentAddResult | null> {
-    const handles = await this.deps.files.pickOpen(parent, {
-      accept: [...ATTACHMENT_EXTS],
-      multiple: true,
-    })
-    if (!handles || handles.length === 0) return null
-    return this.collectAttachments(handles as string[])
+  async collectAttachments(paths: string[]): Promise<DocumentAttachmentAddResult> {
+    return this.collectAttachmentsImpl(paths)
   }
 
   async addAttachmentPaths(paths: string[]): Promise<DocumentAttachmentAddResult> {
-    return this.collectAttachments(paths)
+    return this.collectAttachmentsImpl(paths)
   }
 
   async addPastedImage(data: ArrayBuffer, ext: string): Promise<DocumentAttachmentAddResult> {
@@ -365,26 +350,21 @@ export class DocumentServiceImpl implements DocumentService {
     return this.deps.printing.print()
   }
 
+  /**
+   * Export to an already-resolved outPath. The shell (DocsShellCoordinator)
+   * runs the "Save As" file-picker dialog when no outPath was pre-authorized,
+   * and passes the selected path here. The service NEVER calls a dialog.
+   */
   async exportPdf(
-    defaultName: string,
+    outPath: string,
     pageWidthTwips: number,
     pageHeightTwips: number,
-    outPath?: string,
-    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
-    let filePath = outPath ?? null
-    if (!filePath) {
-      filePath = (await this.deps.files.pickSave(parent, {
-        defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
-        accept: ['pdf'],
-      })) as string | null
-      if (!filePath) return { ok: false }
-    }
     return this.deps.printing.exportPdf({
-      defaultName,
+      defaultName: '',
       pageWidthTwips,
       pageHeightTwips,
-      outPath: filePath,
+      outPath,
     })
   }
 
@@ -395,21 +375,15 @@ export class DocumentServiceImpl implements DocumentService {
     return this.deps.printing.printToBytes({ pageWidthTwips, pageHeightTwips })
   }
 
+  /**
+   * Save merged PDF to an already-resolved outPath. The shell runs the
+   * "Save As" file-picker dialog and passes the selected path here.
+   */
   async saveMergedPdf(
-    defaultName: string,
+    outPath: string,
     base64Parts: string[],
-    outPath?: string,
-    parent?: DialogParent | null,
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
-    let filePath = outPath ?? null
-    if (!filePath) {
-      filePath = (await this.deps.files.pickSave(parent, {
-        defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
-        accept: ['pdf'],
-      })) as string | null
-      if (!filePath) return { ok: false }
-    }
-    return this.deps.printing.saveMergedPdf(defaultName, base64Parts, filePath)
+    return this.deps.printing.saveMergedPdf('', base64Parts, outPath)
   }
 
   // ── AI (delegates to runtime.ai) ─────────────────────────────────────
@@ -525,7 +499,7 @@ export class DocumentServiceImpl implements DocumentService {
     await this.deps.storage.writeObject('docs', 'recents', filtered.slice(0, RECENT_FILES_MAX))
   }
 
-  private async collectAttachments(paths: string[]): Promise<DocumentAttachmentAddResult> {
+  private async collectAttachmentsImpl(paths: string[]): Promise<DocumentAttachmentAddResult> {
     const accepted: DocumentAttachmentAddResult['accepted'] = []
     const rejected: string[] = []
     for (const p of paths) {

@@ -66,7 +66,8 @@ function makeMockWebContents(id: number): MockWebContents {
 function makeMockDocumentService(): DocumentService & {
   open: ReturnType<typeof vi.fn>
   saveAs: ReturnType<typeof vi.fn>
-  pickImage: ReturnType<typeof vi.fn>
+  readImage: ReturnType<typeof vi.fn>
+  collectAttachments: ReturnType<typeof vi.fn>
 } {
   const open = vi.fn(async (filePath: string) => {
     const session: DocumentSession = {
@@ -84,18 +85,20 @@ function makeMockDocumentService(): DocumentService & {
   })
 
   const saveAs = vi.fn(async () => ({ ok: true, path: '/test/saved.docx' }))
-  const pickImage = vi.fn(async () => ({ base64: 'b64', mime: 'image/png' as const, name: 'img.png' }))
+  const readImage = vi.fn(async () => ({ base64: 'b64', mime: 'image/png' as const, name: 'img.png' }))
+  const collectAttachments = vi.fn(async () => ({ accepted: [], rejected: [] }))
 
   return {
-    openDialog: vi.fn(async () => null),
+    // Increment 2F: openDialog/pickImage/pickAttachments removed from the service.
+    // The service receives already-resolved paths.
     open,
     save: vi.fn(async () => ({ ok: true })),
     saveAs,
     saveNew: vi.fn(async () => ({ ok: true, path: '/test/new.docx' })),
     writeRecovery: vi.fn(async () => ({ ok: true })),
     recentFiles: vi.fn(async () => []),
-    pickImage,
-    pickAttachments: vi.fn(async () => null),
+    readImage,
+    collectAttachments,
     addAttachmentPaths: vi.fn(async () => ({ accepted: [], rejected: [] })),
     addPastedImage: vi.fn(async () => ({ accepted: [], rejected: [] })),
     readAttachment: vi.fn(async () => ({ ok: false, error: 'mock' })),
@@ -117,7 +120,8 @@ function makeMockDocumentService(): DocumentService & {
   } as unknown as DocumentService & {
     open: ReturnType<typeof vi.fn>
     saveAs: ReturnType<typeof vi.fn>
-    pickImage: ReturnType<typeof vi.fn>
+    readImage: ReturnType<typeof vi.fn>
+    collectAttachments: ReturnType<typeof vi.fn>
   }
 }
 
@@ -211,7 +215,7 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
 
       // Open a file first so saveDocxAs has a session
       await coordinator.openDocxPath(wcA.id, '/test/source.docx', winA)
-      // Reset the docs.saveAs mock to capture the parent forwarding
+      // Reset the docs.saveAs mock to capture the call
       ;(docs.saveAs as ReturnType<typeof vi.fn>).mockClear()
       ;(docs.saveAs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         ok: true,
@@ -220,17 +224,26 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
 
       await coordinator.saveDocxAs(wcA.id, 'saved.docx', new Uint8Array(8), winA)
 
-      // The coordinator calls docs.saveAs(session, defaultName, data, parent)
-      // — the parent must be winA, NOT winB
+      // Increment 2F: the SHELL owns the dialog. The coordinator calls
+      // files.pickSave(callerWindow, ...) — the parent must be winA, NOT winB.
+      // The service's saveAs(session, selectedPath, data) takes NO parent.
+      expect(pickSave).toHaveBeenCalledTimes(1)
+      expect(pickSave.mock.calls[0][0]).toBe(winA) // parent is winA
+      // The service received the selected path (not a dialog parent)
       expect(docs.saveAs).toHaveBeenCalledTimes(1)
       const saveAsCallArgs = (docs.saveAs as ReturnType<typeof vi.fn>).mock.calls[0]
-      expect(saveAsCallArgs[3]).toBe(winA) // 4th arg is `parent`
+      expect(saveAsCallArgs[1]).toBe('/test/saved.docx') // selectedPath
+      expect(saveAsCallArgs.length).toBe(3) // session, selectedPath, data — NO parent arg
     })
 
     it('Window B initiates save-as, A is focused → save dialog parented to B', async () => {
+      const pickSave = vi.fn(async (parent: unknown) => {
+        expect(parent).toBe(winB)
+        return '/test/saved-b.docx'
+      })
       const { coordinator, docs } = makeCoordinator({
         pickOpen: vi.fn(async () => null),
-        pickSave: vi.fn(async () => '/test/saved-b.docx'),
+        pickSave,
       })
       const winA = makeFakeWindow(701) // focused but irrelevant
       const winB = makeFakeWindow(702)
@@ -246,9 +259,14 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
 
       await coordinator.saveDocxAs(wcB.id, 'saved-b.docx', new Uint8Array(8), winB)
 
+      // Increment 2F: the parent is winB (the caller), NOT winA (focused)
+      expect(pickSave).toHaveBeenCalledTimes(1)
+      expect(pickSave.mock.calls[0][0]).toBe(winB) // parent is winB
+      // The service received the selected path
       expect(docs.saveAs).toHaveBeenCalledTimes(1)
       const saveAsCallArgs = (docs.saveAs as ReturnType<typeof vi.fn>).mock.calls[0]
-      expect(saveAsCallArgs[3]).toBe(winB) // parent is winB, NOT winA
+      expect(saveAsCallArgs[1]).toBe('/test/saved-b.docx') // selectedPath
+      expect(saveAsCallArgs.length).toBe(3) // NO parent arg
     })
   })
 
@@ -313,8 +331,12 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
 
   describe('docs:pick-image (pickImage)', () => {
     it('Window A initiates pick-image, B is focused → open dialog parented to A', async () => {
+      const pickOpen = vi.fn(async (parent: unknown) => {
+        expect(parent).toBe(winA)
+        return ['/test/img.png']
+      })
       const { coordinator, docs } = makeCoordinator({
-        pickOpen: vi.fn(async () => null),
+        pickOpen,
         pickSave: vi.fn(async () => null),
       })
       const winA = makeFakeWindow(1301)
@@ -322,9 +344,10 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
       const wcA = makeMockWebContents(1401)
       coordinator.registerWebContents(wcA.id, wcA as never)
 
-      // docs.pickImage receives the parent and forwards to files.pickOpen
-      ;(docs.pickImage as ReturnType<typeof vi.fn>).mockClear()
-      ;(docs.pickImage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      // Increment 2F: the service's readImage(path) takes an already-resolved
+      // path (no dialog parent). The coordinator owns the dialog.
+      ;(docs.readImage as ReturnType<typeof vi.fn>).mockClear()
+      ;(docs.readImage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         base64: 'b64',
         mime: 'image/png',
         name: 'img.png',
@@ -332,9 +355,12 @@ describe('Increment 2E — multi-window file-dialog ownership', () => {
 
       await coordinator.pickImage(wcA.id, winA)
 
-      expect(docs.pickImage).toHaveBeenCalledTimes(1)
-      // The coordinator calls docs.pickImage(parent) — the parent must be winA
-      expect((docs.pickImage as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(winA)
+      // The coordinator called files.pickOpen with winA as the parent
+      expect(pickOpen).toHaveBeenCalledTimes(1)
+      expect(pickOpen.mock.calls[0][0]).toBe(winA)
+      // The service received the selected path (NOT a dialog parent)
+      expect(docs.readImage).toHaveBeenCalledTimes(1)
+      expect((docs.readImage as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('/test/img.png')
     })
   })
 
@@ -416,10 +442,11 @@ describe('Increment 2E — getFocusedWindow never used for file dialogs', () => 
     expect(pickOpen.mock.calls[0][0]).toBe(winA)
   })
 
-  it('saveDocxAs passes callerWindow (not focused) to docs.saveAs', async () => {
+  it('saveDocxAs passes callerWindow (not focused) to files.pickSave (NOT to docs.saveAs)', async () => {
+    const pickSave = vi.fn<(parent: unknown, opts: { defaultName: string; accept?: string[] }) => Promise<string | null>>(async () => '/test/saved.docx')
     const { coordinator, docs } = makeCoordinator({
       pickOpen: vi.fn(async () => null),
-      pickSave: vi.fn(async () => '/test/saved.docx'),
+      pickSave,
     })
     const winA = makeFakeWindow(2001)
     const wcA = makeMockWebContents(2101)
@@ -433,6 +460,12 @@ describe('Increment 2E — getFocusedWindow never used for file dialogs', () => 
 
     await coordinator.saveDocxAs(wcA.id, 'saved.docx', new Uint8Array(8), winA)
 
-    expect((docs.saveAs as ReturnType<typeof vi.fn>).mock.calls[0][3]).toBe(winA)
+    // Increment 2F: the callerWindow goes to files.pickSave (the shell-side
+    // dialog), NOT to docs.saveAs (the domain service). The service receives
+    // the selected path — no parent arg.
+    expect(pickSave.mock.calls[0][0]).toBe(winA)
+    const saveAsArgs = (docs.saveAs as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(saveAsArgs[1]).toBe('/test/saved.docx') // selectedPath
+    expect(saveAsArgs.length).toBe(3) // session, selectedPath, data — NO parent arg
   })
 })
