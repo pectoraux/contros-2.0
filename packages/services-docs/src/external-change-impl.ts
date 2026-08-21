@@ -1,8 +1,8 @@
 /**
  * External-change detection — mtime+size+hash check.
  *
- * Phase 1 increment 1: this is a self-contained copy of the logic in
- * apps/docs/src/main/external-change.ts. The original stays in place for now.
+ * Pure logic (no fs imports). The service passes in a `readHash` callback
+ * that uses the Files capability to read the file when needed.
  */
 
 /** Disk snapshot recorded at the last read/write of a document path. */

@@ -76,27 +76,47 @@ export class ElectronAI implements AI {
   }
 
   /**
-   * Phase 1 increment 1 STUB. The actual AI stream wiring stays in
-   * apps/docs/src/main/docs-main.ts (registerAiIpc). The bridge calls
-   * ipcRenderer.invoke('ai:stream', ...) which goes to the existing
-   * docs-main handler. This stub exists for API completeness.
+   * NOT IMPLEMENTED in Phase 1 increment 1.
+   *
+   * The actual AI stream wiring (the docs-specific stream loop in
+   * apps/docs/src/main/docs-main.ts registerAiIpc, lines 2496-2627) has NOT
+   * been extracted yet. It has editor-specific concerns (system prompt
+   * construction, tool registry, ai:stream-chunk push events) that require
+   * generalization before they can move into a platform capability.
+   *
+   * Calling this method throws. The existing docs-main handler still owns
+   * ai:stream until a later increment extracts it.
    */
   async stream(_request: AiStreamRequest): Promise<void> {
-    // No-op — docs-main still owns this for Phase 1 increment 1.
+    throw new Error(
+      'ElectronAI.stream not implemented in Phase 1 increment 1 — ' +
+        'the existing registerAiIpc handler in apps/docs/src/main/docs-main.ts ' +
+        'still owns this until the stream loop is generalized in a later increment.',
+    )
   }
 
   async streamCancel(_requestId: string): Promise<void> {
-    // No-op — docs-main still owns this for Phase 1 increment 1.
+    throw new Error(
+      'ElectronAI.streamCancel not implemented in Phase 1 increment 1 — ' +
+        'see ElectronAI.stream.',
+    )
   }
 
   onStream(handler: (chunk: AiStreamChunk) => void): () => void {
+    // The push subscription is wired (the existing docs-main handler emits
+    // ai:stream-chunk events; the shell forwards them). For Phase 1 increment 1
+    // we accept the handler but it won't be called by this capability —
+    // the docs-main handler emits via webContents.send directly.
     this.streamHandlers.add(handler)
     return () => this.streamHandlers.delete(handler)
   }
 
   async chat(_request: AiChatRequest): Promise<AiChatResponse> {
-    // Phase 1 increment 1: docs-main still owns ai:chat.
-    return {} as AiChatResponse
+    throw new Error(
+      'ElectronAI.chat not implemented in Phase 1 increment 1 — ' +
+        'the existing registerAiIpc handler in apps/docs/src/main/docs-main.ts ' +
+        'still owns ai:chat.',
+    )
   }
 
   async webSearch(query: string, maxResults?: number): Promise<WebSearchResult> {
@@ -118,12 +138,18 @@ export class ElectronAI implements AI {
   }
 
   async generateImage(_op: GenerateImageOp): Promise<GenerateImageResult> {
-    // Phase 1 increment 1 STUB — docs editor doesn't call generateImage.
-    return { error: 'generateImage not yet wired in Phase 1 increment 1' }
+    throw new Error(
+      'ElectronAI.generateImage not implemented in Phase 1 increment 1 — ' +
+        'the docs editor does not call generateImage; slides/pdf do, and they ' +
+        'will be wired in their respective increments.',
+    )
   }
 
   async analyzeMedia(_params: AnalyzeMediaParams): Promise<MediaAnalysis> {
-    return { error: 'analyzeMedia not yet wired in Phase 1 increment 1' }
+    throw new Error(
+      'ElectronAI.analyzeMedia not implemented in Phase 1 increment 1 — ' +
+        'see ElectronAI.generateImage.',
+    )
   }
 }
 

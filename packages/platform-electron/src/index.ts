@@ -20,6 +20,5 @@ export { ElectronWindowing } from './capabilities/electron-windowing.js'
 export { ElectronFontRegistry } from './capabilities/electron-font-registry.js'
 export {
   createElectronRuntime,
-  attachDocsService,
   type ElectronRuntimeConfig,
 } from './runtime/electron-runtime.js'

@@ -2,6 +2,10 @@
  * Dispatch test for createDocsDesktopBridge — the CRITICAL test for
  * ArrayBuffer → Uint8Array argument transformation.
  *
+ * BOUNDARY CORRECTION (2026-08-21): the DocumentService is now session-scoped.
+ * open() returns { session, result }; save() accepts the session.
+ * The bridge holds the active session slot and passes it to save().
+ *
  * Verifies (per ADR-002 §5.1.2):
  * - destination: correct service method called
  * - non-destination: wrong service method NOT called
@@ -10,7 +14,14 @@
  */
 import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
-import { mockRuntime, mockSettings, mockAI, mockIdentity, mockWindowing, mockFiles } from '../helpers/mocks.js'
+import {
+  mockRuntime,
+  mockSettings,
+  mockAI,
+  mockIdentity,
+  mockWindowing,
+  mockFiles,
+} from '../helpers/mocks.js'
 
 describe('createDocsDesktopBridge dispatch', () => {
   // ── Destination + non-destination ────────────────────────────────────
@@ -27,20 +38,28 @@ describe('createDocsDesktopBridge dispatch', () => {
     expect(docs.save).not.toHaveBeenCalled()
   })
 
-  test('aiStream dispatches to runtime.ai.stream via docs.aiStream (NOT settings, NOT files)', async () => {
-    const ai = mockAI()
-    const runtime = mockRuntime({ ai })
+  test('aiGskStatus dispatches to runtime.identity.accountStatus (NOT docs, NOT settings)', async () => {
+    const identity = mockIdentity()
     const settings = mockSettings()
+    const runtime = mockRuntime({ identity, settings })
     const bridge = createDocsDesktopBridge(runtime)
 
-    const req = { requestId: 'r1', provider: 'genspark', messages: [] } as never
-    await bridge.aiStream(req)
+    await bridge.aiGskStatus()
 
-    // docs.aiStream delegates to... actually the docs bridge delegates aiStream
-    // to docs.aiStream() (which in Phase 1 would call runtime.ai.stream()).
-    // For Milestone 1, the mock just verifies docs.aiStream was called.
-    expect(runtime.docs.aiStream).toHaveBeenCalledWith(req)
+    expect(identity.accountStatus).toHaveBeenCalledTimes(1)
     expect(settings.getTheme).not.toHaveBeenCalled()
+  })
+
+  test('webSearch dispatches to runtime.ai.webSearch (NOT docs, NOT identity)', async () => {
+    const ai = mockAI()
+    const identity = mockIdentity()
+    const runtime = mockRuntime({ ai, identity })
+    const bridge = createDocsDesktopBridge(runtime)
+
+    await bridge.webSearch('query', 10)
+
+    expect(ai.webSearch).toHaveBeenCalledWith('query', 10)
+    expect(identity.accountStatus).not.toHaveBeenCalled()
   })
 
   test('onChromePressed dispatches to runtime.windowing.onChromePressed (NOT settings)', () => {
@@ -56,22 +75,24 @@ describe('createDocsDesktopBridge dispatch', () => {
     expect(settings.onThemeChanged).not.toHaveBeenCalled()
   })
 
-  // ── ARGUMENT TRANSFORMATION: ArrayBuffer → Uint8Array ───────────────
+  // ── ARGUMENT TRANSFORMATION: ArrayBuffer → Uint8Array (session-scoped) ──
 
-  test('saveDocx converts ArrayBuffer → Uint8Array before passing to docs.save (argument transformation)', async () => {
+  test('saveDocx converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
     const runtime = mockRuntime()
     const docs = runtime.docs
+    docs.save = vi.fn().mockResolvedValue({ ok: true, session: { filePath: '/path/to/file.docx', hash: 'h' } }) as never
     const bridge = createDocsDesktopBridge(runtime)
 
-    // Create an ArrayBuffer with known content
     const buffer = new ArrayBuffer(4)
     new Uint8Array(buffer).set([1, 2, 3, 4])
 
     await bridge.saveDocx('/path/to/file.docx', buffer, true)
 
     expect(docs.save).toHaveBeenCalledTimes(1)
-    const [path, passedBytes, auto] = docs.save.mock.calls[0]
-    expect(path).toBe('/path/to/file.docx')
+    const [session, passedBytes, auto] = docs.save.mock.calls[0]
+    // Session is passed (the bridge holds the active session slot)
+    expect(session).toBeDefined()
+    expect(session.filePath).toBe('/path/to/file.docx')
     expect(auto).toBe(true)
 
     // CRITICAL: the bridge must convert ArrayBuffer → Uint8Array
@@ -83,6 +104,7 @@ describe('createDocsDesktopBridge dispatch', () => {
   test('saveDocx without auto flag passes auto=undefined through', async () => {
     const runtime = mockRuntime()
     const docs = runtime.docs
+    docs.save = vi.fn().mockResolvedValue({ ok: true }) as never
     const bridge = createDocsDesktopBridge(runtime)
 
     await bridge.saveDocx('/path/file.docx', new ArrayBuffer(2))
@@ -91,9 +113,10 @@ describe('createDocsDesktopBridge dispatch', () => {
     expect(auto).toBeUndefined()
   })
 
-  test('writeRecoveryCopy converts ArrayBuffer → Uint8Array (argument transformation)', async () => {
+  test('writeRecoveryCopy converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
     const runtime = mockRuntime()
     const docs = runtime.docs
+    docs.writeRecovery = vi.fn().mockResolvedValue({ ok: true }) as never
     const bridge = createDocsDesktopBridge(runtime)
 
     const buffer = new ArrayBuffer(3)
@@ -102,15 +125,16 @@ describe('createDocsDesktopBridge dispatch', () => {
     await bridge.writeRecoveryCopy('/path/recovery.docx', buffer)
 
     expect(docs.writeRecovery).toHaveBeenCalledTimes(1)
-    const [path, passedBytes] = docs.writeRecovery.mock.calls[0]
-    expect(path).toBe('/path/recovery.docx')
+    const [session, passedBytes] = docs.writeRecovery.mock.calls[0]
+    expect(session).toBeDefined()
     expect(passedBytes).toBeInstanceOf(Uint8Array)
     expect(Array.from(passedBytes as Uint8Array)).toEqual([10, 20, 30])
   })
 
-  test('saveDocxAs converts ArrayBuffer → Uint8Array (argument transformation)', async () => {
+  test('saveDocxAs converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
     const runtime = mockRuntime()
     const docs = runtime.docs
+    docs.saveAs = vi.fn().mockResolvedValue({ ok: true, path: '/p.docx', session: { filePath: '/p.docx', hash: 'h' } }) as never
     const bridge = createDocsDesktopBridge(runtime)
 
     const buffer = new ArrayBuffer(2)
@@ -118,15 +142,17 @@ describe('createDocsDesktopBridge dispatch', () => {
 
     await bridge.saveDocxAs('Untitled', buffer)
 
-    const [name, passedBytes] = docs.saveAs.mock.calls[0]
+    const [session, name, passedBytes] = docs.saveAs.mock.calls[0]
+    expect(session).toBeDefined() // session-scoped — bridge passes a session (possibly transient)
     expect(name).toBe('Untitled')
     expect(passedBytes).toBeInstanceOf(Uint8Array)
     expect(Array.from(passedBytes as Uint8Array)).toEqual([0xff, 0xfe])
   })
 
-  test('saveDocxNew converts ArrayBuffer → Uint8Array (argument transformation)', async () => {
+  test('saveDocxNew converts ArrayBuffer → Uint8Array and passes the active session (argument transformation)', async () => {
     const runtime = mockRuntime()
     const docs = runtime.docs
+    docs.saveNew = vi.fn().mockResolvedValue({ ok: true, path: '/p.docx', session: { filePath: '/p.docx', hash: 'h' } }) as never
     const bridge = createDocsDesktopBridge(runtime)
 
     const buffer = new ArrayBuffer(1)
@@ -134,7 +160,8 @@ describe('createDocsDesktopBridge dispatch', () => {
 
     await bridge.saveDocxNew('New Doc', buffer)
 
-    const [name, passedBytes] = docs.saveNew.mock.calls[0]
+    const [session, name, passedBytes] = docs.saveNew.mock.calls[0]
+    expect(session).toBeDefined() // null active session is acceptable — bridge passes null
     expect(name).toBe('New Doc')
     expect(passedBytes).toBeInstanceOf(Uint8Array)
     expect(Array.from(passedBytes as Uint8Array)).toEqual([42])

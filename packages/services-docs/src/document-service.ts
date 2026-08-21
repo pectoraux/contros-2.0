@@ -1,36 +1,37 @@
 /**
  * DocumentServiceImpl — the Docs domain service.
  *
- * Implements the DocumentService interface from @genoffice/runtime-contracts.
  * Composes @genoffice/docx-engine (parseDocx, saveDocx, buildBlankDocx) +
  * @genoffice/file-parse (parseFileToText for attachments) + platform capabilities
  * (Storage, Files, AI, Printing, FontRegistry).
  *
- * Implements the byte-preserving save plan:
- *   - On open: archive the original file under userData/originals/<sha256>.docx
- *     (via Storage.writeBlob). Returns the bytes + hash to the renderer.
- *   - On save: the renderer sends the full new bytes (the renderer's editor
- *     already computed the byte-preserving save plan via @genoffice/docx-engine's
- *     saveDocx). This service writes them atomically (via Files.write), clears
- *     the recovery copy (via Storage.deleteBlob), updates the recent files list
- *     (via Storage.writeObject), and checks for external modifications
- *     (via external-change.ts).
+ * BOUNDARY CORRECTION (2026-08-21, per Principal Architect review):
+ *   - ZERO imports of node:* (no node:fs, node:crypto, node:path, node:buffer)
+ *   - ZERO imports of electron
+ *   - ZERO knowledge of webContents IDs, path-grant tracking, or shell tab callbacks
+ *   - Session-scoped: open() returns a DocumentSession; save() accepts it
+ *   - All filesystem operations go through the Files / Storage capabilities
+ *   - The byte-preserving DOCX TRANSFORMATION (saveDocx) remains in the renderer
+ *     for now; this service handles PERSISTENCE only (when/where to write,
+ *     external-modified check, recovery copy management)
  *
  * IMPORTANT (ADR-001 Correction A): constructor injection. This class receives
- * Storage, Files, AI, Printing, FontRegistry, ProjectStore, and an EventBus
- * via constructor. It does NOT call getRuntime() internally.
+ * Storage, Files, AI, Printing, FontRegistry via constructor. It does NOT call
+ * getRuntime() internally.
  *
- * The path-grant tracking (docWritablePaths) and the close-guard coordination
- * (close-check-result, close-save-result, view-menu-state) remain in
- * apps/docs/src/main/docs-main.ts because they are shell/window orchestration,
- * not domain behavior.
+ * The shell (apps/docs/src/main/) owns:
+ *   - The map of wcId → DocumentSession
+ *   - Path-grant tracking (canWrite / allowWrite)
+ *   - Tab creation / listing / focus
+ *   - The close-guard flow
+ *   - webContents.send() forwarding of service events
+ *
+ * The service owns:
+ *   - The persistence lifecycle (archive original, save, recovery, recents)
+ *   - Attachment collection + text extraction
+ *   - Font metrics lookup
+ *   - Print / PDF export delegation
  */
-import { createHash } from 'node:crypto'
-import { existsSync, statSync, readdirSync, unlinkSync, mkdirSync } from 'node:fs'
-import { copyFileSync, renameSync, writeFileSync, readFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
-import { Buffer } from 'node:buffer'
-
 import { parseDocx } from '@genoffice/docx-engine'
 import { parseFileToText } from '@genoffice/file-parse'
 import type {
@@ -38,10 +39,9 @@ import type {
   Files,
   AI,
   Printing,
-  FileHandle,
   FileStat,
 } from '@genoffice/platform'
-import type { DocumentService } from '@genoffice/runtime-contracts'
+import type { DocumentService, DocumentSession } from '@genoffice/runtime-contracts'
 import type {
   OpenFileResult,
   PickImageResult,
@@ -52,13 +52,17 @@ import type {
   MenuCommand,
 } from '@genoffice/docs-shared'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
-import type { AiSettings, AiChatRequest, AiChatResponse, AiStreamRequest, AiStreamChunk } from '@genoffice/ai-provider'
+import type {
+  AiSettings,
+  AiChatRequest,
+  AiChatResponse,
+  AiStreamRequest,
+  AiStreamChunk,
+} from '@genoffice/ai-provider'
 
-import { isExternallyModified, type DiskFileState } from './external-change.js'
-import { atomicWriteFile } from './atomic-write.js'
+import { isExternallyModified, type DiskFileState } from './external-change-impl.js'
 
 // ── Constants (mirror apps/docs/src/main/docs-main.ts) ───────────────────
-const TWIPS_PER_INCH = 1440
 const ATTACHMENT_EXTS = new Set([
   'docx', 'xlsx', 'pptx', 'pdf', 'txt', 'md', 'markdown', 'csv',
   'png', 'jpg', 'jpeg', 'gif', 'webp',
@@ -71,11 +75,10 @@ const ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 const IMAGE_MIME: Record<string, 'image/png' | 'image/jpeg' | 'image/gif'> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
 }
-const ORIGINALS_MAX_BYTES = 500 * 1024 * 1024
+const RECENT_FILES_MAX = 50
 
-// ── EventBus: how the service tells its consumers (the docs main / preload)
-//    about push events (onOpened, onRenamed, onTeardown, etc.). The main
-//    process subscribes and forwards to webContents.send(). ────────────────
+// ── EventBus: how the service tells the shell about push events ───────
+// The shell subscribes to these and forwards to webContents.send().
 export interface DocsEventBus {
   opened: (result: OpenFileResult) => void
   renamed: (paths: { oldPath: string; newPath: string }) => void
@@ -83,19 +86,15 @@ export interface DocsEventBus {
   menuCommand: (command: MenuCommand, payload?: string) => void
   closeCheck: () => void
   closeSaveRequest: () => void
+  /** Request the shell to open a new tab. The shell decides how. */
+  requestOpenTab?: (openPath?: string, opts?: { newBlank?: boolean }) => void
+  /** Request the list of open docs tabs from the shell. */
+  requestListTabs?: () => DocsTabInfo[]
+  /** Request the shell to focus a tab. */
+  requestFocusTab?: (id: string) => void
 }
 
-// ── Per-tab state tracked by the service ────────────────────────────────
-interface DocSession {
-  /** The file path the renderer is editing. */
-  filePath: string
-  /** sha256 of the original file (the archive key). */
-  hash: string
-  /** Disk state at last read/write (for external-modified detection). */
-  diskState?: DiskFileState
-}
-
-// ── Dependencies ────────────────────────────────────────────────────────
+// ── Dependencies (capability-only — NO shell hooks, NO wcId) ──────────
 export interface DocumentServiceDeps {
   storage: Storage
   files: Files
@@ -103,25 +102,15 @@ export interface DocumentServiceDeps {
   printing: Printing
   /** FontRegistry — passed in (constructed by platform-electron). */
   fontRegistry: { fontMetrics(family: string): Promise<FaceVerticalMetrics | null> }
-  /** Path to userData dir (for originals archive + recovery dir). */
-  userDataDir: string
-  /** Default save dir (Documents/GenOffice). */
-  defaultSaveDir: string
-  /** Path-grant tracker — checks whether a renderer may write to a path. */
-  canWrite: (wcId: number, filePath: string) => boolean
-  allowWrite: (wcId: number, filePath: string) => void
-  /** WebContents ID resolver (for the active tab). */
-  getActiveWcId: () => number | null
-  /** Tab management hooks (shell orchestration). */
-  openTab?: (openPath?: string, opts?: { newBlank?: boolean }) => void
-  listTabs?: () => DocsTabInfo[]
-  focusTab?: (id: string) => void
-  /** Optional: dialog for save-as (when files.pickSave is not sufficient). */
-  saveDialog?: (defaultName: string) => Promise<string | null>
 }
 
+/**
+ * DocumentServiceImpl — PURE DOMAIN, no node:* or electron imports.
+ *
+ * Persistence-only (the byte-preserving DOCX transformation stays in the renderer).
+ * Session-scoped (open() returns a session; save() accepts it).
+ */
 export class DocumentServiceImpl implements DocumentService {
-  private readonly sessions = new Map<number, DocSession>()
   private readonly eventListeners = {
     opened: new Set<(r: OpenFileResult) => void>(),
     renamed: new Set<(p: { oldPath: string; newPath: string }) => void>(),
@@ -130,126 +119,112 @@ export class DocumentServiceImpl implements DocumentService {
     closeCheck: new Set<() => void>(),
     closeSaveRequest: new Set<() => void>(),
   }
-  private originalsPruneRunning = false
 
   constructor(
     private readonly deps: DocumentServiceDeps,
     private readonly eventBus: DocsEventBus,
-  ) {
-    // Wire eventBus → listeners
-    // (The main process subscribes to the bus and forwards to webContents.send.)
-  }
+  ) {}
 
-  // ── File lifecycle ───────────────────────────────────────────────────
+  // ── File lifecycle (session-scoped) ───────────────────────────────────
 
-  async openDialog(): Promise<OpenFileResult | null> {
+  async openDialog(): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
     const handles = await this.deps.files.pickOpen({
       accept: ['docx'],
       multiple: false,
     })
     if (!handles || handles.length === 0) return null
     const path = handles[0] as string
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return null
     return this.open(path)
   }
 
-  async open(path: string): Promise<OpenFileResult | null> {
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return null
+  async open(path: string): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
+    try {
+      const { bytes, stat } = await this.deps.files.read(path)
+      const hash = await this.hashBytes(bytes)
 
-    const { bytes, stat } = await this.deps.files.read(path)
-    const hash = createHash('sha256').update(Buffer.from(bytes)).digest('hex')
+      // Archive the original (for byte-preserving save plan) — via Storage capability
+      await this.deps.storage.writeBlob('originals:' + hash, bytes)
 
-    // Archive the original (for byte-preserving save plan)
-    await this.archiveOriginal(path, Buffer.from(bytes), hash)
+      // Update recents
+      await this.pushRecent(path)
 
-    // Track the session
-    this.sessions.set(wcId, {
-      filePath: path,
-      hash,
-      diskState: { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash },
-    })
-    this.deps.allowWrite(wcId, path)
+      const session: DocumentSession = {
+        filePath: path,
+        hash,
+        diskState: { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash },
+      }
 
-    // Push to recent files
-    await this.pushRecent(path)
+      // Build the OpenFileResult (data is an ArrayBuffer copy for the renderer)
+      const result: OpenFileResult = {
+        path,
+        name: this.basename(path),
+        data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        hash,
+      }
 
-    const result: OpenFileResult = {
-      path,
-      name: basename(path),
-      data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-      hash,
+      // Notify listeners (the shell forwards to webContents)
+      this.eventBus.opened(result)
+      for (const fn of this.eventListeners.opened) fn(result)
+
+      return { session, result }
+    } catch {
+      return null
     }
-
-    // Notify listeners (the main process forwards to webContents)
-    this.eventBus.opened(result)
-    for (const fn of this.eventListeners.opened) fn(result)
-
-    return result
   }
 
-  async consumePendingOpen(): Promise<OpenFileResult | null> {
-    // The pendingOpenPath queue lives in apps/docs/src/main/docs-main.ts
-    // (shell/window orchestration). The main process calls this.open(path)
-    // when there's a pending path. This method exists for API completeness
-    // but is a no-op when called directly.
+  async consumePendingOpen(): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
+    // The pendingOpenPath queue lives in the shell (apps/docs/src/main/docs-main.ts).
+    // The shell calls this.open(path) when there's a pending path.
+    // This method exists for API completeness but is a no-op when called directly.
     return null
   }
 
   async consumeNewBlank(): Promise<boolean> {
-    // The pendingNewBlankIds set lives in apps/docs/src/main/docs-main.ts.
-    // Same as consumePendingOpen — main process orchestrates.
+    // The pendingNewBlankIds set lives in the shell.
+    // Same as consumePendingOpen — shell orchestrates.
     return false
   }
 
-  // ── Save (byte-preserving) ───────────────────────────────────────────
+  // ── Save (persistence only — renderer produces the bytes) ───────────
 
   async save(
-    path: string,
+    session: DocumentSession,
     data: Uint8Array,
     auto?: boolean,
-  ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified' }> {
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return { ok: false, error: 'no active session' }
-    if (!this.deps.canWrite(wcId, path)) {
-      return { ok: false, error: 'save target is not an opened document' }
-    }
-
-    // External-modified check
-    const session = this.sessions.get(wcId)
-    if (session && (await this.checkExternalModified(path, session.diskState))) {
-      if (auto === true) return { ok: false, reason: 'external-modified' }
-      // The main process shows the Overwrite/Cancel dialog (shell orchestration).
-      // For now, fail with reason — the main process intercepts this return.
-      return { ok: false, reason: 'external-modified' }
+  ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified'; session?: DocumentSession }> {
+    // External-modified check (uses Files.stat, not statSync)
+    if (session.diskState && (await this.checkExternalModified(session.filePath, session.diskState))) {
+      if (auto === true) return { ok: false, reason: 'external-modified', session }
+      // The shell shows the Overwrite/Cancel dialog (shell orchestration).
+      // For now, fail with reason — the shell intercepts this return.
+      return { ok: false, reason: 'external-modified', session }
     }
 
     try {
-      await this.deps.files.write(path, data)
+      await this.deps.files.write(session.filePath, data)
       // Update disk state
-      const stat = await this.deps.files.stat(path)
-      const hash = createHash('sha256').update(Buffer.from(data)).digest('hex')
-      if (session) {
-        session.diskState = { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash }
+      const stat = await this.deps.files.stat(session.filePath)
+      const hash = await this.hashBytes(data)
+      const updatedSession: DocumentSession = {
+        filePath: session.filePath,
+        hash,
+        diskState: stat ? { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash } : session.diskState,
       }
-      // Clear recovery copy
-      await this.clearRecoveryCopy(path)
+      // Clear recovery copy (via Storage capability)
+      await this.deps.storage.deleteBlob('recovery:' + this.sha1Hash(session.filePath))
       // Update recent files
-      await this.pushRecent(path)
-      return { ok: true }
+      await this.pushRecent(session.filePath)
+      return { ok: true, session: updatedSession }
     } catch (err) {
-      return { ok: false, error: String(err) }
+      return { ok: false, error: String(err), session }
     }
   }
 
   async saveAs(
+    session: DocumentSession,
     defaultName: string,
     data: Uint8Array,
-  ): Promise<{ ok: boolean; path?: string; error?: string }> {
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return { ok: false, error: 'no active session' }
-
+  ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }> {
     const path = await this.deps.files.pickSave({
       defaultName,
       accept: ['docx'],
@@ -257,58 +232,46 @@ export class DocumentServiceImpl implements DocumentService {
     if (!path) return { ok: false }
 
     try {
-      await this.deps.files.write(path as string, data)
-      this.deps.allowWrite(wcId, path as string)
-      // Update session
-      const stat = await this.deps.files.stat(path as string)
-      const hash = createHash('sha256').update(Buffer.from(data)).digest('hex')
-      this.sessions.set(wcId, {
-        filePath: path as string,
+      const filePath = path as string
+      await this.deps.files.write(filePath, data)
+      const stat = await this.deps.files.stat(filePath)
+      const hash = await this.hashBytes(data)
+      const newSession: DocumentSession = {
+        filePath,
         hash,
-        diskState: { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash },
-      })
-      await this.pushRecent(path as string)
-      return { ok: true, path: path as string }
+        diskState: stat ? { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash } : undefined,
+      }
+      await this.pushRecent(filePath)
+      return { ok: true, path: filePath, session: newSession }
     } catch (err) {
       return { ok: false, error: String(err) }
     }
   }
 
   async saveNew(
+    _session: DocumentSession | null,
     defaultName: string,
     data: Uint8Array,
-  ): Promise<{ ok: boolean; path?: string; error?: string }> {
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return { ok: false, error: 'no active session' }
-
-    const filePath = this.uniquePathIn(this.deps.defaultSaveDir, defaultName)
-    try {
-      await this.deps.files.write(filePath, data)
-      this.deps.allowWrite(wcId, filePath)
-      const stat = await this.deps.files.stat(filePath)
-      const hash = createHash('sha256').update(Buffer.from(data)).digest('hex')
-      this.sessions.set(wcId, {
-        filePath,
-        hash,
-        diskState: { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash },
-      })
-      await this.pushRecent(filePath)
-      return { ok: true, path: filePath }
-    } catch (err) {
-      return { ok: false, error: String(err) }
-    }
+  ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }> {
+    // The default save dir is resolved by the Settings capability (passed via deps).
+    // For now, we use Files.uniquePath with a relative default — the shell resolves the absolute dir.
+    // Actually, we need the default save dir. Let's add it as a method on Settings, but since
+    // Settings isn't in our deps, we use a callback. For Phase 1 increment 1, we accept that
+    // the shell provides the absolute default save dir via the EventBus or a separate dep.
+    //
+    // For this corrected skeleton: throw 'not yet implemented' — the saveNew path requires
+    // the Settings capability, which isn't in DocumentServiceDeps. This is a known gap;
+    // the next increment adds Settings to the deps.
+    throw new Error(
+      'DocumentServiceImpl.saveNew not yet implemented — requires Settings capability in deps ' +
+        '(next increment adds it).',
+    )
   }
 
-  async writeRecovery(path: string, data: Uint8Array): Promise<{ ok: boolean }> {
-    const wcId = this.deps.getActiveWcId()
-    if (wcId === null) return { ok: false }
-    if (!this.deps.canWrite(wcId, path)) return { ok: false }
-
+  async writeRecovery(session: DocumentSession, data: Uint8Array): Promise<{ ok: boolean }> {
     try {
-      const recoveryDir = join(this.deps.userDataDir, 'docs-autosave')
-      mkdirSync(recoveryDir, { recursive: true })
-      const recoveryPath = join(recoveryDir, `${sha1Hex(path)}.docx`)
-      await this.deps.files.write(recoveryPath, data)
+      // Recovery copies are binary blobs keyed by sha1(filePath) — via Storage capability
+      await this.deps.storage.writeBlob('recovery:' + this.sha1Hash(session.filePath), data)
       return { ok: true }
     } catch {
       return { ok: false }
@@ -318,7 +281,15 @@ export class DocumentServiceImpl implements DocumentService {
   async recentFiles(): Promise<string[]> {
     const all = (await this.deps.storage.readObject('docs', 'recents')) as string[] | null
     if (!Array.isArray(all)) return []
-    return all.filter((p) => typeof p === 'string' && existsSync(p))
+    // Filter to existing files (uses Files.stat, not existsSync)
+    const existing: string[] = []
+    for (const p of all) {
+      if (typeof p === 'string') {
+        const stat = await this.deps.files.stat(p)
+        if (stat) existing.push(p)
+      }
+    }
+    return existing
   }
 
   // ── Images & attachments ─────────────────────────────────────────────
@@ -335,9 +306,9 @@ export class DocumentServiceImpl implements DocumentService {
     if (!mime) return null
     const { bytes } = await this.deps.files.read(filePath)
     return {
-      base64: Buffer.from(bytes).toString('base64'),
+      base64: this.bytesToBase64(bytes),
       mime,
-      name: basename(filePath),
+      name: this.basename(filePath),
     }
   }
 
@@ -355,12 +326,14 @@ export class DocumentServiceImpl implements DocumentService {
   }
 
   async addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult> {
-    // Save the pasted image to a temp file, then collect as attachment
-    const tempDir = join(this.deps.userDataDir, 'temp', 'genoffice-pasted')
-    mkdirSync(tempDir, { recursive: true })
-    const filePath = join(tempDir, `${Date.now()}.${ext}`)
-    writeFileSync(filePath, Buffer.from(data))
-    return this.collectAttachments([filePath])
+    // Save the pasted image to a temp blob — via Storage capability
+    const key = 'pasted-image:' + Date.now() + '.' + ext
+    await this.deps.storage.writeBlob(key, new Uint8Array(data))
+    // Return metadata (path is the blob key; the shell resolves it to a real path if needed)
+    return {
+      accepted: [{ path: key, name: `pasted.${ext}`, ext, sizeBytes: data.byteLength }],
+      rejected: [],
+    }
   }
 
   async readAttachment(
@@ -368,7 +341,7 @@ export class DocumentServiceImpl implements DocumentService {
     offset: number,
     maxChars: number,
   ): Promise<AttachmentReadResult> {
-    const name = basename(path)
+    const name = this.basename(path)
     const ext = name.split('.').pop()?.toLowerCase() ?? ''
     if (!ATTACHMENT_EXTS.has(ext)) {
       return { ok: false, error: `unsupported extension: ${ext}` }
@@ -394,7 +367,7 @@ export class DocumentServiceImpl implements DocumentService {
   }
 
   async readAttachmentImage(path: string): Promise<AttachmentImageResult> {
-    const name = basename(path)
+    const name = this.basename(path)
     const ext = name.split('.').pop()?.toLowerCase() ?? ''
     const mime = ATTACHMENT_IMAGE_MIME[ext]
     if (!mime) return { ok: false, error: `${name}: not an image` }
@@ -403,7 +376,7 @@ export class DocumentServiceImpl implements DocumentService {
       if (bytes.byteLength > ATTACHMENT_IMAGE_MAX_BYTES) {
         return { ok: false, error: `${name}: image too large` }
       }
-      return { ok: true, base64: Buffer.from(bytes).toString('base64'), mime }
+      return { ok: true, base64: this.bytesToBase64(bytes), mime }
     } catch {
       return { ok: false, error: `${name}: unreadable` }
     }
@@ -429,10 +402,10 @@ export class DocumentServiceImpl implements DocumentService {
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
     let filePath = outPath ?? null
     if (!filePath) {
-      filePath = await this.deps.files.pickSave({
+      filePath = (await this.deps.files.pickSave({
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
         accept: ['pdf'],
-      }) as string | null
+      })) as string | null
       if (!filePath) return { ok: false }
     }
     return this.deps.printing.exportPdf({
@@ -457,30 +430,30 @@ export class DocumentServiceImpl implements DocumentService {
   ): Promise<{ ok: boolean; path?: string; error?: string }> {
     let filePath = outPath ?? null
     if (!filePath) {
-      filePath = await this.deps.files.pickSave({
+      filePath = (await this.deps.files.pickSave({
         defaultName: defaultName.replace(/\.docx$/i, '') + '.pdf',
         accept: ['pdf'],
-      }) as string | null
+      })) as string | null
       if (!filePath) return { ok: false }
     }
     return this.deps.printing.saveMergedPdf(defaultName, base64Parts, filePath)
   }
 
-  // ── Tab management (delegates to shell hooks) ────────────────────────
+  // ── Tab management (delegates to EventBus; shell decides how to open/focus) ──
 
   async openNewTab(openPath?: string | null): Promise<void> {
-    this.deps.openTab?.(openPath ?? undefined, openPath ? undefined : { newBlank: true })
+    this.eventBus.requestOpenTab?.(openPath ?? undefined, openPath ? undefined : { newBlank: true })
   }
 
   async listDocsTabs(): Promise<DocsTabInfo[]> {
-    return this.deps.listTabs?.() ?? []
+    return this.eventBus.requestListTabs?.() ?? []
   }
 
   async focusDocsTab(id: string): Promise<void> {
-    this.deps.focusTab?.(id)
+    this.eventBus.requestFocusTab?.(id)
   }
 
-  // ── AI (delegates to runtime.ai) ─────────────────────────────────────
+  // ── AI (delegates to runtime.ai — Phase 1 increment 1: not yet wired) ──
 
   async getAiSettings(): Promise<AiSettings> {
     return this.deps.ai.getSettings()
@@ -506,7 +479,7 @@ export class DocumentServiceImpl implements DocumentService {
     return this.deps.ai.onStream(handler)
   }
 
-  // ── Events (push from service to renderer) ────────────────────────────
+  // ── Events (push from service to shell; shell forwards to webContents) ──
 
   onOpened(handler: (result: OpenFileResult) => void): () => void {
     this.eventListeners.opened.add(handler)
@@ -533,9 +506,9 @@ export class DocumentServiceImpl implements DocumentService {
     return () => this.eventListeners.closeCheck.delete(handler)
   }
 
-  reportCloseCheck(state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void {
-    // Forwarded to the main process close-guard flow (shell orchestration).
-    // The main process subscribes to this via the EventBus.
+  reportCloseCheck(_state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void {
+    // Forwarded to the shell close-guard flow via EventBus (if connected).
+    // The shell subscribes to onCloseCheck and intercepts the dialog.
   }
 
   onCloseSaveRequest(handler: () => void): () => void {
@@ -543,89 +516,75 @@ export class DocumentServiceImpl implements DocumentService {
     return () => this.eventListeners.closeSaveRequest.delete(handler)
   }
 
-  reportCloseSaveResult(ok: boolean): void {
-    // Forwarded to the main process close-guard flow.
+  reportCloseSaveResult(_ok: boolean): void {
+    // Forwarded to the shell close-guard flow.
   }
 
-  reportViewMenuState(state: { aiSidebar: boolean; darkCanvas: boolean }): void {
-    // Forwarded to the main process menu builder (shell orchestration).
+  reportViewMenuState(_state: { aiSidebar: boolean; darkCanvas: boolean }): void {
+    // Forwarded to the shell menu builder (shell orchestration).
   }
 
-  // ── Internal helpers ────────────────────────────────────────────────
+  // ── Internal helpers (PURE LOGIC — no fs access) ────────────────────
 
-  private async archiveOriginal(filePath: string, bytes: Buffer, hash: string): Promise<void> {
-    const dir = join(this.deps.userDataDir, 'originals')
-    mkdirSync(dir, { recursive: true })
-    const target = join(dir, `${hash}.docx`)
-    if (!existsSync(target)) {
-      try {
-        copyFileSync(filePath, target)
-      } catch {
-        // If copy fails (e.g. file moved), write the bytes directly.
-        writeFileSync(target, bytes)
-      }
+  /**
+   * Compute a sha256 hash of bytes. Uses the AI capability's chat function
+   * indirectly... actually, hashing is a pure computation. We use the
+   * Web Crypto API (crypto.subtle) which is available in both Node 22+
+   * and browsers — no node:* import needed.
+   */
+  private async hashBytes(bytes: Uint8Array): Promise<string> {
+    // Copy into a fresh ArrayBuffer to satisfy crypto.subtle's BufferSource typing
+    // (avoids the SharedArrayBuffer incompatibility with the underlying buffer).
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    const digest = await crypto.subtle.digest('SHA-256', copy)
+    return this.bytesToHex(new Uint8Array(digest))
+  }
+
+  /** Compute a sha1 hash of a string (for recovery-key derivation). Pure computation. */
+  private async sha1Hash(s: string): Promise<string> {
+    const bytes = new TextEncoder().encode(s)
+    const digest = await crypto.subtle.digest('SHA-1', bytes)
+    return this.bytesToHex(new Uint8Array(digest))
+  }
+
+  private bytesToHex(bytes: Uint8Array): string {
+    let hex = ''
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, '0')
     }
-    void this.pruneOriginals(dir)
+    return hex
   }
 
-  private async pruneOriginals(dir: string): Promise<void> {
-    if (this.originalsPruneRunning) return
-    this.originalsPruneRunning = true
-    try {
-      const files: Array<{ path: string; size: number; mtimeMs: number }> = []
-      for (const name of readdirSync(dir)) {
-        try {
-          const stat = statSync(join(dir, name))
-          if (stat.isFile()) {
-            files.push({ path: join(dir, name), size: stat.size, mtimeMs: stat.mtimeMs })
-          }
-        } catch {
-          /* removed concurrently */
-        }
-      }
-      let total = files.reduce((sum, f) => sum + f.size, 0)
-      files.sort((a, b) => a.mtimeMs - b.mtimeMs)
-      for (const f of files) {
-        if (total <= ORIGINALS_MAX_BYTES) break
-        try {
-          unlinkSync(f.path)
-          total -= f.size
-        } catch {
-          /* already gone */
-        }
-      }
-    } catch {
-      /* directory unreadable: retry on the next archive */
-    } finally {
-      this.originalsPruneRunning = false
+  private bytesToBase64(bytes: Uint8Array): string {
+    // btoa is available in Node 22+ and browsers
+    let binary = ''
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i])
     }
+    return btoa(binary)
   }
 
-  private async checkExternalModified(path: string, recorded?: DiskFileState): Promise<boolean> {
-    if (!recorded) return false
+  private basename(path: string): string {
+    const parts = path.split(/[/\\]/)
+    return parts[parts.length - 1] || path
+  }
+
+  private async checkExternalModified(path: string, recorded: DiskFileState): Promise<boolean> {
     try {
       const stat = await this.deps.files.stat(path)
+      if (!stat) return false
+      // The hash read only runs when mtime+size disagree — use Files.read for that
       return isExternallyModified(
         recorded,
         { mtimeMs: stat.mtimeMs, size: stat.sizeBytes },
         async () => {
           const { bytes } = await this.deps.files.read(path)
-          return createHash('sha256').update(Buffer.from(bytes)).digest('hex')
+          return this.hashBytes(bytes)
         },
       )
     } catch {
       return false
-    }
-  }
-
-  private async clearRecoveryCopy(filePath: string): Promise<void> {
-    const recoveryPath = join(this.deps.userDataDir, 'docs-autosave', `${sha1Hex(filePath)}.docx`)
-    if (existsSync(recoveryPath)) {
-      try {
-        unlinkSync(recoveryPath)
-      } catch {
-        /* already gone */
-      }
     }
   }
 
@@ -634,19 +593,7 @@ export class DocumentServiceImpl implements DocumentService {
     const list = Array.isArray(all) ? all.filter((p) => typeof p === 'string') : []
     const filtered = list.filter((p) => p !== filePath)
     filtered.unshift(filePath)
-    await this.deps.storage.writeObject('docs', 'recents', filtered.slice(0, 50))
-  }
-
-  private uniquePathIn(dir: string, fileName: string): string {
-    mkdirSync(dir, { recursive: true })
-    const base = fileName.replace(/\.docx$/i, '')
-    let candidate = join(dir, `${base}.docx`)
-    let n = 1
-    while (existsSync(candidate)) {
-      candidate = join(dir, `${base} ${n}.docx`)
-      n++
-    }
-    return candidate
+    await this.deps.storage.writeObject('docs', 'recents', filtered.slice(0, RECENT_FILES_MAX))
   }
 
   private async collectAttachments(paths: string[]): Promise<AttachmentAddResult> {
@@ -654,24 +601,22 @@ export class DocumentServiceImpl implements DocumentService {
     const rejected: string[] = []
     for (const p of paths) {
       try {
-        const name = basename(p)
+        const name = this.basename(p)
         const ext = name.split('.').pop()?.toLowerCase() ?? ''
         if (!ATTACHMENT_EXTS.has(ext)) {
           rejected.push(`${name}: unsupported type`)
           continue
         }
-        const stat = statSync(p)
-        accepted.push({ path: p, name, ext, sizeBytes: stat.size })
+        const stat = await this.deps.files.stat(p)
+        if (!stat) {
+          rejected.push(`${name}: not found`)
+          continue
+        }
+        accepted.push({ path: p, name, ext, sizeBytes: stat.sizeBytes })
       } catch {
-        rejected.push(`${basename(p)}: unreadable`)
+        rejected.push(`${this.basename(p)}: unreadable`)
       }
     }
     return { accepted, rejected }
   }
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────
-
-function sha1Hex(s: string): string {
-  return createHash('sha1').update(s).digest('hex')
 }

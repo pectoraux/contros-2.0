@@ -19,8 +19,8 @@ export interface Files {
   read(handle: FileHandle | string): Promise<{ bytes: Uint8Array; stat: FileStat }>
   /** Atomic write (tmp + rename on Electron; createWritable on Web). */
   write(handle: FileHandle | string, bytes: Uint8Array): Promise<void>
-  /** Stat a file without reading it. */
-  stat(handle: FileHandle | string): Promise<FileStat>
+  /** Stat a file without reading it. Returns null when the file is missing (instead of throwing). */
+  stat(handle: FileHandle | string): Promise<FileStat | null>
   /** Rename a file in place; returns the new handle/path. */
   rename(handle: FileHandle | string, newName: string): Promise<FileHandle | string>
   /** Move paths to the OS trash (recoverable). */
@@ -29,6 +29,12 @@ export interface Files {
   revealInFolder(path: string): Promise<void>
   /** Open a local file in the default application. */
   openPath(path: string): Promise<void>
+  /**
+   * Find a non-conflicting filename in a directory. If `<dir>/<fileName>`
+   * already exists, appends " 1", " 2", etc. before the extension until
+   * the path is free. Creates the directory if it doesn't exist.
+   */
+  uniquePath(dir: string, fileName: string): Promise<string>
 
   /**
    * Absolute path of a File dropped onto the window (Electron webUtils).

@@ -147,10 +147,14 @@ export class ElectronFiles implements Files {
     writeFileSync(path, bytes)
   }
 
-  async stat(handle: FileHandle | string): Promise<FileStat> {
+  async stat(handle: FileHandle | string): Promise<FileStat | null> {
     const path = typeof handle === 'string' ? handle : String(handle)
-    const st = statSync(path)
-    return { mtimeMs: st.mtimeMs, sizeBytes: st.size }
+    try {
+      const st = statSync(path)
+      return { mtimeMs: st.mtimeMs, sizeBytes: st.size }
+    } catch {
+      return null
+    }
   }
 
   async rename(handle: FileHandle | string, newName: string): Promise<FileHandle | string> {
@@ -172,6 +176,18 @@ export class ElectronFiles implements Files {
 
   async openPath(path: string): Promise<void> {
     await this.deps.shell.openPath(path)
+  }
+
+  async uniquePath(dir: string, fileName: string): Promise<string> {
+    mkdirSync(dir, { recursive: true })
+    const base = fileName.replace(/\.docx$/i, '')
+    let candidate = join(dir, `${base}.docx`)
+    let n = 1
+    while (existsSync(candidate)) {
+      candidate = join(dir, `${base} ${n}.docx`)
+      n++
+    }
+    return candidate
   }
 
   /**

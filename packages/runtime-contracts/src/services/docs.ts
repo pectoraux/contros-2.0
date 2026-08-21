@@ -6,8 +6,23 @@
  * (createDocsDesktopBridge) maps the existing window.desktop API to these
  * methods, performing ArrayBuffer → Uint8Array conversion where needed.
  *
+ * SESSION-SCOPED (corrected 2026-08-21 per Principal Architect review):
+ *   The service does NOT know about webContents IDs, path-grant tracking, or
+ *   shell tab management. It returns a `DocumentSession` from `open()` and
+ *   accepts it in `save()` / `saveAs()` / `writeRecovery()` etc. The shell
+ *   (apps/docs/src/main/) owns the map of wcId → DocumentSession.
+ *
  * IMPORTANT (ADR-001 Correction A): implementations receive their dependencies
  * via constructor injection. They MUST NOT call getRuntime() internally.
+ *
+ * PERSISTENCE vs TRANSFORMATION (corrected 2026-08-21):
+ *   This service handles PERSISTENCE (when/where to write, external-modified
+ *   check, recovery copy management). The byte-preserving DOCX TRANSFORMATION
+ *   (saveDocx from @genoffice/docx-engine) remains in the renderer for now;
+ *   the renderer produces the bytes and passes them to save(). A future
+ *   increment may move the transformation into the service, but only when
+ *   the renderer can be unfrozen and the bridge can pass structured save
+ *   plans instead of raw bytes.
  */
 import type {
   AiSettings,
@@ -27,128 +42,127 @@ import type {
   MenuCommand,
 } from '@genoffice/docs-shared'
 
+/**
+ * Per-document session. Returned from open() and accepted by save() etc.
+ * The shell holds the reference and tracks the wcId → session map.
+ */
+export interface DocumentSession {
+  /** The file path the renderer is editing. */
+  readonly filePath: string
+  /** sha256 of the original file (the archive key). */
+  readonly hash: string
+  /** Disk state at last read/write (for external-modified detection). */
+  diskState?: { mtimeMs: number; size: number; hash: string }
+}
+
 export interface DocumentService {
-  // ── File lifecycle ───────────────────────────────────────────────────
-  /** Show the open-file dialog and open the chosen file; null when canceled. */
-  openDialog(): Promise<OpenFileResult | null>
-  /** Open a file by absolute path (Finder/Explorer drop or queued at launch). */
-  open(path: string): Promise<OpenFileResult | null>
-  /** Consume a file queued at tab creation; null when none pending. */
-  consumePendingOpen(): Promise<OpenFileResult | null>
-  /** Returns true once when this tab was opened via "New Document". */
+  // ── File lifecycle (session-scoped) ─────────────────────────────────
+  /**
+   * Show the open-file dialog and open the chosen file; returns a session
+   * the caller (shell) holds. Null when canceled.
+   */
+  openDialog(): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
+  /**
+   * Open a file by absolute path. Returns a session the caller holds.
+   * Null when the file can't be read.
+   */
+  open(path: string): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
+  /** Consume a file queued at tab creation; null when none pending. (Shell orchestrates the queue.) */
+  consumePendingOpen(): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
+  /** Returns true once when this tab was opened via "New Document". (Shell orchestrates the queue.) */
   consumeNewBlank(): Promise<boolean>
 
-  // ── Save (byte-preserving) ───────────────────────────────────────────
+  // ── Save (persistence only — renderer produces the bytes) ──────────
   /**
-   * Save the document bytes. auto=true marks an autosave (an externally
-   * modified file then fails with reason 'external-modified' instead of
-   * prompting).
+   * Persist the bytes the renderer produced. Checks external-modified,
+   * writes atomically via Files.write(), clears the recovery copy, updates
+   * recents. The byte-preserving DOCX TRANSFORMATION (saveDocx from
+   * @genoffice/docx-engine) remains in the renderer for now.
    */
   save(
-    path: string,
+    session: DocumentSession,
     data: Uint8Array,
     auto?: boolean,
-  ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified' }>
-  /** Save-as: show the save dialog and write to the chosen path. */
+  ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified'; session?: DocumentSession }>
+  /** Save-as: show the save dialog and write to the chosen path. Returns the new session. */
   saveAs(
+    session: DocumentSession,
     defaultName: string,
     data: Uint8Array,
-  ): Promise<{ ok: boolean; path?: string; error?: string }>
-  /** First save of a new document: silently write into the default folder. */
+  ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
+  /** First save of a new document: silently write into the default folder. Returns the new session. */
   saveNew(
+    session: DocumentSession | null,
     defaultName: string,
     data: Uint8Array,
-  ): Promise<{ ok: boolean; path?: string; error?: string }>
-  /** Crash-recovery copy of a dirty document, stored under userData. */
-  writeRecovery(path: string, data: Uint8Array): Promise<{ ok: boolean }>
+  ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
+  /** Crash-recovery copy of a dirty document. */
+  writeRecovery(session: DocumentSession, data: Uint8Array): Promise<{ ok: boolean }>
   /** Recent files list (paths). */
   recentFiles(): Promise<string[]>
 
   // ── Images & attachments ─────────────────────────────────────────────
-  /** Show the image picker (png/jpg/jpeg/gif); null when canceled. */
   pickImage(): Promise<PickImageResult | null>
-  /** Multi-select file dialog for chat attachments. */
   pickAttachments(): Promise<AttachmentAddResult | null>
-  /** Validate dropped paths and return attachment metadata. */
   addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult>
-  /** Persist a pasted clipboard image to a temp file and add as attachment. */
   addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult>
-  /** Read one slice of an attachment's extracted text. */
   readAttachment(
     path: string,
     offset: number,
     maxChars: number,
   ): Promise<AttachmentReadResult>
-  /** Read an image attachment as base64 for multimodal input (≤5MB). */
   readAttachmentImage(path: string): Promise<AttachmentImageResult>
 
   // ── Fonts ────────────────────────────────────────────────────────────
-  /** Vertical metrics of an installed family (exact name match); null when missing. */
   fontMetrics(family: string): Promise<FaceVerticalMetrics | null>
 
   // ── Print & export ───────────────────────────────────────────────────
-  /** System print dialog for the current window. */
   print(): Promise<{ ok: boolean; error?: string }>
-  /** Render the document to PDF and ask where to save. */
   exportPdf(
     defaultName: string,
     pageWidthTwips: number,
     pageHeightTwips: number,
     outPath?: string,
   ): Promise<{ ok: boolean; path?: string; error?: string }>
-  /** Mixed paper-size export: produce one PDF bytes blob at the given size. */
   printPdfBuffer(
     pageWidthTwips: number,
     pageHeightTwips: number,
   ): Promise<{ ok: boolean; base64?: string; error?: string }>
-  /** Merge grouped PDF fragments in order and write to disk. */
   saveMergedPdf(
     defaultName: string,
     base64Parts: string[],
     outPath?: string,
   ): Promise<{ ok: boolean; path?: string; error?: string }>
 
-  // ── Tab management (docs-specific) ──────────────────────────────────
-  /** View → New Tab: open another docs tab, optionally loading the same document. */
+  // ── Tab management (delegates to EventBus; shell subscribes) ───────
+  /**
+   * Request the shell to open a new tab. The shell decides whether to
+   * create a new BrowserWindow, a WebContentsView, or focus an existing tab.
+   */
   openNewTab(openPath?: string | null): Promise<void>
-  /** All open docs tabs, for View → Switch Tab. */
+  /** Request the list of open docs tabs from the shell. */
   listDocsTabs(): Promise<DocsTabInfo[]>
-  /** Focus a docs tab by id. */
+  /** Request the shell to focus a docs tab by id. */
   focusDocsTab(id: string): Promise<void>
 
-  // ── AI (docs-specific — provider settings are in runtime.ai) ────────
-  /** Read AI provider settings (cached locally for the docs editor). */
+  // ── AI (delegates to runtime.ai — Phase 1 increment 1: not yet wired) ──
   getAiSettings(): Promise<AiSettings>
-  /** Persist AI provider settings. */
   setAiSettings(settings: AiSettings): Promise<void>
-  /** One-shot AI chat (no tools). */
   aiChat(request: AiChatRequest): Promise<AiChatResponse>
-  /** Start a streaming AI call; deltas arrive via onAiStream. */
   aiStream(request: AiStreamRequest): Promise<void>
-  /** Cancel an in-flight stream. */
   aiStreamCancel(requestId: string): Promise<void>
-  /** Subscribe to AI stream chunks. */
   onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
 
-  // ── Events (push from service to renderer) ──────────────────────────
-  /** A document was opened while the app is running. */
+  // ── Events (push from service to shell; shell forwards to webContents) ──
   onOpened(handler: (result: OpenFileResult) => void): () => void
-  /** File was renamed externally (shell Home list rename). */
   onRenamed(handler: (paths: { oldPath: string; newPath: string }) => void): () => void
-  /** Tab closed but webContents kept alive (shell freeze workaround). */
   onTeardown(handler: () => void): () => void
-  /** Native menu command dispatched to the renderer. */
   onMenuCommand(handler: (command: MenuCommand, payload?: string) => void): () => void
 
-  // ── Close guard ──────────────────────────────────────────────────────
-  /** Main process queries pre-close state (dirty flag + autosave switch). */
+  // ── Close guard (shell forwards; service just exposes the subscription surface) ──
   onCloseCheck(handler: () => void): () => void
-  /** Renderer replies with its close-check state. */
   reportCloseCheck(state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void
-  /** Close guard chose "Save": main asks the renderer to run the full save flow. */
   onCloseSaveRequest(handler: () => void): () => void
-  /** Renderer reports the close-save outcome. */
   reportCloseSaveResult(ok: boolean): void
-  /** Keep the native View menu's checkbox items in sync with renderer state. */
   reportViewMenuState(state: { aiSidebar: boolean; darkCanvas: boolean }): void
 }
