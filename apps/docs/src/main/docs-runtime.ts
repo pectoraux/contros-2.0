@@ -1,16 +1,30 @@
 /**
- * Docs runtime construction.
+ * Docs runtime construction — single publication.
  *
- * Constructs the full runtime for the Docs Electron application:
- *   1. 9 Electron capabilities (platform-electron)
- *   2. DocumentServiceImpl (services-docs)
- *   3. DocsShellCoordinatorImpl (apps/docs/src/main)
+ * Constructs the full runtime in one pass:
+ *   1. Electron capabilities (via createElectronRuntime)
+ *   2. DocumentService (using the capabilities)
+ *   3. Coordinator (using the service + capabilities)
+ *   4. ONE setRuntime() with the wired runtime
  *
- * Called once during app bootstrap, after app.whenReady().
+ * createElectronRuntime() calls setRuntime() internally with NOT_YET_WIRED
+ * for the docs slot. We override it immediately after with the wired runtime.
+ * This is acceptable because:
+ *   - The NOT_YET_WIRED runtime is never observed by any consumer
+ *   - setRuntime() is called with the final wired runtime before any
+ *     IPC handler is registered or window is created
+ *
+ * The bootstrap sequence is:
+ *   app.whenReady()
+ *     → initDocsRuntime()  (constructs capabilities + service + coordinator + setRuntime)
+ *     → startDocsStandalone()  (registers IPC handlers, creates window)
+ *     → registerMigratedDocsIpc()  (overrides handlers with runtime-backed implementations)
+ *
+ * At no point does any consumer see a NOT_YET_WIRED docs service.
  */
 import { app, BrowserWindow } from 'electron'
 import { join } from 'node:path'
-import { createElectronRuntime, ElectronFontRegistry } from '@genoffice/platform-electron'
+import { createElectronRuntime, ElectronFontRegistry, ElectronFiles, ElectronPrinting } from '@genoffice/platform-electron'
 import { DocumentServiceImpl, type DocsEventBus } from '@genoffice/services-docs'
 import { setRuntime, type RuntimeContext, type DocumentService } from '@genoffice/runtime-contracts'
 import { DocsShellCoordinatorImpl } from './docs-coordinator-impl.js'
@@ -22,59 +36,36 @@ export interface DocsRuntimeBundle {
   fontRegistry: ElectronFontRegistry
 }
 
-export function constructDocsRuntime(): DocsRuntimeBundle {
+export let runtimeBundle: DocsRuntimeBundle | null = null
+
+export function initDocsRuntime(): DocsRuntimeBundle {
   const userDataDir = app.getPath('userData')
-  const documentsDir = app.getPath('documents')
 
   // ── Font registry ─────────────────────────────────────────────────
   const fontRegistry = new ElectronFontRegistry({
     cacheDir: join(userDataDir, 'font-metrics'),
   })
 
-  // ── Event bus (forwards domain events to webContents) ──────────────
+  // ── Event bus (forwards domain events to coordinator → webContents) ──
+  // The event bus is the bridge between the domain service's events
+  // and the shell's push-event forwarding to the renderer.
+  // The coordinator holds the active webContents reference.
+  // We create the coordinator first (needs the service), so we use
+  // a mutable holder.
+  let coordinatorRef: DocsShellCoordinatorImpl | null = null
+
   const eventBus: DocsEventBus = {
-    opened: (_result) => {
-      // The IPC handler forwards this to webContents.send('docs:opened', result)
-    },
-    renamed: (_paths) => {
-      // Forwarded by the IPC handler
-    },
-    teardown: () => {
-      // Forwarded by the IPC handler
-    },
+    opened: (result) => { coordinatorRef?.sendOpened(result) },
+    renamed: (paths) => { coordinatorRef?.sendRenamed(paths.oldPath, paths.newPath) },
+    teardown: () => { coordinatorRef?.sendTeardown() },
   }
 
-  // ── Construct the runtime via the Electron adapter ─────────────────
-  // The capabilities (storage, files, ai, identity, printing, clipboard,
-  // notifications, windowing, settings) are constructed inside
-  // createElectronRuntime(). We pass a partial config — the DocumentService
-  // is constructed separately because it needs the capabilities as deps.
-  //
-  // For now, we construct the runtime WITHOUT the docs service (it will be
-  // NOT_YET_WIRED), then construct the DocumentServiceImpl with the
-  // capabilities, then attach it.
-  //
-  // But wait — createElectronRuntime() constructs the capabilities internally
-  // and doesn't expose them. We need them to construct DocumentServiceImpl.
-  //
-  // Solution: construct the capabilities ourselves, then pass them to both
-  // createElectronRuntime (via config) and DocumentServiceImpl.
-  //
-  // Actually, createElectronRuntime() constructs everything internally.
-  // We need a different approach: construct the capabilities, then the
-  // service, then the runtime.
-  //
-  // For Increment 2, let's use the createElectronRuntime factory and then
-  // construct the DocumentService using the runtime's capabilities.
-  // The runtime will have docs: NOT_YET_WIRED initially.
-  const runtime = createElectronRuntime({
+  // ── Construct runtime (calls setRuntime with NOT_YET_WIRED docs) ──
+  const initialRuntime = createElectronRuntime({
     appKind: 'docs',
     broadcast: (channel: string, ...args: unknown[]) => {
-      // Broadcast to all webContents
       for (const wc of BrowserWindow.getAllWindows()) {
-        if (!wc.isDestroyed()) {
-          wc.webContents.send(channel, ...args)
-        }
+        if (!wc.isDestroyed()) wc.webContents.send(channel, ...args)
       }
     },
     getActiveWebContents: () => {
@@ -87,50 +78,55 @@ export function constructDocsRuntime(): DocsRuntimeBundle {
     },
   })
 
-  // ── Construct the DocumentService with the runtime's capabilities ──
+  // ── Construct DocumentService with the runtime's capabilities ────
   const docsService = new DocumentServiceImpl(
     {
-      storage: runtime.storage,
-      files: runtime.files,
-      ai: runtime.ai,
-      printing: runtime.printing,
-      settings: runtime.settings,
+      storage: initialRuntime.storage,
+      files: initialRuntime.files,
+      ai: initialRuntime.ai,
+      printing: initialRuntime.printing,
+      settings: initialRuntime.settings,
       fontRegistry,
     },
     eventBus,
   )
 
-  // ── Attach the DocumentService to the runtime ──────────────────────
-  // The runtime's docs slot is NOT_YET_WIRED. We need to replace it.
-  // Since RuntimeContext is readonly, we use a type-safe approach:
-  // create a new runtime object with docs replaced.
+  // ── Construct coordinator ─────────────────────────────────────────
+  const coordinator = new DocsShellCoordinatorImpl({
+    docs: docsService,
+    userDataDir,
+    getFocusedWindow: () => {
+      const win = BrowserWindow.getFocusedWindow()
+      return win && !win.isDestroyed() ? win : null
+    },
+    files: {
+      pickSave: async (opts: { defaultName: string; accept?: string[] }) => {
+        const result = await initialRuntime.files.pickSave(opts)
+        return typeof result === 'string' ? result : null
+      },
+    },
+    printToPDF: (wc, opts) => wc.printToPDF(opts),
+    print: (wc, opts) => new Promise((resolve) => {
+      wc.print(opts as never, (success: boolean, failureReason?: string) => {
+        resolve({
+          ok: success,
+          ...(failureReason && !/cancel/i.test(failureReason) ? { error: failureReason } : {}),
+        })
+      })
+    }),
+  })
+  coordinatorRef = coordinator
+
+  // ── Publish the FINAL runtime with the wired docs service ─────────
+  // This is the ONLY setRuntime that matters. The one inside
+  // createElectronRuntime() published NOT_YET_WIRED — no consumer
+  // observed it because we hadn't registered any handlers yet.
   const wiredRuntime: RuntimeContext = {
-    ...runtime,
+    ...initialRuntime,
     docs: docsService,
   }
   setRuntime(wiredRuntime)
 
-  // ── Construct the coordinator ──────────────────────────────────────
-  const coordinator = new DocsShellCoordinatorImpl({
-    docs: docsService,
-    userDataDir,
-    getFocusedWindow: () => BrowserWindow.getFocusedWindow(),
-    // shellHooks will be set by docs-main.ts when the shell connects
-  })
-
-  return {
-    runtime: wiredRuntime,
-    docsService,
-    coordinator,
-    fontRegistry,
-  }
-}
-
-/** Module-level singleton — set by constructDocsRuntime(). */
-export let runtimeBundle: DocsRuntimeBundle | null = null
-
-/** Construct the runtime and store it as a module-level singleton. */
-export function initDocsRuntime(): DocsRuntimeBundle {
-  runtimeBundle = constructDocsRuntime()
+  runtimeBundle = { runtime: wiredRuntime, docsService, coordinator, fontRegistry }
   return runtimeBundle
 }
