@@ -3,18 +3,12 @@
  * dedicated update service.
  *
  * The update service is not yet a formal capability in @genoffice/platform.
- * Until it is, the bridge reads it from the runtime via a typed accessor.
+ * Until it is, the bridge accepts it as an explicit constructor dependency.
  *
- * This is NOT a compiler-suppression cast — the `updater` field is an
- * explicit extension point on the runtime, accessed via a typed interface.
+ * ZERO type assertions. The update capability is passed in, not extracted
+ * from the runtime via a cast.
  */
 import type { UpdateWindowApi, UpdateUiState } from '@genoffice/shell-update-shared'
-import type { RuntimeContext } from '@genoffice/runtime-contracts'
-
-/** Typed extension for the update capability (not yet formalized). */
-interface RuntimeWithUpdater extends RuntimeContext {
-  updater?: UpdateCapability
-}
 
 interface UpdateCapability {
   getState(): Promise<UpdateUiState | null>
@@ -25,11 +19,12 @@ interface UpdateCapability {
   onState(handler: (state: UpdateUiState) => void): () => void
 }
 
-export function createUpdateBridge(runtime: RuntimeContext): UpdateWindowApi {
-  const updater = (runtime as RuntimeWithUpdater).updater
-  if (!updater) {
-    throw new Error('RuntimeContext does not have an updater capability')
-  }
+export interface UpdateBridgeDeps {
+  updater: UpdateCapability
+}
+
+export function createUpdateBridge(deps: UpdateBridgeDeps): UpdateWindowApi {
+  const { updater } = deps
   return {
     getState: () => updater.getState(),
     download: () => updater.download(),

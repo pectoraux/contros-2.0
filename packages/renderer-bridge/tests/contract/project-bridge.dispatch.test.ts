@@ -1,6 +1,9 @@
 /** Dispatch test for createProjectApiBridge + createProjectHomeBridge. */
 import { describe, test, expect, vi } from 'vitest'
-import { createProjectApiBridge, createProjectHomeBridge } from '../../src/bridges/project-bridge.js'
+import {
+  createProjectApiBridge,
+  createProjectHomeBridge,
+} from '../../src/bridges/project-bridge.js'
 import { mockRuntime } from '../helpers/mocks.js'
 
 describe('createProjectApiBridge dispatch', () => {
@@ -31,7 +34,7 @@ describe('createProjectHomeBridge dispatch', () => {
   test('createProject takes a positional name and wraps it in an object (argument transformation)', async () => {
     const runtime = mockRuntime()
     const project = runtime.project
-    const bridge = createProjectHomeBridge(runtime)
+    const bridge = createProjectHomeBridge({ project })
 
     await bridge.createProject('Q4 Report')
 
@@ -41,7 +44,7 @@ describe('createProjectHomeBridge dispatch', () => {
   test('renameProject takes positional (id, name) and wraps them (argument transformation)', async () => {
     const runtime = mockRuntime()
     const project = runtime.project
-    const bridge = createProjectHomeBridge(runtime)
+    const bridge = createProjectHomeBridge({ project })
 
     await bridge.renameProject('proj-1', 'Renamed')
 
@@ -51,7 +54,7 @@ describe('createProjectHomeBridge dispatch', () => {
   test('moveFile takes positional (filePath, projectId) and wraps them (argument transformation)', async () => {
     const runtime = mockRuntime()
     const project = runtime.project
-    const bridge = createProjectHomeBridge(runtime)
+    const bridge = createProjectHomeBridge({ project })
 
     await bridge.moveFile('/path/to/file.docx', 'proj-2')
 
@@ -61,7 +64,7 @@ describe('createProjectHomeBridge dispatch', () => {
   test('deleteProject dispatches to project.deleteProject (NOT moveFile)', async () => {
     const runtime = mockRuntime()
     const project = runtime.project
-    const bridge = createProjectHomeBridge(runtime)
+    const bridge = createProjectHomeBridge({ project })
 
     await bridge.deleteProject('proj-3')
 

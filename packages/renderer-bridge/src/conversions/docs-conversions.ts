@@ -3,35 +3,38 @@
  * (from @genoffice/docs-shared) and runtime-independent types
  * (from @genoffice/runtime-contracts).
  *
- * These replace `as never` / `as any` compiler-suppression casts.
- * Each conversion is explicit, named, testable, and auditable.
+ * ZERO unchecked type assertions. Every function either:
+ *   - uses TypeScript structural typing (direct assignment), or
+ *   - uses a runtime type guard that produces a genuinely typed value
  *
- * Where types are structurally identical (e.g. UiTheme, OpenFileResult),
- * TypeScript's structural typing allows direct assignment without a cast —
- * no conversion function is needed.
+ * No `as T`, `as LegacyType`, `as never`, or `as any` anywhere.
  */
 
 import type { UiLanguage } from '@genoffice/platform'
 
 // ── Language conversion ────────────────────────────────────────────────
 
-const LEGACY_LANGS = new Set<string>([
+const LEGACY_LANGS: ReadonlySet<LegacyLanguage> = new Set([
   'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'th', 'id', 'ru', 'ar',
 ])
 
 export type LegacyLanguage =
   | 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'
 
+const LEGACY_LANG_VALUES: readonly LegacyLanguage[] = [
+  'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'th', 'id', 'ru', 'ar',
+]
+
 /**
  * Narrow a UiLanguage (19 members) to the legacy language (11 members).
  * Languages outside the legacy set default to 'en'.
  *
- * This is a runtime-validated narrowing — the set membership check
- * is a real type guard, not a cast.
+ * Uses exhaustive comparison — no cast. Each value is checked against
+ * the literal union members directly.
  */
 export function toLegacyLanguage(lang: UiLanguage): LegacyLanguage {
-  if (LEGACY_LANGS.has(lang)) {
-    return lang as LegacyLanguage
+  for (const valid of LEGACY_LANG_VALUES) {
+    if (lang === valid) return valid
   }
   return 'en'
 }
@@ -46,54 +49,214 @@ export function wrapLanguageHandler(
   return (lang: UiLanguage) => handler(toLegacyLanguage(lang))
 }
 
-// ── Runtime-validated storage conversions ──────────────────────────────
-//
-// Storage.readObject returns `unknown | null`. The bridge needs to
-// return specific types. These functions perform RUNTIME VALIDATION
-// of the shape — not unchecked casts.
-//
-// Each validator checks the structural shape at runtime and returns
-// the fallback when the shape doesn't match. This is a real type guard
-// boundary, not a compiler suppression.
+// ── Runtime type guards ────────────────────────────────────────────────
 
-/** Check if a value is a non-null object (not an array). */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** Check if a value is an array of strings. */
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((item) => typeof item === 'string')
 }
 
-/**
- * Validate an unknown Storage value as a string array, with a fallback.
- * Returns the validated array, or the fallback when validation fails.
- */
+function hasField<T extends string>(
+  obj: Record<string, unknown>,
+  field: T,
+): obj is Record<string, unknown> & { [K in T]: unknown } {
+  return field in obj
+}
+
+function isNumber(v: unknown): v is number {
+  return typeof v === 'number' && !Number.isNaN(v)
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === 'string'
+}
+
+function isBoolean(v: unknown): v is boolean {
+  return typeof v === 'boolean'
+}
+
+// ── Validated storage conversions ──────────────────────────────────────
+//
+// Storage.readObject returns `unknown | null`. These functions validate
+// the structural shape at runtime and return the typed value, or a
+// fallback. No assertions — the type guard produces the typed value.
+
+/** Validate an unknown as a string array, with fallback. */
 export function fromStorageStringArray(raw: unknown, fallback: string[]): string[] {
-  if (isStringArray(raw)) return raw
-  return fallback
+  return isStringArray(raw) ? raw : fallback
+}
+
+// ── Specific structural validators (replace generic fromStorageObject) ──
+
+/** Fields for ProjectSummary (from project-store/types.ts). */
+interface ProjectSummaryFields {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  fileCount: number
+  lastActiveAt: string
+  isDefault: boolean
+}
+
+/** Runtime validator: is this a ProjectSummary-shaped object? */
+function isProjectSummary(v: unknown): v is ProjectSummaryFields {
+  if (!isPlainObject(v)) return false
+  return (
+    hasField(v, 'id') && isString(v.id) &&
+    hasField(v, 'name') && isString(v.name) &&
+    hasField(v, 'createdAt') && isString(v.createdAt) &&
+    hasField(v, 'updatedAt') && isString(v.updatedAt) &&
+    hasField(v, 'fileCount') && isNumber(v.fileCount) &&
+    hasField(v, 'lastActiveAt') && isString(v.lastActiveAt) &&
+    hasField(v, 'isDefault') && isBoolean(v.isDefault)
+  )
+}
+
+/** Validate an unknown as a ProjectSummary, with fallback. */
+export function fromStorageProjectSummary(
+  raw: unknown,
+  fallback: ProjectSummaryFields,
+): ProjectSummaryFields {
+  return isProjectSummary(raw) ? raw : fallback
+}
+
+// ── Structural validators for specific bridge types ────────────────────
+
+/** Fields shared by RecentEntry (from home-api.ts). */
+interface RecentEntryFields {
+  path: string
+  name: string
+  ext: string
+  mtimeMs: number
+  sizeBytes: number
+  starred: boolean
+}
+
+/** Runtime validator: is this a RecentEntry-shaped object? */
+function isRecentEntryArray(v: unknown): v is RecentEntryFields[] {
+  if (!Array.isArray(v)) return false
+  return v.every((item) =>
+    isPlainObject(item) &&
+    hasField(item, 'path') && isString(item.path) &&
+    hasField(item, 'name') && isString(item.name) &&
+    hasField(item, 'ext') && isString(item.ext) &&
+    hasField(item, 'mtimeMs') && isNumber(item.mtimeMs) &&
+    hasField(item, 'sizeBytes') && isNumber(item.sizeBytes) &&
+    hasField(item, 'starred') && isBoolean(item.starred),
+  )
+}
+
+/** Validate an unknown as a RecentEntry array, with fallback. */
+export function fromStorageRecentEntries(raw: unknown, fallback: RecentEntryFields[]): RecentEntryFields[] {
+  return isRecentEntryArray(raw) ? raw : fallback
+}
+
+/** Fields for a RecentPage (from home-api.ts). */
+interface RecentPageFields {
+  entries: RecentEntryFields[]
+  total: number
+  totalAll: number
+}
+
+/** Runtime validator: is this a RecentPage-shaped object? */
+function isRecentPage(v: unknown): v is RecentPageFields {
+  if (!isPlainObject(v)) return false
+  return (
+    hasField(v, 'entries') && isRecentEntryArray(v.entries) &&
+    hasField(v, 'total') && isNumber(v.total) &&
+    hasField(v, 'totalAll') && isNumber(v.totalAll)
+  )
+}
+
+/** Validate an unknown as a RecentPage, with fallback. */
+export function fromStorageRecentPage(raw: unknown, fallback: RecentPageFields): RecentPageFields {
+  return isRecentPage(raw) ? raw : fallback
+}
+
+/** Fields for StarPromptShow (from home-api.ts). */
+interface StarPromptShowFields {
+  show: boolean
+  docOpens: number
+}
+
+/** Runtime validator: is this a StarPromptShow-shaped object? */
+function isStarPromptShow(v: unknown): v is StarPromptShowFields {
+  if (!isPlainObject(v)) return false
+  return (
+    hasField(v, 'show') && isBoolean(v.show) &&
+    hasField(v, 'docOpens') && isNumber(v.docOpens)
+  )
+}
+
+/** Validate an unknown as a StarPromptShow, with fallback. */
+export function fromStorageStarPrompt(raw: unknown, fallback: StarPromptShowFields): StarPromptShowFields {
+  return isStarPromptShow(raw) ? raw : fallback
+}
+
+/** Fields for CloudProjectEntry (from home-api.ts). */
+interface CloudProjectEntryFields {
+  projectId: string
+  title: string
+  kind: 'docs' | 'sheets' | 'slides' | 'other'
+  ctimeMs: number
+  projectUrl: string
+}
+
+/** Runtime validator: is this a CloudProjectEntry-shaped object? */
+function isCloudProjectEntry(v: unknown): v is CloudProjectEntryFields {
+  if (!isPlainObject(v)) return false
+  if (!hasField(v, 'projectId') || !isString(v.projectId)) return false
+  if (!hasField(v, 'title') || !isString(v.title)) return false
+  if (!hasField(v, 'kind') || !isString(v.kind)) return false
+  if (v.kind !== 'docs' && v.kind !== 'sheets' && v.kind !== 'slides' && v.kind !== 'other') return false
+  if (!hasField(v, 'ctimeMs') || !isNumber(v.ctimeMs)) return false
+  if (!hasField(v, 'projectUrl') || !isString(v.projectUrl)) return false
+  return true
+}
+
+/** Runtime validator: is this a CloudProjectEntry array? */
+function isCloudProjectEntryArray(v: unknown): v is CloudProjectEntryFields[] {
+  return Array.isArray(v) && v.every(isCloudProjectEntry)
+}
+
+/** Fields for CloudProjectsSnapshot (from home-api.ts). */
+interface CloudProjectsSnapshotFields {
+  available: boolean
+  projects: CloudProjectEntryFields[]
+  syncedAt: number
+}
+
+/** Runtime validator: is this a CloudProjectsSnapshot-shaped object? */
+function isCloudProjectsSnapshot(v: unknown): v is CloudProjectsSnapshotFields {
+  if (!isPlainObject(v)) return false
+  return (
+    hasField(v, 'available') && isBoolean(v.available) &&
+    hasField(v, 'projects') && isCloudProjectEntryArray(v.projects) &&
+    hasField(v, 'syncedAt') && isNumber(v.syncedAt)
+  )
 }
 
 /**
- * Validate an unknown Storage value as a plain object, with a fallback.
- * Returns the validated object, or the fallback when validation fails.
+ * Validate an unknown as a CloudProjectsSnapshot or null.
+ * Fully validates the CloudProjectEntry[] structure at runtime.
  */
-export function fromStorageObject<T extends Record<string, unknown>>(
+export function fromStorageCloudProjects(
   raw: unknown,
-  fallback: T,
-): T {
-  if (isPlainObject(raw)) return raw as T
-  return fallback
+): CloudProjectsSnapshotFields | null {
+  return isCloudProjectsSnapshot(raw) ? raw : null
 }
 
-/**
- * Validate an unknown Storage value as a plain object or null.
- * Returns the validated object, or null when validation fails or the value is absent.
- */
-export function fromStorageObjectOrNull<T extends Record<string, unknown>>(
-  raw: unknown,
-): T | null {
-  if (isPlainObject(raw)) return raw as T
-  return null
+// ── Re-export field types for bridge use ───────────────────────────────
+
+export type {
+  RecentEntryFields,
+  RecentPageFields,
+  StarPromptShowFields,
+  CloudProjectsSnapshotFields,
+  CloudProjectEntryFields,
+  ProjectSummaryFields,
 }

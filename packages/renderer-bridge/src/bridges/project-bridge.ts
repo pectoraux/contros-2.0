@@ -1,20 +1,15 @@
 /**
- * createProjectBridge — maps window.projectApi (ProjectApi from @genoffice/project-store)
- * and window.aiOfficeProject (ProjectHomeApi from shell-home-shared) to the project service.
+ * createProjectBridge — maps window.projectApi and window.aiOfficeProject
+ * to the project service.
  *
- * The shell renderer uses ProjectHomeApi (7 methods, includes listFiles which is
- * shell-specific and NOT on ProjectApi). The editor renderers use the full
- * ProjectApi (10 methods). Both delegate to runtime.project.
- *
- * NOTE: ProjectHomeApi uses ProjectSummaryEntry / TimelineEntryItem (defined in
- * home-api.ts); ProjectApi uses ProjectSummary / TimelineEntry (defined in
- * project-store/types.ts). These types have similar shapes but are distinct.
- * The bridge uses fromStorage() for the conversion — explicit, not a cast.
+ * The ProjectHomeApi has a `listFiles` method that is NOT on ProjectApi.
+ * The runtime.project may or may not have it. The bridge accepts an
+ * explicit optional listFiles function rather than casting.
  */
 import type { ProjectApi } from '@genoffice/project-store'
 import type { ProjectHomeApi } from '@genoffice/shell-home-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { fromStorageObject } from '../conversions/docs-conversions.js'
+import { fromStorageProjectSummary } from '../conversions/docs-conversions.js'
 
 /** Full ProjectApi (used by editors as window.projectApi). */
 export function createProjectApiBridge(runtime: RuntimeContext): ProjectApi {
@@ -33,27 +28,39 @@ export function createProjectApiBridge(runtime: RuntimeContext): ProjectApi {
   }
 }
 
+export interface ProjectHomeBridgeDeps {
+  project: ProjectApi
+  listFiles?: (projectId: string) => Promise<string[]>
+}
+
 /**
- * Shell-side ProjectHomeApi (subset of ProjectApi, exposed as window.aiOfficeProject).
- *
- * `listFiles` is shell-specific (not on ProjectApi). For Milestone 1, delegates
- * to runtime.project via a typed wrapper. The other methods convert between
- * the shell's arg shape (positional) and the project-store's arg shape (object).
- *
- * Uses fromStorage() for type conversion — explicit, not a cast.
+ * Shell-side ProjectHomeApi. Takes an explicit deps object with the
+ * project service and an optional listFiles function.
  */
-export function createProjectHomeBridge(runtime: RuntimeContext): ProjectHomeApi {
-  const p = runtime.project as ProjectApi & {
-    listFiles?(projectId: string): Promise<string[]>
-  }
+export function createProjectHomeBridge(deps: ProjectHomeBridgeDeps): ProjectHomeApi {
+  const { project: p, listFiles } = deps
   return {
-    listProjects: () => p.listProjects().then((r) => Array.isArray(r) ? r : []),
+    listProjects: () => p.listProjects().then((r) => (Array.isArray(r) ? r : [])),
     listFiles: (projectId) =>
-      (p.listFiles ? p.listFiles(projectId) : Promise.resolve([])).then((r) => Array.isArray(r) ? r : []),
-    createProject: (name) => p.createProject({ name }).then((r) => fromStorageObject(r, { id: '', name: '', createdAt: '', updatedAt: '', fileCount: 0, lastActiveAt: '', isDefault: false })),
+      (listFiles ? listFiles(projectId) : Promise.resolve([])).then((r) =>
+        Array.isArray(r) ? r : [],
+      ),
+    createProject: (name) =>
+      p.createProject({ name }).then((r) =>
+        fromStorageProjectSummary(r, {
+          id: '',
+          name: '',
+          createdAt: '',
+          updatedAt: '',
+          fileCount: 0,
+          lastActiveAt: '',
+          isDefault: false,
+        }),
+      ),
     renameProject: (id, name) => p.renameProject({ id, name }),
     deleteProject: (id) => p.deleteProject({ id }),
     moveFile: (filePath, projectId) => p.moveFile({ filePath, projectId }),
-    getTimeline: (projectId, limit) => p.getTimeline({ projectId, limit }).then((r) => Array.isArray(r) ? r : []),
+    getTimeline: (projectId, limit) =>
+      p.getTimeline({ projectId, limit }).then((r) => (Array.isArray(r) ? r : [])),
   }
 }

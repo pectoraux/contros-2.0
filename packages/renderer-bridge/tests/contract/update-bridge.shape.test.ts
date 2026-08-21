@@ -1,7 +1,6 @@
 /** Shape test for createUpdateBridge. */
 import { describe, test, expect } from 'vitest'
 import { createUpdateBridge } from '../../src/bridges/update-bridge.js'
-import { mockRuntime } from '../helpers/mocks.js'
 import type { UpdateUiState } from '@genoffice/shell-update-shared'
 
 const EXPECTED_UPDATE_API_METHODS = [
@@ -13,18 +12,20 @@ const EXPECTED_UPDATE_API_METHODS = [
   'onState',
 ] as const
 
+function makeMockUpdater() {
+  return {
+    getState: () => Promise.resolve(null),
+    download: () => {},
+    install: () => {},
+    later: () => {},
+    openDownload: () => {},
+    onState: () => () => {},
+  }
+}
+
 describe('createUpdateBridge shape', () => {
   test('implements every UpdateWindowApi method', () => {
-    const mockUpdater = {
-      getState: () => Promise.resolve(null),
-      download: () => {},
-      install: () => {},
-      later: () => {},
-      openDownload: () => {},
-      onState: () => () => {},
-    }
-    const runtime = mockRuntime({ updater: mockUpdater } as never)
-    const bridge = createUpdateBridge(runtime)
+    const bridge = createUpdateBridge({ updater: makeMockUpdater() })
     const bridgeMethods = Object.keys(bridge).sort()
     const expected = [...EXPECTED_UPDATE_API_METHODS].sort()
     expect(bridgeMethods).toEqual(expected)
@@ -51,16 +52,11 @@ describe('createUpdateBridge shape', () => {
         openDownload: 'OD',
       },
     }
-    const mockUpdater = {
+    const updater = {
+      ...makeMockUpdater(),
       getState: () => Promise.resolve(mockState),
-      download: () => {},
-      install: () => {},
-      later: () => {},
-      openDownload: () => {},
-      onState: () => () => {},
     }
-    const runtime = mockRuntime({ updater: mockUpdater } as never)
-    const bridge = createUpdateBridge(runtime)
+    const bridge = createUpdateBridge({ updater })
 
     const result = await bridge.getState()
     expect(result).toBe(mockState)
