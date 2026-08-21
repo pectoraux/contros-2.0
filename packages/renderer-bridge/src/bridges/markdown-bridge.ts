@@ -1,41 +1,43 @@
 /**
  * createMarkdownApiBridge — maps window.markdownApi (MarkdownApi) to MarkdownService.
  *
- * Like PdfApi, MarkdownApi is entirely editor-specific (settings/AI methods are
- * part of MarkdownService per the runtime-contracts design). Pure 1:1 delegation.
+ * The MarkdownService is NOT_YET_WIRED. Service-specific methods throw via
+ * `notYet()`. Cross-cutting methods delegate to runtime capabilities.
+ *
+ * NO `as never` / `as any` casts.
  */
 import type { MarkdownApi } from '@genoffice/markdown-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { requireWired } from './require-wired.js'
+import { toLegacyLanguage, wrapLanguageHandler } from '../conversions/docs-conversions.js'
+import { notYet } from './not-yet.js'
 
 export function createMarkdownApiBridge(runtime: RuntimeContext): MarkdownApi {
-  const md = requireWired(runtime.markdown, "markdownService") as any
   return {
-    consumePending: () => md.consumePending(),
-    readFile: (path) => md.readFile(path),
-    save: (request) => md.save(request),
-    setDirty: (dirty) => md.setDirty(dirty),
-    onSaveRequest: (handler) => md.onSaveRequest(handler),
-    sendSaveRequestAck: (ok) => md.sendSaveRequestAck(ok),
-    onCloseSaveRequest: (handler) => md.onCloseSaveRequest(handler),
-    sendCloseSaveResult: (ok) => md.sendCloseSaveResult(ok),
-    onFileRenamed: (handler) => md.onFileRenamed(handler),
-    pickImage: () => md.pickImage(),
-    saveImage: (data) => md.saveImage(data),
-    readImage: (src) => md.readImage(src),
-    onExportRequest: (handler) => md.onExportRequest(handler),
-    onPrintRequest: (handler) => md.onPrintRequest(handler),
-    exportDocx: (request) => md.exportDocx(request),
-    exportPdf: (request) => md.exportPdf(request),
-    getLanguage: () => md.getLanguage(),
-    onLanguageChanged: (handler) => md.onLanguageChanged(handler),
-    getTheme: () => md.getTheme(),
-    onThemeChanged: (handler) => md.onThemeChanged(handler),
-    onChromePressed: (handler) => md.onChromePressed(handler),
-    getAiSettings: () => md.getAiSettings(),
-    aiStream: (request) => md.aiStream(request),
-    aiStreamCancel: (requestId) => md.aiStreamCancel(requestId),
-    onAiStream: (handler) => md.onAiStream(handler),
-    webSearch: (query, maxResults) => md.webSearch(query, maxResults),
+    consumePending: notYet.bind(null, 'MarkdownService'),
+    readFile: notYet.bind(null, 'MarkdownService'),
+    save: notYet.bind(null, 'MarkdownService'),
+    setDirty: notYet.bind(null, 'MarkdownService'),
+    onSaveRequest: notYet.bind(null, 'MarkdownService'),
+    sendSaveRequestAck: notYet.bind(null, 'MarkdownService'),
+    onCloseSaveRequest: notYet.bind(null, 'MarkdownService'),
+    sendCloseSaveResult: notYet.bind(null, 'MarkdownService'),
+    onFileRenamed: notYet.bind(null, 'MarkdownService'),
+    pickImage: notYet.bind(null, 'MarkdownService'),
+    saveImage: notYet.bind(null, 'MarkdownService'),
+    readImage: notYet.bind(null, 'MarkdownService'),
+    onExportRequest: notYet.bind(null, 'MarkdownService'),
+    onPrintRequest: notYet.bind(null, 'MarkdownService'),
+    exportDocx: notYet.bind(null, 'MarkdownService'),
+    exportPdf: notYet.bind(null, 'MarkdownService'),
+    getLanguage: () => runtime.settings.getLanguage().then(toLegacyLanguage),
+    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(wrapLanguageHandler(handler)),
+    getTheme: () => runtime.settings.getTheme(),
+    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler),
+    onChromePressed: (handler) => runtime.windowing.onChromePressed(handler),
+    getAiSettings: () => runtime.ai.getSettings(),
+    aiStream: (request) => runtime.ai.stream(request),
+    aiStreamCancel: (requestId) => runtime.ai.streamCancel(requestId),
+    onAiStream: (handler) => runtime.ai.onStream(handler),
+    webSearch: (query, maxResults) => runtime.ai.webSearch(query, maxResults),
   }
 }

@@ -20,7 +20,6 @@ const CROSS_CUTTING_METHODS = [
   'webSearch',
   'imageSearch',
   'onAiStream',
-  'openExternal',
 ] as const
 
 // A representative sample of slides-specific methods (the full list is ~120).

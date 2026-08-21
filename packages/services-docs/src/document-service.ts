@@ -35,7 +35,6 @@ import type {
   DocumentAttachmentAddResult,
   DocumentAttachmentReadResult,
   DocumentAttachmentImageResult,
-  DocumentMenuCommand,
 } from '@genoffice/runtime-contracts'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
 import type {
@@ -74,7 +73,6 @@ export interface DocsEventBus {
   opened: (result: DocumentOpenResult) => void
   renamed: (paths: { oldPath: string; newPath: string }) => void
   teardown: () => void
-  menuCommand: (command: DocumentMenuCommand, payload?: string) => void
   closeCheck: () => void
   closeSaveRequest: () => void
 }
@@ -102,7 +100,6 @@ export class DocumentServiceImpl implements DocumentService {
     opened: new Set<(r: DocumentOpenResult) => void>(),
     renamed: new Set<(p: { oldPath: string; newPath: string }) => void>(),
     teardown: new Set<() => void>(),
-    menuCommand: new Set<(c: DocumentMenuCommand, p?: string) => void>(),
     closeCheck: new Set<() => void>(),
     closeSaveRequest: new Set<() => void>(),
   }
@@ -458,11 +455,6 @@ export class DocumentServiceImpl implements DocumentService {
     return () => this.eventListeners.teardown.delete(handler)
   }
 
-  onMenuCommand(handler: (command: DocumentMenuCommand, payload?: string) => void): () => void {
-    this.eventListeners.menuCommand.add(handler)
-    return () => this.eventListeners.menuCommand.delete(handler)
-  }
-
   onCloseCheck(handler: () => void): () => void {
     this.eventListeners.closeCheck.add(handler)
     return () => this.eventListeners.closeCheck.delete(handler)
@@ -479,10 +471,6 @@ export class DocumentServiceImpl implements DocumentService {
 
   reportCloseSaveResult(_ok: boolean): void {
     // Forwarded to the shell close-guard flow.
-  }
-
-  reportViewMenuState(_state: { aiSidebar: boolean; darkCanvas: boolean }): void {
-    // Forwarded to the shell menu builder (shell orchestration).
   }
 
   // ── Internal helpers (PURE LOGIC — no fs access) ────────────────────

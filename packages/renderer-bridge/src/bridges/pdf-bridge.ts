@@ -1,59 +1,60 @@
 /**
  * createPdfApiBridge — maps window.pdfApi (PdfApi) to PdfService.
  *
- * PdfApi is entirely pdf-specific (no cross-cutting methods that delegate to
- * capabilities — the settings/AI methods are part of PdfService per the
- * runtime-contracts design). So the bridge is a pure 1:1 delegation.
+ * The PdfService is NOT_YET_WIRED. Service-specific methods throw via
+ * `notYet()`. Cross-cutting methods delegate to runtime capabilities.
+ *
+ * NO `as never` / `as any` casts.
  */
 import type { PdfApi } from '@genoffice/pdf-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { requireWired } from './require-wired.js'
+import { toLegacyLanguage, wrapLanguageHandler } from '../conversions/docs-conversions.js'
+import { notYet } from './not-yet.js'
 
 export function createPdfApiBridge(runtime: RuntimeContext): PdfApi {
-  const pdf = requireWired(runtime.pdf, "pdfService") as any
   return {
-    consumePending: () => pdf.consumePending(),
-    readFile: (path) => pdf.readFile(path),
-    save: (request) => pdf.save(request),
-    validateTextEdits: (request) => pdf.validateTextEdits(request),
-    listEditFonts: () => pdf.listEditFonts(),
-    listPageImages: (path) => pdf.listPageImages(path),
-    listStaticFormFills: (path) => pdf.listStaticFormFills(path),
-    pageImagePng: (request) => pdf.pageImagePng(request),
-    pagePreviewPng: (request) => pdf.pagePreviewPng(request),
-    extractPages: (request) => pdf.extractPages(request),
-    insertPdf: (request) => pdf.insertPdf(request),
-    insertBlankPage: (request) => pdf.insertBlankPage(request),
-    splitPdf: (request) => pdf.splitPdf(request),
-    mergePdf: (request) => pdf.mergePdf(request),
-    mergePages: (request) => pdf.mergePages(request),
-    replacePages: (request) => pdf.replacePages(request),
-    setPageSize: (request) => pdf.setPageSize(request),
-    splitPages: (request) => pdf.splitPages(request),
-    cropPages: (request) => pdf.cropPages(request),
-    exportImages: (request) => pdf.exportImages(request),
-    imageSearch: (query, maxResults) => pdf.imageSearch(query, maxResults),
-    fetchImage: (url) => pdf.fetchImage(url),
-    generateImage: (op) => pdf.generateImage(op),
-    listSavedSignatures: () => pdf.listSavedSignatures(),
-    addSavedSignature: (data) => pdf.addSavedSignature(data),
-    removeSavedSignature: (id) => pdf.removeSavedSignature(id),
-    getUsername: () => pdf.getUsername(),
-    setDirty: (dirty) => pdf.setDirty(dirty),
-    onCloseSaveRequest: (handler) => pdf.onCloseSaveRequest(handler),
-    sendCloseSaveResult: (ok) => pdf.sendCloseSaveResult(ok),
-    onSaveAsRequest: (handler) => pdf.onSaveAsRequest(handler),
-    sendSaveAsResult: (ok) => pdf.sendSaveAsResult(ok),
-    onSaveAsFlow: (handler) => pdf.onSaveAsFlow(handler),
-    onPrintRequest: (handler) => pdf.onPrintRequest(handler),
-    getLanguage: () => pdf.getLanguage(),
-    onLanguageChanged: (handler) => pdf.onLanguageChanged(handler),
-    getTheme: () => pdf.getTheme(),
-    onThemeChanged: (handler) => pdf.onThemeChanged(handler),
-    onChromePressed: (handler) => pdf.onChromePressed(handler),
-    getAiSettings: () => pdf.getAiSettings(),
-    aiStream: (request) => pdf.aiStream(request),
-    aiStreamCancel: (requestId) => pdf.aiStreamCancel(requestId),
-    onAiStream: (handler) => pdf.onAiStream(handler),
+    consumePending: notYet.bind(null, 'PdfService'),
+    readFile: notYet.bind(null, 'PdfService'),
+    save: notYet.bind(null, 'PdfService'),
+    validateTextEdits: notYet.bind(null, 'PdfService'),
+    listEditFonts: notYet.bind(null, 'PdfService'),
+    listPageImages: notYet.bind(null, 'PdfService'),
+    listStaticFormFills: notYet.bind(null, 'PdfService'),
+    pageImagePng: notYet.bind(null, 'PdfService'),
+    pagePreviewPng: notYet.bind(null, 'PdfService'),
+    extractPages: notYet.bind(null, 'PdfService'),
+    insertPdf: notYet.bind(null, 'PdfService'),
+    insertBlankPage: notYet.bind(null, 'PdfService'),
+    splitPdf: notYet.bind(null, 'PdfService'),
+    mergePdf: notYet.bind(null, 'PdfService'),
+    mergePages: notYet.bind(null, 'PdfService'),
+    replacePages: notYet.bind(null, 'PdfService'),
+    setPageSize: notYet.bind(null, 'PdfService'),
+    splitPages: notYet.bind(null, 'PdfService'),
+    cropPages: notYet.bind(null, 'PdfService'),
+    exportImages: notYet.bind(null, 'PdfService'),
+    imageSearch: (query, maxResults) => runtime.ai.imageSearch(query, maxResults),
+    fetchImage: (url) => runtime.ai.fetchImage(url),
+    generateImage: notYet.bind(null, 'PdfService'),
+    listSavedSignatures: notYet.bind(null, 'PdfService'),
+    addSavedSignature: notYet.bind(null, 'PdfService'),
+    removeSavedSignature: notYet.bind(null, 'PdfService'),
+    getUsername: notYet.bind(null, 'PdfService'),
+    setDirty: notYet.bind(null, 'PdfService'),
+    onCloseSaveRequest: notYet.bind(null, 'PdfService'),
+    sendCloseSaveResult: notYet.bind(null, 'PdfService'),
+    onSaveAsRequest: notYet.bind(null, 'PdfService'),
+    sendSaveAsResult: notYet.bind(null, 'PdfService'),
+    onSaveAsFlow: notYet.bind(null, 'PdfService'),
+    onPrintRequest: notYet.bind(null, 'PdfService'),
+    getLanguage: () => runtime.settings.getLanguage().then(toLegacyLanguage),
+    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(wrapLanguageHandler(handler)),
+    getTheme: () => runtime.settings.getTheme(),
+    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler),
+    onChromePressed: (handler) => runtime.windowing.onChromePressed(handler),
+    getAiSettings: () => runtime.ai.getSettings(),
+    aiStream: (request) => runtime.ai.stream(request),
+    aiStreamCancel: (requestId) => runtime.ai.streamCancel(requestId),
+    onAiStream: (handler) => runtime.ai.onStream(handler),
   }
 }

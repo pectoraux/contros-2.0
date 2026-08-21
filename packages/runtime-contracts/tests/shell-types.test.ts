@@ -1,14 +1,17 @@
 /**
- * Architecture-boundary test for @genoffice/renderer-bridge.
+ * Architecture test: runtime-contracts must NOT contain shell/UI types.
  *
- * BOUNDARY CORRECTION (2026-08-21, final):
- *   - ZERO `as never` casts (replaced with explicit conversion functions)
- *   - ZERO `as any` casts (replaced with `notYet()` throw stubs)
- *   - ZERO `as unknown as` double-casts (replaced with `notYet()`)
+ * Verifies that runtime-contracts has ZERO references to:
+ *   - DocsShellCoordinator (shell coordinator)
+ *   - DocumentTabInfo (tab/window management)
+ *   - DocumentMenuCommand (native menu routing)
+ *   - openNewTab / listDocsTabs / focusDocsTab (tab operations)
+ *   - pending-open state / new-blank state
+ *   - native menu routing
  *
- * The bridge uses explicit conversion functions (toLegacyLanguage,
- * wrapLanguageHandler, fromStorage, fromStorageOrNull) and the `notYet()`
- * helper for unwired services.
+ * Per Principal Architect directive (2026-08-21):
+ *   "Runtime-independent types may describe product/domain concepts.
+ *    They must not describe Electron/browser application-shell behavior."
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -49,27 +52,33 @@ function scanForTokens(rootDir: string, forbidden: string[]): Array<{ file: stri
   return hits
 }
 
-describe('@genoffice/renderer-bridge architecture boundary', () => {
-  test('ZERO "as never" casts in source code (excluding comments)', () => {
-    const hits = scanForTokens(SRC, [' as never'])
+describe('runtime-contracts must not contain shell/UI types', () => {
+  test('ZERO references to DocsShellCoordinator', () => {
+    const hits = scanForTokens(SRC, ['DocsShellCoordinator'])
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
 
-  test('ZERO "as any" casts in source code (excluding comments)', () => {
-    const hits = scanForTokens(SRC, [' as any'])
+  test('ZERO references to DocumentTabInfo', () => {
+    const hits = scanForTokens(SRC, ['DocumentTabInfo'])
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
 
-  test('ZERO "as unknown as" double-casts in source code (excluding comments)', () => {
-    const hits = scanForTokens(SRC, ['as unknown as'])
+  test('ZERO references to DocumentMenuCommand', () => {
+    const hits = scanForTokens(SRC, ['DocumentMenuCommand'])
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
 
-  test('ZERO Proxy usage', () => {
-    const hits = scanForTokens(SRC, ['new Proxy('])
+  test('ZERO references to tab/window operations (openNewTab, listDocsTabs, focusDocsTab)', () => {
+    const hits = scanForTokens(SRC, ['openNewTab', 'listDocsTabs', 'focusDocsTab'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to shell menu routing (onMenuCommand, reportViewMenuState)', () => {
+    const hits = scanForTokens(SRC, ['onMenuCommand', 'reportViewMenuState'])
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })

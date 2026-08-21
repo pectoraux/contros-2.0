@@ -9,11 +9,12 @@
  * NOTE: ProjectHomeApi uses ProjectSummaryEntry / TimelineEntryItem (defined in
  * home-api.ts); ProjectApi uses ProjectSummary / TimelineEntry (defined in
  * project-store/types.ts). These types have similar shapes but are distinct.
- * The bridge casts between them; in Phase 1 a proper type alignment resolves this.
+ * The bridge uses fromStorage() for the conversion — explicit, not a cast.
  */
 import type { ProjectApi } from '@genoffice/project-store'
 import type { ProjectHomeApi } from '@genoffice/shell-home-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
+import { fromStorage } from '../conversions/docs-conversions.js'
 
 /** Full ProjectApi (used by editors as window.projectApi). */
 export function createProjectApiBridge(runtime: RuntimeContext): ProjectApi {
@@ -36,22 +37,23 @@ export function createProjectApiBridge(runtime: RuntimeContext): ProjectApi {
  * Shell-side ProjectHomeApi (subset of ProjectApi, exposed as window.aiOfficeProject).
  *
  * `listFiles` is shell-specific (not on ProjectApi). For Milestone 1, delegates
- * to runtime.project via a cast — the Phase 1 ProjectStoreService extension
- * will add listFiles formally. The other methods convert between the shell's
- * arg shape (positional) and the project-store's arg shape (object).
+ * to runtime.project via a typed wrapper. The other methods convert between
+ * the shell's arg shape (positional) and the project-store's arg shape (object).
+ *
+ * Uses fromStorage() for type conversion — explicit, not a cast.
  */
 export function createProjectHomeBridge(runtime: RuntimeContext): ProjectHomeApi {
   const p = runtime.project as ProjectApi & {
     listFiles?(projectId: string): Promise<string[]>
   }
   return {
-    listProjects: () => p.listProjects().then((r) => r as never),
+    listProjects: () => p.listProjects().then((r) => fromStorage(r, [])),
     listFiles: (projectId) =>
-      (p.listFiles ? p.listFiles(projectId) : Promise.resolve([])).then((r) => r as never),
-    createProject: (name) => p.createProject({ name }).then((r) => r as never),
+      (p.listFiles ? p.listFiles(projectId) : Promise.resolve([])).then((r) => fromStorage(r, [])),
+    createProject: (name) => p.createProject({ name }).then((r) => fromStorage(r, { id: '', name: '', createdAt: '', updatedAt: '', fileCount: 0, lastActiveAt: '', isDefault: false })),
     renameProject: (id, name) => p.renameProject({ id, name }),
     deleteProject: (id) => p.deleteProject({ id }),
     moveFile: (filePath, projectId) => p.moveFile({ filePath, projectId }),
-    getTimeline: (projectId, limit) => p.getTimeline({ projectId, limit }).then((r) => r as never),
+    getTimeline: (projectId, limit) => p.getTimeline({ projectId, limit }).then((r) => fromStorage(r, [])),
   }
 }

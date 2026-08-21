@@ -16,7 +16,6 @@
  */
 export * from './runtime.js'
 export * from './services/docs.js'
-export * from './services/docs-coordinator.js'
 export * from './services/sheets.js'
 export * from './services/slides.js'
 export * from './services/pdf.js'

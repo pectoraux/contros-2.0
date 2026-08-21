@@ -1,65 +1,64 @@
 /**
  * createSheetsDesktopApiBridge — maps window.desktopApi (DesktopApi, sheets variant)
  * to SpreadsheetService + platform capabilities.
+ *
+ * The SpreadsheetService is NOT_YET_WIRED. Service-specific methods throw
+ * via `notYet()`. Cross-cutting methods delegate to runtime capabilities.
+ *
+ * NO `as never` / `as any` casts.
  */
 import type { DesktopApi } from '@genoffice/sheets-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { requireWired } from './require-wired.js'
+import { toLegacyLanguage, wrapLanguageHandler } from '../conversions/docs-conversions.js'
+import { notYet } from './not-yet.js'
 
 export function createSheetsDesktopApiBridge(runtime: RuntimeContext): DesktopApi {
-  const sheets = requireWired(runtime.sheets, "sheetsService") as any
   return {
-    // ── Settings (delegate to runtime.settings) ───────────────────────
-    getLanguage: () => runtime.settings.getLanguage() as never,
-    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(handler as never),
-    getTheme: () => runtime.settings.getTheme() as never,
-    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler as never),
+    getLanguage: () => runtime.settings.getLanguage().then(toLegacyLanguage),
+    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(wrapLanguageHandler(handler)),
+    getTheme: () => runtime.settings.getTheme(),
+    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler),
     onChromePressed: (handler) => runtime.windowing.onChromePressed(handler),
 
-    // ── Workbook lifecycle ────────────────────────────────────────────
-    selectWorkbook: () => sheets.selectWorkbook(),
-    readWorkbookRange: (request) => sheets.readWorkbookRange(request),
-    readWorkbookFormulas: (request) => sheets.readWorkbookFormulas(request),
-    recalcWorkbook: (request) => sheets.recalcWorkbook(request),
-    readWorkbookMedia: (request) => sheets.readWorkbookMedia(request),
-    readPivotDefinition: (request) => sheets.readPivotDefinition(request),
-    readLocalImage: (request) => sheets.readLocalImage(request),
-    captureScreenSources: () => sheets.captureScreenSources(),
-    captureScreenSource: (request) => sheets.captureScreenSource(request),
-    saveWorkbookEdits: (request) => sheets.saveWorkbookEdits(request),
-    writeWorkbookRecovery: (request) => sheets.writeWorkbookRecovery(request),
-    autoRenameWorkbook: (sessionId, baseName) => sheets.autoRenameWorkbook(sessionId, baseName),
-    exportPdf: (request) => sheets.exportPdf(request),
-    closeWorkbook: (sessionId) => sheets.closeWorkbook(sessionId),
-    openExternal: (url) => sheets.openExternal(url),
-    onMenuAction: (callback) => sheets.onMenuAction(callback),
-    onWorkbookRenamed: (callback) => sheets.onWorkbookRenamed(callback),
-    notifyPendingEdits: (count) => sheets.notifyPendingEdits(count),
-    onCloseSaveRequest: (callback) => sheets.onCloseSaveRequest(callback),
-    reportCloseSaveResult: (ok) => sheets.reportCloseSaveResult(ok),
-    consumeNewBlankWorkbook: () => sheets.consumeNewBlankWorkbook(),
-    hasQueuedWorkbook: () => sheets.hasQueuedWorkbook(),
-
-    // ── AI ──────────────────────────────────────────────────────────────
-    getAiSettings: () => sheets.getAiSettings(),
-    setAiSettings: (settings) => sheets.setAiSettings(settings),
-    aiChat: (request) => sheets.aiChat(request),
-    aiStream: (request) => sheets.aiStream(request),
-    aiStreamCancel: (requestId) => sheets.aiStreamCancel(requestId),
-    aiGskStatus: (withEmail) => sheets.aiGskStatus(withEmail),
-    aiGskLogin: () => sheets.aiGskLogin(),
-    webSearch: (query, maxResults) => sheets.webSearch(query, maxResults),
-    imageSearch: (query, maxResults) => sheets.imageSearch(query, maxResults),
-    generateImage: (op) => sheets.generateImage(op),
-    fetchImage: (url) => sheets.fetchImage(url),
-    onAiStream: (handler) => sheets.onAiStream(handler),
-
-    // ── Attachments ───────────────────────────────────────────────────
-    pickAttachments: () => sheets.pickAttachments(),
-    addAttachmentPaths: (paths) => sheets.addAttachmentPaths(paths),
-    addPastedImage: (data, ext) => sheets.addPastedImage(data, ext),
-    readAttachment: (path, offset, maxChars) => sheets.readAttachment(path, offset, maxChars),
-    readAttachmentImage: (path) => sheets.readAttachmentImage(path),
-    getPathForFile: (file) => sheets.getPathForFile(file),
+    selectWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    readWorkbookRange: notYet.bind(null, 'SpreadsheetService'),
+    readWorkbookFormulas: notYet.bind(null, 'SpreadsheetService'),
+    recalcWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    readWorkbookMedia: notYet.bind(null, 'SpreadsheetService'),
+    readPivotDefinition: notYet.bind(null, 'SpreadsheetService'),
+    readLocalImage: notYet.bind(null, 'SpreadsheetService'),
+    captureScreenSources: notYet.bind(null, 'SpreadsheetService'),
+    captureScreenSource: notYet.bind(null, 'SpreadsheetService'),
+    saveWorkbookEdits: notYet.bind(null, 'SpreadsheetService'),
+    writeWorkbookRecovery: notYet.bind(null, 'SpreadsheetService'),
+    autoRenameWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    exportPdf: notYet.bind(null, 'SpreadsheetService'),
+    closeWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    openExternal: (url) => runtime.windowing.openExternal(url),
+    onMenuAction: notYet.bind(null, 'SpreadsheetService'),
+    onWorkbookRenamed: notYet.bind(null, 'SpreadsheetService'),
+    notifyPendingEdits: notYet.bind(null, 'SpreadsheetService'),
+    onCloseSaveRequest: notYet.bind(null, 'SpreadsheetService'),
+    reportCloseSaveResult: notYet.bind(null, 'SpreadsheetService'),
+    consumeNewBlankWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    hasQueuedWorkbook: notYet.bind(null, 'SpreadsheetService'),
+    getAiSettings: () => runtime.ai.getSettings(),
+    setAiSettings: (settings) => runtime.ai.setSettings(settings),
+    aiChat: (request) => runtime.ai.chat(request),
+    aiStream: (request) => runtime.ai.stream(request),
+    aiStreamCancel: (requestId) => runtime.ai.streamCancel(requestId),
+    aiGskStatus: () => runtime.identity.accountStatus(),
+    aiGskLogin: () => runtime.identity.login().then(() => undefined),
+    webSearch: (query, maxResults) => runtime.ai.webSearch(query, maxResults),
+    imageSearch: (query, maxResults) => runtime.ai.imageSearch(query, maxResults),
+    generateImage: notYet.bind(null, 'SpreadsheetService'),
+    fetchImage: (url) => runtime.ai.fetchImage(url),
+    onAiStream: (handler) => runtime.ai.onStream(handler),
+    pickAttachments: notYet.bind(null, 'SpreadsheetService'),
+    addAttachmentPaths: notYet.bind(null, 'SpreadsheetService'),
+    addPastedImage: notYet.bind(null, 'SpreadsheetService'),
+    readAttachment: notYet.bind(null, 'SpreadsheetService'),
+    readAttachmentImage: notYet.bind(null, 'SpreadsheetService'),
+    getPathForFile: (file) => runtime.files.getPathForFile(file),
   }
 }

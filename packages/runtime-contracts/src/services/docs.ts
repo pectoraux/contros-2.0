@@ -32,7 +32,6 @@ import type {
   DocumentAttachmentAddResult,
   DocumentAttachmentReadResult,
   DocumentAttachmentImageResult,
-  DocumentMenuCommand,
 } from '../types/docs.js'
 
 /**
@@ -113,12 +112,10 @@ export interface DocumentService {
   onOpened(handler: (result: DocumentOpenResult) => void): () => void
   onRenamed(handler: (paths: { oldPath: string; newPath: string }) => void): () => void
   onTeardown(handler: () => void): () => void
-  onMenuCommand(handler: (command: DocumentMenuCommand, payload?: string) => void): () => void
 
   // ── Close guard (shell forwards; service just exposes the subscription surface) ──
   onCloseCheck(handler: () => void): () => void
   reportCloseCheck(state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void
   onCloseSaveRequest(handler: () => void): () => void
   reportCloseSaveResult(ok: boolean): void
-  reportViewMenuState(state: { aiSidebar: boolean; darkCanvas: boolean }): void
 }

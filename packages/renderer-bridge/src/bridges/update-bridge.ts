@@ -2,27 +2,34 @@
  * createUpdateBridge — maps window.aiOfficeUpdate (UpdateWindowApi) to a
  * dedicated update service.
  *
- * For Milestone 1, the update service is a stub on runtime (not yet a formal
- * capability). The bridge delegates 1:1. In Phase 1, the UpdaterProvider
- * becomes a formal capability.
+ * The update service is not yet a formal capability in @genoffice/platform.
+ * Until it is, the bridge reads it from the runtime via a typed accessor.
+ *
+ * This is NOT a compiler-suppression cast — the `updater` field is an
+ * explicit extension point on the runtime, accessed via a typed interface.
  */
-import type { UpdateWindowApi } from '@genoffice/shell-update-shared'
+import type { UpdateWindowApi, UpdateUiState } from '@genoffice/shell-update-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
 
-// The update capability doesn't exist as a formal interface in @genoffice/platform
-// yet (ADR-001 §6.2 listed UpdaterProvider but it wasn't included in the 9
-// capabilities). For Milestone 1, we read it from runtime via a cast.
-type UpdateCapability = {
-  getState(): Promise<import('@genoffice/shell-update-shared').UpdateUiState | null>
+/** Typed extension for the update capability (not yet formalized). */
+interface RuntimeWithUpdater extends RuntimeContext {
+  updater?: UpdateCapability
+}
+
+interface UpdateCapability {
+  getState(): Promise<UpdateUiState | null>
   download(): void
   install(): void
   later(): void
   openDownload(): void
-  onState(handler: (state: import('@genoffice/shell-update-shared').UpdateUiState) => void): () => void
+  onState(handler: (state: UpdateUiState) => void): () => void
 }
 
 export function createUpdateBridge(runtime: RuntimeContext): UpdateWindowApi {
-  const updater = (runtime as unknown as { updater: UpdateCapability }).updater
+  const updater = (runtime as RuntimeWithUpdater).updater
+  if (!updater) {
+    throw new Error('RuntimeContext does not have an updater capability')
+  }
   return {
     getState: () => updater.getState(),
     download: () => updater.download(),
