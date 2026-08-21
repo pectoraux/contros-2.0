@@ -1,7 +1,7 @@
 /** Shape test for createDocsDesktopBridge. */
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
-import { mockRuntime } from '../helpers/mocks.js'
+import type { IpcTransport } from '../../src/ipc-transport.js'
 
 // Canonical DesktopApi method names from apps/docs/src/shared/ipc.ts:140-279.
 const EXPECTED_DOCS_DESKTOP_API_METHODS = [
@@ -56,16 +56,30 @@ const EXPECTED_DOCS_DESKTOP_API_METHODS = [
   'reportViewMenuState',
 ] as const
 
+function mockTransport(): IpcTransport {
+  return {
+    invoke: vi.fn().mockResolvedValue(null),
+    send: vi.fn(),
+    on: vi.fn().mockReturnValue(() => {}),
+  }
+}
+
 describe('createDocsDesktopBridge shape', () => {
   test('implements every DesktopApi method', () => {
-    const bridge = createDocsDesktopBridge(mockRuntime())
+    const bridge = createDocsDesktopBridge({
+      transport: mockTransport(),
+      getPathForFile: () => '/mock/path',
+    })
     const bridgeMethods = Object.keys(bridge).sort()
     const expected = [...EXPECTED_DOCS_DESKTOP_API_METHODS].sort()
     expect(bridgeMethods).toEqual(expected)
   })
 
   test('no extra methods beyond DesktopApi', () => {
-    const bridge = createDocsDesktopBridge(mockRuntime())
+    const bridge = createDocsDesktopBridge({
+      transport: mockTransport(),
+      getPathForFile: () => '/mock/path',
+    })
     const expected = new Set(EXPECTED_DOCS_DESKTOP_API_METHODS)
     for (const key of Object.keys(bridge)) {
       expect(expected.has(key as never)).toBe(true)

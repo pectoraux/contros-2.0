@@ -6,6 +6,7 @@
  * NO Proxy (ADR-002 §2.2 — explicit typed method mappings only).
  * ZERO type assertions (`as never`, `as any`, `as T`, `as LegacyType`)
  * — all conversions use runtime-validated type guards.
+ * ZERO Electron imports — the bridge is runtime-independent (Increment 2H).
  *
  * Inventory: 11 bridge factories covering 10 distinct window.* global names.
  */
@@ -24,14 +25,11 @@ export { createSlidesDesktopBridge } from './bridges/slides-desktop-bridge.js'
 export { createPdfApiBridge } from './bridges/pdf-bridge.js'
 export { createMarkdownApiBridge } from './bridges/markdown-bridge.js'
 
+// IPC transport (runtime-independent — no Electron)
+export type { IpcTransport } from './ipc-transport.js'
+
 // Shell types (application-boundary, NOT runtime-contracts)
-export type { DocsShellCoordinator, ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'
-export {
-  createDocsShellCoordinatorAdapter,
-  type CallerContext,
-  type CallerContextResolver,
-  type PerRendererDocsCoordinator,
-} from './shell/docs-coordinator-adapter.js'
+export type { ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'
 
 // Conversion functions (runtime-validated, tested explicitly)
 export {

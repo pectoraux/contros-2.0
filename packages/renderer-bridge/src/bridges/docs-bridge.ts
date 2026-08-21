@@ -1,127 +1,177 @@
 /**
  * createDocsDesktopBridge — maps window.desktop (DesktopApi, docs variant)
- * to the DocsShellCoordinator + DocumentService + platform capabilities.
+ * to IPC calls via an injected IpcTransport.
  *
- * Uses explicit conversion functions (toLegacyLanguage, wrapLanguageHandler)
- * instead of `as never` / `as any` casts.
+ * PRELOAD ARCHITECTURE (Increment 2H):
+ *   The bridge is a PRELOAD-SIDE adapter. It does NOT call the runtime or
+ *   the coordinator directly. It maps each DesktopApi method to the
+ *   corresponding IPC channel, using the authoritative channel names and
+ *   payload shapes from apps/docs/src/preload/index.ts (the frozen preload).
  *
- * The bridge is a GENUINELY THIN adapter:
- *   - Convert legacy types → runtime types (explicit functions)
- *   - Delegate to coordinator / service / capabilities
- *   - Convert runtime types → legacy types (explicit functions)
+ *     window.desktop.openDocx()
+ *         ↓
+ *     bridge.openDocx()
+ *         ↓
+ *     transport.invoke('docs:open')
+ *         ↓
+ *     [Electron: ipcRenderer.invoke('docs:open')]
+ *         ↓
+ *     ipcMain.handle('docs:open', (event) => ...)
+ *         ↓
+ *     DocsShellCoordinatorImpl(event.sender.id, callerWindow, ...)
  *
- * Where types are structurally identical (e.g. UiTheme, OpenFileResult),
- * TypeScript's structural typing allows direct assignment without a cast.
+ *   The bridge has NO caller identity. The caller is derived at the IPC
+ *   handler boundary from IpcMainInvokeEvent.sender — NOT in the bridge,
+ *   NOT from global state, NOT from focused-window inference.
+ *
+ *   Push events follow the same IPC path:
+ *
+ *     Docs main → wc.send('docs:opened', payload)
+ *         ↓
+ *     [Electron: ipcRenderer.on('docs:opened', ...)]
+ *         ↓
+ *     transport.on('docs:opened', listener)
+ *         ↓
+ *     bridge.onOpenDocx(handler)
+ *         ↓
+ *     window.desktop.onOpenDocx(handler)
+ *
+ * ZERO Electron imports. The IpcTransport is injected by the preload
+ * (backed by ipcRenderer) or by a future web runtime (backed by
+ * postMessage/fetch).
+ *
+ * The IPC channel names and payload shapes are sourced from the frozen
+ * preload (apps/docs/src/preload/index.ts). The bridge does NOT invent
+ * a second runtime-specific RPC API.
  */
 import type { DesktopApi } from '@genoffice/docs-shared'
-import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import type { DocsShellCoordinator } from '../shell/docs-coordinator.js'
-import { requireWired } from './require-wired.js'
-import { toLegacyLanguage, wrapLanguageHandler } from '../conversions/docs-conversions.js'
+import type { IpcTransport } from '../ipc-transport.js'
 
 export interface DocsBridgeDeps {
-  runtime: RuntimeContext
-  coordinator: DocsShellCoordinator
+  /** The IPC transport (injected by the preload — backed by ipcRenderer). */
+  transport: IpcTransport
+  /**
+   * getPathForFile is a preload-only utility (Electron webUtils.getPathForFile).
+   * File objects can't cross IPC, so this must be provided by the preload
+   * directly. In a future web runtime, this would be a no-op or placeholder
+   * (browsers don't expose absolute file paths).
+   */
+  getPathForFile: (file: File) => string
 }
 
+/**
+ * Create the DesktopApi bridge backed by IPC.
+ *
+ * Each method maps to the exact IPC channel name from the frozen preload
+ * (apps/docs/src/preload/index.ts). The bridge is a genuinely thin adapter:
+ * it translates DesktopApi method calls into IPC invocations, and IPC push
+ * events into DesktopApi event handlers.
+ */
 export function createDocsDesktopBridge(deps: DocsBridgeDeps): DesktopApi {
-  const { runtime, coordinator } = deps
+  const { transport, getPathForFile } = deps
 
   return {
-    // ── Settings ──────────────────────────────────────────────────────
-    // UiTheme is structurally identical — no conversion needed.
-    getLanguage: () => runtime.settings.getLanguage().then(toLegacyLanguage),
-    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(wrapLanguageHandler(handler)),
-    getTheme: () => runtime.settings.getTheme(),
-    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler),
-    onChromePressed: (handler) => runtime.windowing.onChromePressed(handler),
+    // ── Settings (app:* channels) ────────────────────────────────────
+    getLanguage: () => transport.invoke('app:get-language'),
+    onLanguageChanged: (handler) =>
+      transport.on('app:language-changed', (lang) => handler(lang as never)),
+    getTheme: () => transport.invoke('app:get-theme'),
+    onThemeChanged: (handler) =>
+      transport.on('app:theme-changed', (theme) => handler(theme as never)),
+    onChromePressed: (handler) => transport.on('app:chrome-pressed', () => handler()),
 
-    // ── File lifecycle (delegate to coordinator) ─────────────────────
-    openDocx: async () => {
-      const r = await coordinator.openDocx()
-      return r?.result ?? null
-    },
-    openDocxPath: async (path: string) => {
-      const r = await coordinator.openDocxPath(path)
-      return r?.result ?? null
-    },
-    consumePendingOpenDocx: async () => {
-      const r = await coordinator.consumePendingOpen()
-      return r?.result ?? null
-    },
-    consumeNewBlankDoc: () => coordinator.consumeNewBlank(),
-    onOpenDocx: (handler) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      return docs.onOpened(handler)
-    },
-    onRenamedDocx: (handler) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      return docs.onRenamed(handler)
-    },
-    onTeardown: (handler) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      return docs.onTeardown(handler)
-    },
+    // ── File lifecycle (docs:* channels) ──────────────────────────────
+    openDocx: () => transport.invoke('docs:open'),
+    openDocxPath: (path) => transport.invoke('docs:open-path', path),
+    consumePendingOpenDocx: () => transport.invoke('docs:consume-pending-open'),
+    consumeNewBlankDoc: () => transport.invoke('docs:consume-new-blank'),
 
-    // ── Save (ArrayBuffer → Uint8Array conversion; coordinator handles the rest) ──
+    // ── Push events (docs:opened / docs:renamed / docs:teardown) ─────
+    // The main process sends these to the specific wcId via wc.send().
+    // The bridge wraps the IPC listener — the renderer handler receives
+    // only the payload (not the IpcRendererEvent).
+    onOpenDocx: (handler) =>
+      transport.on('docs:opened', (result) => handler(result as never)),
+    onRenamedDocx: (handler) =>
+      transport.on('docs:renamed', (paths) => handler(paths as never)),
+    onTeardown: (handler) => transport.on('docs:teardown', () => handler()),
+
+    // ── Save (docs:* channels) ───────────────────────────────────────
     saveDocx: (path, data, auto) =>
-      coordinator.saveDocx(path, new Uint8Array(data), auto),
+      transport.invoke('docs:save', path, data, auto === true),
     writeRecoveryCopy: (path, data) =>
-      coordinator.writeRecovery(path, new Uint8Array(data)),
+      transport.invoke('docs:write-recovery', path, data),
     saveDocxAs: (defaultName, data) =>
-      coordinator.saveDocxAs(defaultName, new Uint8Array(data)),
+      transport.invoke('docs:save-as', defaultName, data),
     saveDocxNew: (defaultName, data) =>
-      coordinator.saveDocxNew(defaultName, new Uint8Array(data)),
+      transport.invoke('docs:save-new', defaultName, data),
 
-    // ── Domain operations ──────────────────────────────────────────────
-    // Increment 2F: pickImage/pickAttachments route through the coordinator
-    // (which owns the caller-specific file-picker dialog) instead of calling
-    // the service directly. The service's readImage/collectAttachments take
-    // already-resolved paths — the bridge can't call them directly because
-    // it has no caller window context. The coordinator does.
-    getRecentFiles: () => requireWired(runtime.docs, 'DocumentService').recentFiles(),
-    pickImage: () => coordinator.pickImage(),
-    pickAttachments: () => coordinator.pickAttachments(),
-    fontMetrics: (family) => requireWired(runtime.docs, 'DocumentService').fontMetrics(family),
-    addAttachmentPaths: (paths) => requireWired(runtime.docs, 'DocumentService').addAttachmentPaths(paths),
-    addPastedImage: (data, ext) => requireWired(runtime.docs, 'DocumentService').addPastedImage(data, ext),
+    // ── Domain operations (docs:* and files:* channels) ───────────────
+    getRecentFiles: () => transport.invoke('docs:recent'),
+    pickImage: () => transport.invoke('docs:pick-image'),
+    fontMetrics: (family) => transport.invoke('docs:font-metrics', family),
+    pickAttachments: () => transport.invoke('files:pick'),
+    addAttachmentPaths: (paths) => transport.invoke('files:add', paths),
+    addPastedImage: (data, ext) =>
+      transport.invoke('files:add-pasted-image', data, ext),
     readAttachment: (path, offset, maxChars) =>
-      requireWired(runtime.docs, 'DocumentService').readAttachment(path, offset, maxChars),
-    readAttachmentImage: (path) =>
-      requireWired(runtime.docs, 'DocumentService').readAttachmentImage(path),
-    getPathForFile: (file) => runtime.files.getPathForFile(file),
+      transport.invoke('files:read', path, offset, maxChars),
+    readAttachmentImage: (path) => transport.invoke('files:read-image', path),
+    // getPathForFile is a preload-only utility (webUtils) — File objects
+    // can't cross IPC. The preload provides this function directly.
+    getPathForFile,
 
-    // ── Tab management (delegate to coordinator) ─────────────────────
-    openNewTab: (openPath) => coordinator.openNewTab(openPath),
-    listDocsTabs: () => coordinator.listDocsTabs(),
-    focusDocsTab: (id) => coordinator.focusDocsTab(id),
-
-    // ── AI (delegate to runtime.ai + runtime.identity) ───────────────
-    getAiSettings: () => runtime.ai.getSettings(),
-    setAiSettings: (settings) => runtime.ai.setSettings(settings),
-    print: () => runtime.printing.print(),
+    // ── Print & export (docs:* channels) ──────────────────────────────
+    print: () => transport.invoke('docs:print'),
     exportPdf: (defaultName, w, h, outPath) =>
-      runtime.printing.exportPdf({ defaultName, pageWidthTwips: w, pageHeightTwips: h, outPath }),
+      transport.invoke('docs:export-pdf', defaultName, w, h, outPath),
     printPdfBuffer: (w, h) =>
-      runtime.printing.printToBytes({ pageWidthTwips: w, pageHeightTwips: h }),
+      transport.invoke('docs:print-pdf-buffer', w, h),
     saveMergedPdf: (defaultName, parts, outPath) =>
-      runtime.printing.saveMergedPdf(defaultName, parts, outPath),
-    aiChat: (request) => runtime.ai.chat(request),
-    aiStream: (request) => runtime.ai.stream(request),
-    aiStreamCancel: (requestId) => runtime.ai.streamCancel(requestId),
-    aiGskStatus: () => runtime.identity.accountStatus(),
-    aiGskLogin: () => runtime.identity.login().then(() => undefined),
-    webSearch: (query, maxResults) => runtime.ai.webSearch(query, maxResults),
-    imageSearch: (query, maxResults) => runtime.ai.imageSearch(query, maxResults),
-    fetchImage: (url) => runtime.ai.fetchImage(url),
-    onAiStream: (handler) => runtime.ai.onStream(handler),
+      transport.invoke('docs:save-merged-pdf', defaultName, parts, outPath),
 
-    // ── Menu / close guard (delegate to coordinator — shell owns these) ──
-    onMenuCommand: (handler) => coordinator.onMenuCommand(handler),
-    onCloseCheck: (handler) => coordinator.onCloseCheck(handler),
-    reportCloseCheck: (state) => coordinator.reportCloseCheck(state),
-    onCloseSaveRequest: (handler) => coordinator.onCloseSaveRequest(handler),
-    reportCloseSaveResult: (ok) => coordinator.reportCloseSaveResult(ok),
-    reportViewMenuState: (state) => coordinator.reportViewMenuState(state),
+    // ── AI (ai:* channels) ───────────────────────────────────────────
+    getAiSettings: () => transport.invoke('ai:get-settings'),
+    setAiSettings: (settings) => transport.invoke('ai:set-settings', settings),
+    aiChat: (request) => transport.invoke('ai:chat', request),
+    aiStream: (request) => transport.invoke('ai:stream', request),
+    aiStreamCancel: (requestId) => transport.invoke('ai:stream-cancel', requestId),
+    aiGskStatus: (withEmail) => transport.invoke('ai:gsk-status', withEmail),
+    aiGskLogin: () => transport.invoke('ai:gsk-login'),
+    webSearch: (query, maxResults) =>
+      transport.invoke('ai:web-search', query, maxResults),
+    imageSearch: (query, maxResults) =>
+      transport.invoke('ai:image-search', query, maxResults),
+    fetchImage: (url) => transport.invoke('ai:fetch-image', url),
+    onAiStream: (handler) =>
+      transport.on('ai:stream-chunk', (chunk) => handler(chunk as never)),
+
+    // ── Tab management (win:* channels) ──────────────────────────────
+    openNewTab: (openPath) => transport.invoke('win:new', openPath ?? null),
+    listDocsTabs: () => transport.invoke('win:list'),
+    focusDocsTab: (id) => transport.invoke('win:focus', id),
+
+    // ── Menu / close guard (menu:*, docs:* channels) ─────────────────
+    onMenuCommand: (handler) =>
+      transport.on('menu:command', (command, payload) =>
+        handler(command as never, payload as string | undefined),
+      ),
+    onCloseCheck: (handler) =>
+      transport.on('docs:close-check', () => handler()),
+    reportViewMenuState: (state) =>
+      transport.send('docs:view-menu-state', {
+        aiSidebar: state?.aiSidebar === true,
+        darkCanvas: state?.darkCanvas === true,
+      }),
+    reportCloseCheck: (state) =>
+      transport.send('docs:close-check-result', {
+        dirty: state?.dirty === true,
+        autoSave: state?.autoSave === true,
+        filePath: typeof state?.filePath === 'string' ? state.filePath : null,
+      }),
+    onCloseSaveRequest: (handler) =>
+      transport.on('docs:close-save-request', () => handler()),
+    reportCloseSaveResult: (ok) =>
+      transport.send('docs:close-save-result', ok === true),
   }
 }
