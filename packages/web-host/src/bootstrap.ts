@@ -78,6 +78,11 @@ async function main() {
       id: entityId(ID_PREFIX.authBinding), userId: adminUserId, provider: 'email', subject: adminEmail.toLowerCase(),
       createdAt: new Date().toISOString(), lastUsedAt: null,
     })
+    // Also create a 'web' provider binding for the session resolver
+    await users.createBinding({
+      id: entityId(ID_PREFIX.authBinding), userId: adminUserId, provider: 'web', subject: adminUserId,
+      createdAt: new Date().toISOString(), lastUsedAt: null,
+    })
     console.log('  ✓ admin user created')
   }
 
@@ -113,6 +118,14 @@ async function main() {
     if (existing) {
       // Ensure demo flag via repository method (no raw SQL in bootstrap — H5)
       await users.setDemoFlag(existing.id, true)
+      // Ensure web auth binding exists (for session resolver)
+      const webBinding = await users.getBindingBySubject('web', existing.id)
+      if (!webBinding) {
+        await users.createBinding({
+          id: entityId(ID_PREFIX.authBinding), userId: existing.id, provider: 'web', subject: existing.id,
+          createdAt: new Date().toISOString(), lastUsedAt: null,
+        })
+      }
       const demoMems = await memberships.listTenantsForUser(existing.id)
       if (demoMems.length === 0) {
         const m: Membership = {
@@ -129,6 +142,14 @@ async function main() {
       )
       await users.createBinding({
         id: entityId(ID_PREFIX.authBinding), userId: demoUserId, provider: 'email', subject: email,
+        createdAt: new Date().toISOString(), lastUsedAt: null,
+      })
+      // Also create a 'web' provider binding so the session resolver can
+      // resolve the user via IdentityService.resolveTenantContext('web', userId, tenantId).
+      // The session cookie carries userId as the subject; the resolver passes
+      // provider='web' to IdentityService.
+      await users.createBinding({
+        id: entityId(ID_PREFIX.authBinding), userId: demoUserId, provider: 'web', subject: demoUserId,
         createdAt: new Date().toISOString(), lastUsedAt: null,
       })
       const m: Membership = {
