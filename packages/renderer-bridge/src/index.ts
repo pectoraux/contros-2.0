@@ -26,6 +26,12 @@ export { createMarkdownApiBridge } from './bridges/markdown-bridge.js'
 
 // Shell types (application-boundary, NOT runtime-contracts)
 export type { DocsShellCoordinator, ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'
+export {
+  createDocsShellCoordinatorAdapter,
+  type CallerContext,
+  type CallerContextResolver,
+  type PerRendererDocsCoordinator,
+} from './shell/docs-coordinator-adapter.js'
 
 // Conversion functions (runtime-validated, tested explicitly)
 export {

@@ -14,7 +14,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 
 const SRC = join(__dirname, '..', 'src')
 
@@ -89,5 +89,37 @@ describe('@genoffice/renderer-bridge architecture boundary', () => {
   test('ZERO Proxy usage', () => {
     const hits = scanForPattern(SRC, /new Proxy\(/)
     expect(hits).toEqual([])
+  })
+
+  // Increment 2G: the bridge MUST NOT reintroduce a global event bus or
+  // broadcast behavior. The onOpenDocx/onRenamedDocx/onTeardown handlers
+  // must route per-renderer (renderer A → event A only, renderer B → event B only).
+  // The adapter (DocsShellCoordinatorAdapter) resolves the caller per-call;
+  // there is no global "active renderer" or "focused window" state.
+  test('ZERO global event bus / broadcast patterns (Increment 2G: per-renderer event ownership)', () => {
+    // Forbidden patterns:
+    //   - getFocusedWindow (global focused-window fallback)
+    //   - activeRenderer / activeWcId (global active renderer state)
+    //   - broadcast (broadcast to all renderers)
+    const hits = scanForPattern(SRC, /getFocusedWindow|activeRenderer|activeWcId|\bbroadcast\b/)
+      // Allow these tokens in comments/JSDoc (already filtered by scanForPattern)
+      .filter((h) => !h.text.includes('NOT') && !h.text.includes('NEVER') && !h.text.includes('forbidden'))
+    expect(hits).toEqual([])
+  })
+
+  // Increment 2G: the adapter must be explicit (no "concrete impl has a
+  // different signature" comments that defer the contract to an
+  // undocumented wrapper). The DocsShellCoordinatorAdapter is the named,
+  // tested boundary.
+  test('DocsShellCoordinatorAdapter exists as the explicit bridge→impl boundary', () => {
+    // The adapter file must exist and be importable
+    const adapterPath = join(SRC, 'shell', 'docs-coordinator-adapter.ts')
+    expect(existsSync(adapterPath)).toBe(true)
+
+    // The adapter must be exported from the barrel
+    const indexText = readFileSync(join(SRC, 'index.ts'), 'utf8')
+    expect(indexText).toContain('createDocsShellCoordinatorAdapter')
+    expect(indexText).toContain('CallerContextResolver')
+    expect(indexText).toContain('PerRendererDocsCoordinator')
   })
 })
