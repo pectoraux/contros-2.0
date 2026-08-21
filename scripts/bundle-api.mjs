@@ -27,7 +27,10 @@ const OUT_FILE = path.join(OUT_DIR, 'serverless.mjs')
 // Workspace packages (@contractor/core, @contractor/web-host) MUST be inlined
 // because their package.json `exports` point to .ts source files, which Node
 // cannot load natively. esbuild follows the exports field and bundles the .ts.
-const EXTERNAL = ['pg', '@types/pg']
+// @electric-sql/pglite is kept external so its WASM binary is NOT inlined into
+// the bundle (esbuild cannot bundle WASM); it is resolved from node_modules at
+// runtime on Vercel, enabling the demo in-memory Postgres fallback.
+const EXTERNAL = ['pg', '@types/pg', '@electric-sql/pglite']
 
 async function main() {
   await mkdir(OUT_DIR, { recursive: true })

@@ -9,6 +9,7 @@
     "./domain": "./src/domain/index.ts",
     "./persistence": "./src/persistence/index.ts",
     "./persistence/postgres-client.js": "./src/persistence/postgres-client.ts",
+    "./persistence/pglite-client.js": "./src/persistence/pglite-client.ts",
     "./persistence/db-client.js": "./src/persistence/db-client.ts",
     "./persistence/migrations-loader.js": "./src/persistence/migrations-loader.ts",
     "./persistence/repositories/*.js": "./src/persistence/repositories/*.ts",

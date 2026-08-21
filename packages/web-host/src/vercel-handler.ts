@@ -30,8 +30,10 @@ import { Pool } from 'pg'
 // All repository imports are from their direct source files; only PostgresClient
 // (not PgLiteClient) is imported at runtime.
 import { PostgresClient } from '@contractor/core/persistence/postgres-client.js'
+import { PgLiteClient } from '@contractor/core/persistence/pglite-client.js'
 import { applyMigration } from '@contractor/core/persistence/db-client.js'
 import type { DbClient } from '@contractor/core/persistence/db-client.js'
+import type { Membership } from '@contractor/core/domain'
 import { FOUNDATION_MIGRATION_SQL, COMMERCIAL_MIGRATION_SQL, MAGIC_LINKS_MIGRATION_SQL, AUTH_MIGRATION_SQL } from '@contractor/core/persistence/migrations-loader.js'
 import { OrganizationRepository } from '@contractor/core/persistence/repositories/organization.repository.js'
 import { UserRepository } from '@contractor/core/persistence/repositories/user.repository.js'
@@ -97,6 +99,10 @@ async function getDeps(): Promise<CachedDeps> {
   const users = new UserRepository(db)
   const memberships = new MembershipRepository(db)
   const organizations = new OrganizationRepository(db)
+  // Seed deterministic demo data when running in ephemeral PGlite mode.
+  if (demoMode) {
+    await seedDemoData({ users, memberships, organizations })
+  }
   const workspaces = new WorkspaceRepository(db)
   const projects = new ProjectRepository(db)
   const audit = new AuditRepository(db)
@@ -145,9 +151,17 @@ async function getDeps(): Promise<CachedDeps> {
   return cachedDeps
 }
 
+// Demo mode flag: true when running on an ephemeral in-memory PGlite instance
+// (no DATABASE_URL configured). Demo users are seeded with deterministic IDs so
+// demo-login survives serverless instance recycles.
+let demoMode = false
+
 function createDb(): DbClient {
-  // Production: real PostgreSQL via DATABASE_URL
-  if (process.env.DATABASE_URL) {
+  // Production: real PostgreSQL via DATABASE_URL (persistent).
+  // Only honor a real postgres:// connection string; ignore non-postgres
+  // values (e.g. a stray SQLite file: URL) so the demo PGlite fallback still
+  // kicks in and the app stays runnable.
+  if (process.env.DATABASE_URL && /^postgres(ql)?:\/\//.test(process.env.DATABASE_URL)) {
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 10,
@@ -157,14 +171,54 @@ function createDb(): DbClient {
     })
     return new PostgresClient(pool)
   }
-  // Dev fallback: PGlite (dynamic import to avoid bundling WASM in production)
-  // This path is for local `vercel dev` without a real DATABASE_URL.
-  // The dynamic import ensures @electric-sql/pglite is NOT included in the
-  // Vercel serverless function bundle when DATABASE_URL is set.
-  throw new Error(
-    'DATABASE_URL is not set. For production, set DATABASE_URL to a PostgreSQL connection string. ' +
-    'For local dev, use the dev-server.ts entry point which supports PGlite.'
-  )
+  // Demo fallback: PGlite (in-memory WASM PostgreSQL). Lets the deployed app
+  // run immediately without a configured Postgres. Data is ephemeral per
+  // serverless instance; demo users are re-seeded with deterministic IDs on
+  // each cold start so demo-login persists across instance recycles. For
+  // persistent production data, set DATABASE_URL to a real Postgres URL.
+  demoMode = true
+  return new PgLiteClient()
+}
+
+// Deterministic IDs so demo sessions survive serverless instance recycles.
+const DEMO_ORG_ID = 'org_demo_0001'
+const DEMO_ORG_SLUG = 'genoffice-demo'
+const DEMO_USERS = [
+  { id: 'usr_demo_owner', role: 'owner', email: 'demo-owner@contractor.dev', name: 'Demo Owner' },
+  { id: 'usr_demo_member', role: 'member', email: 'demo-member@contractor.dev', name: 'Demo Member' },
+  { id: 'usr_demo_viewer', role: 'viewer', email: 'demo-viewer@contractor.dev', name: 'Demo Viewer' },
+] as const
+
+async function seedDemoData(deps: {
+  users: UserRepository
+  memberships: MembershipRepository
+  organizations: OrganizationRepository
+}): Promise<void> {
+  const now = new Date().toISOString()
+  // Demo org (idempotent — self-tenant: tenantId === org id).
+  const existingOrg = await deps.organizations.getById(DEMO_ORG_ID, DEMO_ORG_ID)
+  if (!existingOrg) {
+    await deps.organizations.create({
+      id: DEMO_ORG_ID, tenantId: DEMO_ORG_ID, name: 'GenOffice Demo', slug: DEMO_ORG_SLUG,
+      status: 'active', createdAt: now,
+    })
+  }
+  // Demo users + memberships (idempotent).
+  for (const u of DEMO_USERS) {
+    if (await deps.users.getByEmail(u.email)) continue
+    await deps.users.createDemoUser(
+      { id: u.id, email: u.email, displayName: u.name, status: 'active', createdAt: now },
+    )
+    await deps.users.createBinding({
+      id: `auth_${u.id}`, userId: u.id, provider: 'email', subject: u.email,
+      createdAt: now, lastUsedAt: null,
+    })
+    const membership: Membership = {
+      id: `mbr_${u.id}`, userId: u.id, organizationId: DEMO_ORG_ID,
+      role: u.role, status: 'active', createdAt: now,
+    }
+    await deps.memberships.create(membership)
+  }
 }
 
 async function applyMigrations(db: DbClient): Promise<void> {
@@ -257,6 +311,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // hosting (configured in vercel.json). This function only handles /api/*.
     return sendJson(res, 404, { error: 'not_found', message: 'Not found' })
   } catch (e) {
+    console.error('[vercel-handler] internal error:', e)
     return sendJson(res, 500, { error: 'internal_error', message: 'Internal server error' })
   }
 }
