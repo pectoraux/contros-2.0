@@ -73,8 +73,6 @@ export interface DocsEventBus {
   opened: (result: DocumentOpenResult) => void
   renamed: (paths: { oldPath: string; newPath: string }) => void
   teardown: () => void
-  closeCheck: () => void
-  closeSaveRequest: () => void
 }
 
 // ── Dependencies (capability-only — NO shell hooks, NO wcId) ──────────
@@ -100,8 +98,6 @@ export class DocumentServiceImpl implements DocumentService {
     opened: new Set<(r: DocumentOpenResult) => void>(),
     renamed: new Set<(p: { oldPath: string; newPath: string }) => void>(),
     teardown: new Set<() => void>(),
-    closeCheck: new Set<() => void>(),
-    closeSaveRequest: new Set<() => void>(),
   }
 
   constructor(
@@ -453,24 +449,6 @@ export class DocumentServiceImpl implements DocumentService {
   onTeardown(handler: () => void): () => void {
     this.eventListeners.teardown.add(handler)
     return () => this.eventListeners.teardown.delete(handler)
-  }
-
-  onCloseCheck(handler: () => void): () => void {
-    this.eventListeners.closeCheck.add(handler)
-    return () => this.eventListeners.closeCheck.delete(handler)
-  }
-
-  reportCloseCheck(_state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void {
-    // Forwarded to the shell close-guard flow via EventBus (if connected).
-  }
-
-  onCloseSaveRequest(handler: () => void): () => void {
-    this.eventListeners.closeSaveRequest.add(handler)
-    return () => this.eventListeners.closeSaveRequest.delete(handler)
-  }
-
-  reportCloseSaveResult(_ok: boolean): void {
-    // Forwarded to the shell close-guard flow.
   }
 
   // ── Internal helpers (PURE LOGIC — no fs access) ────────────────────

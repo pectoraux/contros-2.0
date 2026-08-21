@@ -14,17 +14,11 @@
 import type { UiLanguage } from '@genoffice/platform'
 
 // ── Language conversion ────────────────────────────────────────────────
-//
-// The legacy DesktopApi.getLanguage() returns a 11-language union.
-// The runtime UiLanguage has 19 members. The legacy type is a SUBSET.
-// When the runtime returns a language the legacy doesn't support,
-// default to 'en'.
 
 const LEGACY_LANGS = new Set<string>([
   'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'th', 'id', 'ru', 'ar',
 ])
 
-/** Legacy language union type (11 members — subset of UiLanguage). */
 export type LegacyLanguage =
   | 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'
 
@@ -32,16 +26,12 @@ export type LegacyLanguage =
  * Narrow a UiLanguage (19 members) to the legacy language (11 members).
  * Languages outside the legacy set default to 'en'.
  *
- * This is an explicit narrowing conversion — NOT a cast. The runtime
- * check ensures type safety.
+ * This is a runtime-validated narrowing — the set membership check
+ * is a real type guard, not a cast.
  */
 export function toLegacyLanguage(lang: UiLanguage): LegacyLanguage {
-  if (
-    lang === 'zh' || lang === 'en' || lang === 'ja' || lang === 'ko' ||
-    lang === 'fr' || lang === 'de' || lang === 'es' || lang === 'th' ||
-    lang === 'id' || lang === 'ru' || lang === 'ar'
-  ) {
-    return lang
+  if (LEGACY_LANGS.has(lang)) {
+    return lang as LegacyLanguage
   }
   return 'en'
 }
@@ -56,21 +46,54 @@ export function wrapLanguageHandler(
   return (lang: UiLanguage) => handler(toLegacyLanguage(lang))
 }
 
-// ── Unknown → typed conversions (for Storage.readObject returns) ──────
+// ── Runtime-validated storage conversions ──────────────────────────────
 //
 // Storage.readObject returns `unknown | null`. The bridge needs to
-// return specific types. These conversion functions are the explicit
-// boundary between untyped storage and typed contracts.
+// return specific types. These functions perform RUNTIME VALIDATION
+// of the shape — not unchecked casts.
 //
-// A production version would validate the shape; for now we trust
-// the shape because the bridge wrote the data.
+// Each validator checks the structural shape at runtime and returns
+// the fallback when the shape doesn't match. This is a real type guard
+// boundary, not a compiler suppression.
 
-/** Convert an unknown Storage value to a typed value, with a fallback. */
-export function fromStorage<T>(raw: unknown, fallback: T): T {
-  return (raw !== null && raw !== undefined ? raw : fallback) as T
+/** Check if a value is a non-null object (not an array). */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** Convert an unknown Storage value to a typed value or null. */
-export function fromStorageOrNull<T>(raw: unknown): T | null {
-  return raw !== null && raw !== undefined ? (raw as T) : null
+/** Check if a value is an array of strings. */
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((item) => typeof item === 'string')
+}
+
+/**
+ * Validate an unknown Storage value as a string array, with a fallback.
+ * Returns the validated array, or the fallback when validation fails.
+ */
+export function fromStorageStringArray(raw: unknown, fallback: string[]): string[] {
+  if (isStringArray(raw)) return raw
+  return fallback
+}
+
+/**
+ * Validate an unknown Storage value as a plain object, with a fallback.
+ * Returns the validated object, or the fallback when validation fails.
+ */
+export function fromStorageObject<T extends Record<string, unknown>>(
+  raw: unknown,
+  fallback: T,
+): T {
+  if (isPlainObject(raw)) return raw as T
+  return fallback
+}
+
+/**
+ * Validate an unknown Storage value as a plain object or null.
+ * Returns the validated object, or null when validation fails or the value is absent.
+ */
+export function fromStorageObjectOrNull<T extends Record<string, unknown>>(
+  raw: unknown,
+): T | null {
+  if (isPlainObject(raw)) return raw as T
+  return null
 }

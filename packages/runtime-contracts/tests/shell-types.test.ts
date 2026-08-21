@@ -82,4 +82,15 @@ describe('runtime-contracts must not contain shell/UI types', () => {
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
+
+  test('ZERO references to close-guard protocol (onCloseCheck, reportCloseCheck, onCloseSaveRequest, reportCloseSaveResult)', () => {
+    const hits = scanForTokens(SRC, [
+      'onCloseCheck',
+      'reportCloseCheck',
+      'onCloseSaveRequest',
+      'reportCloseSaveResult',
+    ])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
 })

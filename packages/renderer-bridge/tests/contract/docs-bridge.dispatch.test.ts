@@ -28,6 +28,10 @@ function mockCoordinator(): DocsShellCoordinator {
     registerSession: vi.fn(),
     onMenuCommand: vi.fn().mockReturnValue(() => {}),
     reportViewMenuState: vi.fn(),
+    onCloseCheck: vi.fn().mockReturnValue(() => {}),
+    reportCloseCheck: vi.fn(),
+    onCloseSaveRequest: vi.fn().mockReturnValue(() => {}),
+    reportCloseSaveResult: vi.fn(),
   }
 }
 
@@ -66,10 +70,6 @@ function makeWiredRuntime() {
     onOpened: vi.fn().mockReturnValue(() => {}),
     onRenamed: vi.fn().mockReturnValue(() => {}),
     onTeardown: vi.fn().mockReturnValue(() => {}),
-    onCloseCheck: vi.fn().mockReturnValue(() => {}),
-    reportCloseCheck: vi.fn(),
-    onCloseSaveRequest: vi.fn().mockReturnValue(() => {}),
-    reportCloseSaveResult: vi.fn(),
   }
   return runtime
 }

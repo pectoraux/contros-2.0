@@ -113,22 +113,10 @@ export function createDocsDesktopBridge(deps: DocsBridgeDeps): DesktopApi {
 
     // ── Menu / close guard (delegate to coordinator — shell owns these) ──
     onMenuCommand: (handler) => coordinator.onMenuCommand(handler),
-    onCloseCheck: (handler) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      return docs.onCloseCheck(handler)
-    },
-    reportCloseCheck: (state) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      docs.reportCloseCheck(state)
-    },
-    onCloseSaveRequest: (handler) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      return docs.onCloseSaveRequest(handler)
-    },
-    reportCloseSaveResult: (ok) => {
-      const docs = requireWired(runtime.docs, 'DocumentService')
-      docs.reportCloseSaveResult(ok)
-    },
+    onCloseCheck: (handler) => coordinator.onCloseCheck(handler),
+    reportCloseCheck: (state) => coordinator.reportCloseCheck(state),
+    onCloseSaveRequest: (handler) => coordinator.onCloseSaveRequest(handler),
+    reportCloseSaveResult: (ok) => coordinator.reportCloseSaveResult(ok),
     reportViewMenuState: (state) => coordinator.reportViewMenuState(state),
   }
 }

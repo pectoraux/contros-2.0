@@ -153,4 +153,15 @@ describe('@genoffice/services-docs architecture boundary', () => {
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
+
+  test('ZERO close-guard protocol (onCloseCheck, reportCloseCheck, onCloseSaveRequest, reportCloseSaveResult)', () => {
+    const hits = scanForTokens(SRC, [
+      'onCloseCheck',
+      'reportCloseCheck',
+      'onCloseSaveRequest',
+      'reportCloseSaveResult',
+    ])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
 })

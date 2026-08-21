@@ -115,7 +115,16 @@ export interface DocsShellCoordinator {
   getSession(filePath: string): DocumentSession | null
   registerSession(session: DocumentSession): void
 
-  // ── Shell events (menu commands, view-menu state) ─────────────────
+  // ── Shell events (menu commands, view-menu state, close guard) ────
   onMenuCommand(handler: (command: ShellMenuCommand, payload?: string) => void): () => void
   reportViewMenuState(state: { aiSidebar: boolean; darkCanvas: boolean }): void
+
+  // ── Close guard (shell orchestration — NOT domain) ──────────────
+  // The close-guard flow coordinates between the shell (which intercepts
+  // window/tab close) and the renderer (which reports dirty state and
+  // runs the save). This is shell transport, not domain behavior.
+  onCloseCheck(handler: () => void): () => void
+  reportCloseCheck(state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void
+  onCloseSaveRequest(handler: () => void): () => void
+  reportCloseSaveResult(ok: boolean): void
 }

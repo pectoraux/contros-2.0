@@ -5,15 +5,15 @@
  * Uses explicit conversion functions (fromStorage, fromStorageOrNull)
  * instead of `as never` casts.
  */
-import type { HomeApi } from '@genoffice/shell-home-shared'
+import type { HomeApi, RecentEntry } from '@genoffice/shell-home-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { fromStorage, fromStorageOrNull } from '../conversions/docs-conversions.js'
+import { fromStorageObject, fromStorageObjectOrNull, fromStorageStringArray } from '../conversions/docs-conversions.js'
 
 export function createHomeBridge(runtime: RuntimeContext): HomeApi {
   return {
-    recents: (query) => runtime.storage.readObject('home', 'recents:' + JSON.stringify(query ?? {})).then((r) => fromStorage(r, { entries: [], total: 0, totalAll: 0 })),
-    starred: (query) => runtime.storage.readObject('home', 'starred:' + JSON.stringify(query ?? {})).then((r) => fromStorage(r, { entries: [], total: 0, totalAll: 0 })),
-    statPaths: (paths) => runtime.storage.readObject('home', 'statPaths:' + JSON.stringify(paths)).then((r) => fromStorage(r, [])),
+    recents: (query) => runtime.storage.readObject('home', 'recents:' + JSON.stringify(query ?? {})).then((r) => fromStorageObject(r, { entries: [], total: 0, totalAll: 0 })),
+    starred: (query) => runtime.storage.readObject('home', 'starred:' + JSON.stringify(query ?? {})).then((r) => fromStorageObject(r, { entries: [], total: 0, totalAll: 0 })),
+    statPaths: (paths) => runtime.storage.readObject('home', 'statPaths:' + JSON.stringify(paths)).then((r) => (Array.isArray(r) ? (r as RecentEntry[]) : [])),
     toggleStar: (path) => runtime.storage.writeObject('home', 'toggleStar:' + path, { path }).then(() => undefined),
     removeRecent: (paths) => runtime.storage.writeObject('home', 'removeRecent', { paths }).then(() => undefined),
 
@@ -56,11 +56,11 @@ export function createHomeBridge(runtime: RuntimeContext): HomeApi {
     openGitHubRepo: () => runtime.windowing.openGitHubRepo(),
     githubStars: () => runtime.storage.get<number | null>('githubStars').then((v) => v ?? null),
 
-    starPromptShouldShow: () => runtime.storage.readObject('home', 'starPromptShouldShow').then((r) => fromStorage(r, { show: false, docOpens: 0 })),
+    starPromptShouldShow: () => runtime.storage.readObject('home', 'starPromptShouldShow').then((r) => fromStorageObject(r, { show: false, docOpens: 0 })),
     starPromptAction: (action) => runtime.storage.writeObject('home', 'starPromptAction', { action }).then(() => undefined),
 
-    cloudProjectsCached: () => runtime.storage.readObject('home', 'cloudProjectsCached').then((r) => fromStorageOrNull(r)),
-    cloudProjectsSync: () => runtime.storage.readObject('home', 'cloudProjectsSync').then((r) => fromStorageOrNull(r)),
+    cloudProjectsCached: () => runtime.storage.readObject('home', 'cloudProjectsCached').then(() => null),
+    cloudProjectsSync: () => runtime.storage.readObject('home', 'cloudProjectsSync').then(() => null),
     openCloudProject: (projectUrl) => runtime.windowing.openExternal(projectUrl),
   }
 }

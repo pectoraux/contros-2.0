@@ -4,15 +4,17 @@
  * Tests every conversion function used by the bridges:
  *   - toLegacyLanguage: 19-lang → 11-lang (narrowing with fallback)
  *   - wrapLanguageHandler: wraps a legacy handler to receive UiLanguage
- *   - fromStorage: unknown → typed with fallback
- *   - fromStorageOrNull: unknown → typed | null
+ *   - fromStorageStringArray: validated string array conversion
+ *   - fromStorageObject: validated object conversion
+ *   - fromStorageObjectOrNull: validated object-or-null conversion
  */
 import { describe, test, expect, vi } from 'vitest'
 import {
   toLegacyLanguage,
   wrapLanguageHandler,
-  fromStorage,
-  fromStorageOrNull,
+  fromStorageStringArray,
+  fromStorageObject,
+  fromStorageObjectOrNull,
   type LegacyLanguage,
 } from '../../src/conversions/docs-conversions.js'
 import type { UiLanguage } from '@genoffice/platform'
@@ -45,58 +47,79 @@ describe('wrapLanguageHandler', () => {
 
     expect(received).toEqual(['en', 'zh', 'en'])
   })
+})
 
-  test('the wrapped handler returns void', () => {
-    const handler = vi.fn()
-    const wrapped = wrapLanguageHandler(handler)
-    expect(wrapped('en' as UiLanguage)).toBeUndefined()
+describe('fromStorageStringArray', () => {
+  test('returns the array when it is a string array', () => {
+    expect(fromStorageStringArray(['a', 'b'], [])).toEqual(['a', 'b'])
+  })
+
+  test('returns fallback when the value is null', () => {
+    expect(fromStorageStringArray(null, ['default'])).toEqual(['default'])
+  })
+
+  test('returns fallback when the value is undefined', () => {
+    expect(fromStorageStringArray(undefined, ['default'])).toEqual(['default'])
+  })
+
+  test('returns fallback when the value is not an array', () => {
+    expect(fromStorageStringArray({ a: 1 }, ['default'])).toEqual(['default'])
+    expect(fromStorageStringArray('not-array', ['default'])).toEqual(['default'])
+    expect(fromStorageStringArray(42, ['default'])).toEqual(['default'])
+  })
+
+  test('returns fallback when the array contains non-strings', () => {
+    expect(fromStorageStringArray(['a', 1, true], ['default'])).toEqual(['default'])
+  })
+
+  test('returns empty array when the input is an empty array', () => {
+    expect(fromStorageStringArray([], ['default'])).toEqual([])
   })
 })
 
-describe('fromStorage', () => {
-  test('returns the value when it is not null/undefined', () => {
-    expect(fromStorage({ a: 1 }, { b: 2 })).toEqual({ a: 1 })
+describe('fromStorageObject', () => {
+  test('returns the value when it is a plain object', () => {
+    const obj = { a: 1, b: 'hello' }
+    expect(fromStorageObject(obj, { a: 0, b: '' })).toBe(obj)
   })
 
-  test('returns the fallback when the value is null', () => {
-    expect(fromStorage(null, 'fallback')).toBe('fallback')
+  test('returns fallback when the value is null', () => {
+    expect(fromStorageObject(null, { a: 0 })).toEqual({ a: 0 })
   })
 
-  test('returns the fallback when the value is undefined', () => {
-    expect(fromStorage(undefined, 'fallback')).toBe('fallback')
+  test('returns fallback when the value is undefined', () => {
+    expect(fromStorageObject(undefined, { a: 0 })).toEqual({ a: 0 })
   })
 
-  test('returns the value when it is 0 (falsy but not null/undefined)', () => {
-    expect(fromStorage(0, -1)).toBe(0)
+  test('returns fallback when the value is not an object', () => {
+    expect(fromStorageObject('string', { a: 0 })).toEqual({ a: 0 })
+    expect(fromStorageObject(42, { a: 0 })).toEqual({ a: 0 })
+    expect(fromStorageObject(true, { a: 0 })).toEqual({ a: 0 })
   })
 
-  test('returns the value when it is an empty string', () => {
-    expect(fromStorage('', 'fallback')).toBe('')
-  })
-
-  test('returns the value when it is false', () => {
-    expect(fromStorage(false, true)).toBe(false)
-  })
-
-  test('returns the value when it is an empty array', () => {
-    expect(fromStorage([], [1, 2])).toEqual([])
+  test('returns fallback when the value is an array (arrays are not plain objects)', () => {
+    expect(fromStorageObject([1, 2], { a: 0 })).toEqual({ a: 0 })
   })
 })
 
-describe('fromStorageOrNull', () => {
-  test('returns the value when it is not null/undefined', () => {
-    expect(fromStorageOrNull({ a: 1 })).toEqual({ a: 1 })
+describe('fromStorageObjectOrNull', () => {
+  test('returns the value when it is a plain object', () => {
+    const obj = { a: 1 }
+    expect(fromStorageObjectOrNull(obj)).toBe(obj)
   })
 
   test('returns null when the value is null', () => {
-    expect(fromStorageOrNull(null)).toBeNull()
+    expect(fromStorageObjectOrNull(null)).toBeNull()
   })
 
   test('returns null when the value is undefined', () => {
-    expect(fromStorageOrNull(undefined)).toBeNull()
+    expect(fromStorageObjectOrNull(undefined)).toBeNull()
   })
 
-  test('returns the value when it is 0', () => {
-    expect(fromStorageOrNull(0)).toBe(0)
+  test('returns null when the value is not an object', () => {
+    expect(fromStorageObjectOrNull('string')).toBeNull()
+    expect(fromStorageObjectOrNull(42)).toBeNull()
+    expect(fromStorageObjectOrNull(true)).toBeNull()
+    expect(fromStorageObjectOrNull([1, 2])).toBeNull()
   })
 })

@@ -14,7 +14,7 @@
 import type { ProjectApi } from '@genoffice/project-store'
 import type { ProjectHomeApi } from '@genoffice/shell-home-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
-import { fromStorage } from '../conversions/docs-conversions.js'
+import { fromStorageObject } from '../conversions/docs-conversions.js'
 
 /** Full ProjectApi (used by editors as window.projectApi). */
 export function createProjectApiBridge(runtime: RuntimeContext): ProjectApi {
@@ -47,13 +47,13 @@ export function createProjectHomeBridge(runtime: RuntimeContext): ProjectHomeApi
     listFiles?(projectId: string): Promise<string[]>
   }
   return {
-    listProjects: () => p.listProjects().then((r) => fromStorage(r, [])),
+    listProjects: () => p.listProjects().then((r) => Array.isArray(r) ? r : []),
     listFiles: (projectId) =>
-      (p.listFiles ? p.listFiles(projectId) : Promise.resolve([])).then((r) => fromStorage(r, [])),
-    createProject: (name) => p.createProject({ name }).then((r) => fromStorage(r, { id: '', name: '', createdAt: '', updatedAt: '', fileCount: 0, lastActiveAt: '', isDefault: false })),
+      (p.listFiles ? p.listFiles(projectId) : Promise.resolve([])).then((r) => Array.isArray(r) ? r : []),
+    createProject: (name) => p.createProject({ name }).then((r) => fromStorageObject(r, { id: '', name: '', createdAt: '', updatedAt: '', fileCount: 0, lastActiveAt: '', isDefault: false })),
     renameProject: (id, name) => p.renameProject({ id, name }),
     deleteProject: (id) => p.deleteProject({ id }),
     moveFile: (filePath, projectId) => p.moveFile({ filePath, projectId }),
-    getTimeline: (projectId, limit) => p.getTimeline({ projectId, limit }).then((r) => fromStorage(r, [])),
+    getTimeline: (projectId, limit) => p.getTimeline({ projectId, limit }).then((r) => Array.isArray(r) ? r : []),
   }
 }

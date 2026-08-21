@@ -27,4 +27,4 @@ export { createMarkdownApiBridge } from './bridges/markdown-bridge.js'
 export type { DocsShellCoordinator, ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'
 
 // Conversion functions (tested explicitly)
-export { toLegacyLanguage, wrapLanguageHandler, fromStorage, fromStorageOrNull, type LegacyLanguage } from './conversions/docs-conversions.js'
+export { toLegacyLanguage, wrapLanguageHandler, fromStorageStringArray, fromStorageObject, fromStorageObjectOrNull, type LegacyLanguage } from './conversions/docs-conversions.js'
