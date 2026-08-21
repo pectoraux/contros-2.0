@@ -26,7 +26,12 @@ export { createPdfApiBridge } from './bridges/pdf-bridge.js'
 export { createMarkdownApiBridge } from './bridges/markdown-bridge.js'
 
 // IPC transport (runtime-independent — no Electron)
-export type { IpcTransport } from './ipc-transport.js'
+export type { TypedIpcTransport, DocsIpcTransport } from './ipc-transport.js'
+export type {
+  DocsIpcRequestChannels,
+  DocsIpcSendChannels,
+  DocsIpcEventChannels,
+} from './docs-ipc-contract.js'
 
 // Shell types (application-boundary, NOT runtime-contracts)
 export type { ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'

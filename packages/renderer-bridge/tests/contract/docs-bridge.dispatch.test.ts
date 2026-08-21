@@ -10,9 +10,15 @@
  */
 import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
-import type { IpcTransport } from '../../src/ipc-transport.js'
+import type { DocsIpcTransport } from '../../src/ipc-transport.js'
 
-function mockTransport(): IpcTransport & {
+/**
+ * A mock DocsIpcTransport with spied invoke/send/on methods.
+ * The mock is loosely typed (vi.fn() returns unknown) so the tests
+ * can assert on call args without the type system rejecting the mock.
+ * The bridge itself uses the typed transport at compile time.
+ */
+function mockTransport(): DocsIpcTransport & {
   invoke: ReturnType<typeof vi.fn>
   send: ReturnType<typeof vi.fn>
   on: ReturnType<typeof vi.fn>

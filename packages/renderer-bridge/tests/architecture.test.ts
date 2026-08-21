@@ -91,8 +91,21 @@ function scanForImports(
 }
 
 describe('@genoffice/renderer-bridge architecture boundary', () => {
-  test('ZERO type assertions ("as Identifier") in source code', () => {
-    const pattern = /\bas\s+[A-Z]/
+  // Increment 2I: the previous test used /\bas\s+[A-Z]/ which only catches
+  // `as UppercaseIdentifier` — it missed `as never`, `as any`, `as foo`.
+  // The test claimed ZERO assertions while the source had 6 `as never` casts.
+  // This test now reliably catches ALL type assertions:
+  //   as never, as any, as unknown as, as SomeType, as foo
+  // It matches `as <identifier>` where identifier starts with any letter
+  // (upper or lower case). It excludes:
+  //   - comments (lines starting with *, //, /*)
+  //   - import aliases (import { x as y })
+  //   - JSDoc @type annotations
+  test('ZERO type assertions ("as never", "as any", "as unknown as", "as Identifier") in source code', () => {
+    // Match `as <identifier>` where identifier starts with a letter (any case).
+    // This catches: as never, as any, as unknown, as Foo, as bar, as T, etc.
+    // It does NOT match: `as` in string literals, `as` in import aliases.
+    const pattern = /\bas\s+[a-zA-Z_]/
     const hits = scanForPattern(SRC, pattern)
     if (hits.length > 0) {
       console.error('Found type assertions:')
@@ -103,8 +116,21 @@ describe('@genoffice/renderer-bridge architecture boundary', () => {
     expect(hits).toEqual([])
   })
 
+  // Explicit tests for the specific assertions that were present in 2H.
+  // These are redundant with the general test above but make the intent
+  // explicit and ensure the test fails against the 2H source.
+  test('ZERO "as never" assertions', () => {
+    const hits = scanForPattern(SRC, /\bas\s+never\b/)
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO "as any" assertions', () => {
+    const hits = scanForPattern(SRC, /\bas\s+any\b/)
+    expect(hits).toEqual([])
+  })
+
   test('ZERO "as unknown as" double-casts', () => {
-    const hits = scanForPattern(SRC, /as unknown as/)
+    const hits = scanForPattern(SRC, /as\s+unknown\s+as/)
     expect(hits).toEqual([])
   })
 

@@ -18,17 +18,17 @@
  */
 import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
-import type { IpcTransport } from '../../src/ipc-transport.js'
+import type { DocsIpcTransport } from '../../src/ipc-transport.js'
 
 type Listener = (...args: unknown[]) => void
 
 function makeTransportWithListeners(): {
-  transport: IpcTransport
+  transport: DocsIpcTransport
   listeners: Map<string, Listener[]>
   emit: (channel: string, ...args: unknown[]) => void
 } {
   const listeners = new Map<string, Listener[]>()
-  const transport: IpcTransport = {
+  const transport: DocsIpcTransport = {
     invoke: vi.fn().mockResolvedValue(null),
     send: vi.fn(),
     on: vi.fn((channel: string, listener: Listener) => {

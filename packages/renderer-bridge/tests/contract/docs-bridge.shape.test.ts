@@ -1,7 +1,7 @@
 /** Shape test for createDocsDesktopBridge. */
 import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
-import type { IpcTransport } from '../../src/ipc-transport.js'
+import type { DocsIpcTransport } from '../../src/ipc-transport.js'
 
 // Canonical DesktopApi method names from apps/docs/src/shared/ipc.ts:140-279.
 const EXPECTED_DOCS_DESKTOP_API_METHODS = [
@@ -56,7 +56,7 @@ const EXPECTED_DOCS_DESKTOP_API_METHODS = [
   'reportViewMenuState',
 ] as const
 
-function mockTransport(): IpcTransport {
+function mockTransport(): DocsIpcTransport {
   return {
     invoke: vi.fn().mockResolvedValue(null),
     send: vi.fn(),
