@@ -2,7 +2,7 @@
   "name": "@genoffice/renderer-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "GenOffice renderer compatibility bridge — explicit typed object factories that return the existing window.* API shapes, delegating to domain services and platform capabilities. Pure factories; no window mutation inside this package.",
+  "description": "GenOffice renderer compatibility bridge \u2014 explicit typed object factories that return the existing window.* API shapes, delegating to domain services and platform capabilities. Pure factories; no window mutation inside this package.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -16,7 +16,7 @@
     "@genoffice/platform": "*"
   },
   "devDependencies": {
-    "typescript": "^5.9.0",
-    "vitest": "^3.0.0"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
   }
 }

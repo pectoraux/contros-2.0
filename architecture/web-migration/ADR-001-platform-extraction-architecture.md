@@ -111,7 +111,9 @@ GenOffice will be reorganized into a **four-layer platform-neutral office runtim
 
 2. **Layer 2 — Domain Runtime Services** (`packages/services-docs`, `services-sheets`, `services-slides`, `services-pdf`, `services-markdown`): One package per editor. Each contains the editor's product logic expressed in platform-neutral terms. Composes Layer 1 engines with Layer 3 platform capabilities. The renderers consume these services **via the compatibility bridge defined in ADR-002**, not directly.
 
-3. **Layer 3 — Platform Capability Layer** (`packages/platform`): Eight capability interfaces (`Storage`, `Identity`, `AI`, `Files`, `Printing`, `Clipboard`, `Notifications`, `Windowing`) plus shared types (`FileHandle`, `FileStat`, `SaveResult`, etc.). Platform-neutral — no Electron or browser imports.
+3. **Layer 3 — Platform Capability Layer** (`packages/platform`): Nine capability interfaces (`Storage`, `Files`, `Identity`, `AI`, `Printing`, `Clipboard`, `Notifications`, `Windowing`, `Settings`) plus shared types (`FileHandle`, `FileStat`, `SaveResult`, etc.). Platform-neutral — no Electron or browser imports.
+
+   > **Milestone 1 correction (frozen 2026-08-21):** The original ADR-001 draft listed eight capabilities. `Settings` was added during Milestone 1 implementation to reconcile the contract with ADR-002 — the bridge code in ADR-002 §2.2 references `runtime.settings.getTheme()`, `runtime.settings.getLanguage()`, `runtime.settings.onThemeChanged()`, etc., which require a `Settings` capability. This is a contract correction, not an architecture change. The four-layer architecture, the package boundaries, and the migration sequence are unchanged.
 
 4. **Layer 4 — Adapters** (`packages/platform-electron`, `packages/platform-web`): Two implementations of Layer 3. `platform-electron` is the reference implementation, refactored from the existing `apps/*/src/main/*-main.ts` + `packages/electron-utils`. `platform-web` is new, using browser primitives (File System Access API, IndexedDB, Service Worker, Web Workers, `postMessage`).
 
@@ -212,8 +214,8 @@ GenOffice will be reorganized into a **four-layer platform-neutral office runtim
 
 | Package | Layer | Milestone | Purpose | Imports allowed |
 |---|---|---|---|---|
-| `packages/runtime-contracts` | 1 | **1** | TypeScript interfaces + types only. `RuntimeContext`, `DocumentService`, `SpreadsheetService`, `PresentationService`, `PdfService`, `MarkdownService`, plus the 8 platform capability interfaces. | Layer 1 packages only |
-| `packages/platform` | 3 | **1** | The 8 capability interfaces + shared types. Platform-neutral. | Layer 1 only |
+| `packages/runtime-contracts` | 1 | **1** | TypeScript interfaces + types only. `RuntimeContext`, `DocumentService`, `SpreadsheetService`, `PresentationService`, `PdfService`, `MarkdownService`, plus the 9 platform capability interfaces (Storage, Files, Identity, AI, Printing, Clipboard, Notifications, Windowing, Settings). | Layer 1 packages only |
+| `packages/platform` | 3 | **1** | The 9 capability interfaces (Storage, Files, Identity, AI, Printing, Clipboard, Notifications, Windowing, Settings) + shared types. Platform-neutral. | Layer 1 only |
 | `packages/renderer-bridge` | (between 2 and 5) | **1** | Pure object factories that return the existing `window.*` API shapes, delegating to domain services. **No window mutation inside the package.** | Layer 1 + existing `apps/*/src/shared/*-api.ts` types |
 | `packages/services-docs` | 2 | 3 | `DocumentServiceImpl` composing `@genoffice/docx-engine` + `Storage` + `Files` + `AI` + `Printing`. | Layer 1 + Layer 3 |
 | `packages/services-sheets` | 2 | 7 | `SpreadsheetServiceImpl` composing xlsx gateway + WASM Rust engine + Univer glue. | Layer 1 + Layer 3 |

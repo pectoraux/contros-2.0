@@ -7,6 +7,21 @@
  *
  * The preload (Electron) or iframe bootstrap (Web) calls these factories
  * and installs the result onto window.
+ *
+ * Inventory: 11 bridge factories covering 10 distinct `window.*` global names.
+ * The +1 is because `window.desktop` has TWO different TypeScript shapes:
+ *   - createDocsDesktopBridge returns `DesktopApi` (~35 methods, docs preload)
+ *   - createSlidesDesktopBridge returns `DesktopFilesApi` (6 methods, slides preload)
+ * Same global name, different shapes — each editor bundle declares its own
+ * `Window` augmentation. Two factories are required.
+ *
+ * The Project pair (createProjectApiBridge + createProjectHomeBridge) covers
+ * two DIFFERENT global names with DIFFERENT shapes:
+ *   - window.projectApi (ProjectApi, 10 methods) — used by editor renderers
+ *   - window.aiOfficeProject (ProjectHomeApi, 7 methods) — used by shell renderer
+ *
+ * Authoritative contract source: the actual checked-in TypeScript interface files
+ * under apps/ (in each app's src/shared/ directory). ADR pseudocode is illustrative only.
  */
 export { createHomeBridge } from './bridges/home-bridge.js'
 export { createTabsBridge } from './bridges/tabs-bridge.js'

@@ -186,23 +186,26 @@ test('packages/platform/src contains no direct browser API usage', () => {
 
 Pure object factories that return the existing `window.*` API shapes, delegating to domain services. **No `window` mutation inside the package** (Architectural clarification, ADR-002 §2.3). The package produces objects; the preload/bootstrap installs them onto `window`.
 
+**Inventory: 11 bridge factories** (not 10). See ADR-002 §2.1 for the full reconciliation. The +1 over the previously-stated count of 10 is required because `window.desktop` is consumed by both docs (DesktopApi, ~35 methods) and slides (DesktopFilesApi, 6 methods) — same global name, different TypeScript shapes. Two factories cover this.
+
 ```
 packages/renderer-bridge/
   package.json                            ← depends on @genoffice/runtime-contracts + @genoffice/platform
   tsconfig.json
   vitest.config.ts
   src/
-    index.ts                              ← re-exports all bridge factories
+    index.ts                              ← re-exports all 11 bridge factories
     bridges/
-      docs-bridge.ts                     ← createDesktopBridge(docs, runtime): DesktopApi
-      sheets-bridge.ts                   ← createDesktopApiBridge(sheets, runtime): DesktopApi (sheets variant)
-      slides-bridge.ts                   ← createSlidesApiBridge(slides, runtime): SlidesApi
-      pdf-bridge.ts                      ← createPdfApiBridge(pdf, runtime): PdfApi
-      markdown-bridge.ts                 ← createMarkdownApiBridge(markdown, runtime): MarkdownApi
+      docs-bridge.ts                     ← createDocsDesktopBridge(runtime): DesktopApi (docs variant)
+      sheets-bridge.ts                   ← createSheetsDesktopApiBridge(runtime): DesktopApi (sheets variant)
+      slides-bridge.ts                   ← createSlidesApiBridge(runtime): SlidesApi
+      slides-desktop-bridge.ts           ← createSlidesDesktopBridge(runtime): DesktopFilesApi (slides variant)
+      pdf-bridge.ts                      ← createPdfApiBridge(runtime): PdfApi
+      markdown-bridge.ts                 ← createMarkdownApiBridge(runtime): MarkdownApi
       home-bridge.ts                     ← createHomeBridge(runtime): HomeApi
       tabs-bridge.ts                     ← createTabsBridge(runtime): TabsApi
-      project-bridge.ts                  ← createProjectBridge(project): ProjectApi
-      update-bridge.ts                   ← createUpdateBridge(updater): UpdateApi
+      project-bridge.ts                  ← createProjectApiBridge + createProjectHomeBridge (two factories)
+      update-bridge.ts                   ← createUpdateBridge(runtime): UpdateWindowApi
   tests/
     contract/
       docs-bridge.shape.test.ts         ← shape/coverage test

@@ -36,7 +36,36 @@ The bridge exposes the exact same globals the renderers consume today, with iden
 | `window.projectApi` | `@genoffice/project-store` interface (8 methods) | All editor renderers (chat history) |
 | `window.aiOfficeUpdate` | `apps/shell/src/shared/update-api.ts` (5 methods + 1 push) | Update window renderer |
 
-**Total**: ~280 methods across 10 globals. These interfaces are the bridge contract — every method signature, parameter type, and return type is preserved verbatim.
+**Total**: ~280 methods across 10 distinct `window.*` global names. These interfaces are the bridge contract — every method signature, parameter type, and return type is preserved verbatim.
+
+> **Milestone 1 reconciliation (frozen 2026-08-21):** The previous draft of this ADR said "10 explicit typed bridge factories". The actual Milestone 1 implementation produced **11 bridge factories** covering **10 distinct `window.*` global names**. The +1 factory is required because `window.desktop` is consumed by TWO different renderers (docs + slides) with TWO different TypeScript shapes:
+>
+> - `apps/docs/src/shared/ipc.ts` declares `window.desktop: DesktopApi` (~35 methods)
+> - `apps/slides/src/shared/ipc.ts` declares `window.desktop: DesktopFilesApi` (6 methods)
+>
+> Same global name, different shapes — each editor bundle declares its own `Window` augmentation. Two separate bridge factories are required:
+> - `createDocsDesktopBridge` (returns `DesktopApi`)
+> - `createSlidesDesktopBridge` (returns `DesktopFilesApi`)
+>
+> The Project pair (`createProjectApiBridge` + `createProjectHomeBridge`) covers TWO DIFFERENT global names with DIFFERENT shapes:
+> - `window.projectApi` → `ProjectApi` (10 methods, used by editor renderers)
+> - `window.aiOfficeProject` → `ProjectHomeApi` (7 methods, used by shell renderer)
+>
+> The authoritative bridge factory inventory (verified against the actual checked-in `apps/*/src/shared/*-api.ts` interfaces) is:
+>
+> 1. `createHomeBridge` → `window.aiOffice` (HomeApi)
+> 2. `createTabsBridge` → `window.aiOfficeTabs` (TabsApi)
+> 3. `createProjectApiBridge` → `window.projectApi` (ProjectApi, editor variant)
+> 4. `createProjectHomeBridge` → `window.aiOfficeProject` (ProjectHomeApi, shell variant)
+> 5. `createUpdateBridge` → `window.aiOfficeUpdate` (UpdateWindowApi)
+> 6. `createDocsDesktopBridge` → `window.desktop` (DesktopApi, docs variant)
+> 7. `createSheetsDesktopApiBridge` → `window.desktopApi` (DesktopApi, sheets variant)
+> 8. `createSlidesApiBridge` → `window.slidesApi` (SlidesApi)
+> 9. `createSlidesDesktopBridge` → `window.desktop` (DesktopFilesApi, slides variant)
+> 10. `createPdfApiBridge` → `window.pdfApi` (PdfApi)
+> 11. `createMarkdownApiBridge` → `window.markdownApi` (MarkdownApi)
+>
+> No factory is redundant. The authoritative contract source from this point forward is the actual checked-in `apps/*/src/shared/*-api.ts` files; ADR pseudocode is illustrative only.
 
 ### 2.2 The mapping pattern (explicit typed method mappings)
 
