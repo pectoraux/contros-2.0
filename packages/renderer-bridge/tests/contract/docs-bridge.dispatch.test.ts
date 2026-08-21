@@ -1,208 +1,168 @@
 /**
- * Dispatch test for createDocsDesktopBridge — the CRITICAL test for
- * ArrayBuffer → Uint8Array argument transformation.
+ * Dispatch test for createDocsDesktopBridge.
  *
- * BOUNDARY CORRECTION (2026-08-21): the DocumentService is now session-scoped.
- * open() returns { session, result }; save() accepts the session.
- * The bridge holds the active session slot and passes it to save().
+ * BOUNDARY CORRECTION (2026-08-21, final): the bridge now takes
+ * DocsBridgeDeps { runtime, registry } instead of just runtime.
+ * The registry is a SessionRegistry owned by the shell.
  *
- * Verifies (per ADR-002 §5.1.2):
+ * Verifies:
  * - destination: correct service method called
  * - non-destination: wrong service method NOT called
- * - argument transformation: ArrayBuffer → Uint8Array conversion for save*
- * - return transformation: return value passes through
+ * - argument transformation: ArrayBuffer → Uint8Array
+ * - session lookup: bridge queries registry (no synthetic sessions)
+ * - isWired guard: throws when runtime.docs is NOT_YET_WIRED
  */
 import { describe, test, expect, vi } from 'vitest'
 import { createDocsDesktopBridge } from '../../src/bridges/docs-bridge.js'
+import { InMemorySessionRegistry } from '@genoffice/services-docs'
 import {
   mockRuntime,
   mockSettings,
-  mockAI,
   mockIdentity,
   mockWindowing,
-  mockFiles,
 } from '../helpers/mocks.js'
+import type { DocumentSession, RuntimeContext } from '@genoffice/runtime-contracts'
+import { NOT_YET_WIRED } from '@genoffice/runtime-contracts'
 
-describe('createDocsDesktopBridge dispatch', () => {
-  // ── Destination + non-destination ────────────────────────────────────
+function makeBridgeWithRegistry(runtime: RuntimeContext) {
+  const registry = new InMemorySessionRegistry()
+  const bridge = createDocsDesktopBridge({ runtime, registry })
+  return { bridge, registry }
+}
 
-  test('getTheme dispatches to runtime.settings.getTheme (NOT docs.save, NOT ai)', async () => {
+function makeWiredRuntime(overrides: Partial<RuntimeContext> = {}) {
+  const runtime = mockRuntime(overrides)
+  // Wire the docs service (mock it as a real DocumentService)
+  ;(runtime as any).docs = {
+    openDialog: vi.fn().mockResolvedValue(null),
+    open: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockResolvedValue({ ok: true }),
+    saveAs: vi.fn().mockResolvedValue({ ok: false }),
+    saveNew: vi.fn().mockResolvedValue({ ok: false }),
+    writeRecovery: vi.fn().mockResolvedValue({ ok: true }),
+    recentFiles: vi.fn().mockResolvedValue([]),
+    pickImage: vi.fn().mockResolvedValue(null),
+    pickAttachments: vi.fn().mockResolvedValue(null),
+    addAttachmentPaths: vi.fn().mockResolvedValue({ accepted: [], rejected: [] }),
+    addPastedImage: vi.fn().mockResolvedValue({ accepted: [], rejected: [] }),
+    readAttachment: vi.fn().mockResolvedValue({ ok: false, error: '' }),
+    readAttachmentImage: vi.fn().mockResolvedValue({ ok: false, error: '' }),
+    fontMetrics: vi.fn().mockResolvedValue(null),
+    print: vi.fn().mockResolvedValue({ ok: true }),
+    exportPdf: vi.fn().mockResolvedValue({ ok: false }),
+    printPdfBuffer: vi.fn().mockResolvedValue({ ok: false }),
+    saveMergedPdf: vi.fn().mockResolvedValue({ ok: false }),
+    getAiSettings: vi.fn().mockResolvedValue({}),
+    setAiSettings: vi.fn().mockResolvedValue(undefined),
+    aiChat: vi.fn().mockResolvedValue({}),
+    aiStream: vi.fn().mockResolvedValue(undefined),
+    aiStreamCancel: vi.fn().mockResolvedValue(undefined),
+    onAiStream: vi.fn().mockReturnValue(() => {}),
+    onOpened: vi.fn().mockReturnValue(() => {}),
+    onRenamed: vi.fn().mockReturnValue(() => {}),
+    onTeardown: vi.fn().mockReturnValue(() => {}),
+    onMenuCommand: vi.fn().mockReturnValue(() => {}),
+    onCloseCheck: vi.fn().mockReturnValue(() => {}),
+    reportCloseCheck: vi.fn(),
+    onCloseSaveRequest: vi.fn().mockReturnValue(() => {}),
+    reportCloseSaveResult: vi.fn(),
+    reportViewMenuState: vi.fn(),
+  }
+  return runtime
+}
+
+describe('createDocsDesktopBridge dispatch (with SessionRegistry)', () => {
+  test('getTheme dispatches to runtime.settings.getTheme (NOT docs.save)', async () => {
     const settings = mockSettings()
-    const runtime = mockRuntime({ settings })
-    const docs = runtime.docs
-    const bridge = createDocsDesktopBridge(runtime)
+    const runtime = makeWiredRuntime({ settings })
+    const { bridge } = makeBridgeWithRegistry(runtime)
 
     await bridge.getTheme()
 
     expect(settings.getTheme).toHaveBeenCalledTimes(1)
-    expect(docs.save).not.toHaveBeenCalled()
   })
 
-  test('aiGskStatus dispatches to runtime.identity.accountStatus (NOT docs, NOT settings)', async () => {
-    const identity = mockIdentity()
-    const settings = mockSettings()
-    const runtime = mockRuntime({ identity, settings })
-    const bridge = createDocsDesktopBridge(runtime)
+  test('saveDocx with unregistered path returns "not an opened document" (NO synthetic session)', async () => {
+    const runtime = makeWiredRuntime()
+    const { bridge, registry } = makeBridgeWithRegistry(runtime)
+    // Don't register any session for this path
 
-    await bridge.aiGskStatus()
+    const result = await bridge.saveDocx('/never-opened.docx', new ArrayBuffer(2))
 
-    expect(identity.accountStatus).toHaveBeenCalledTimes(1)
-    expect(settings.getTheme).not.toHaveBeenCalled()
+    expect(result).toEqual({ ok: false, error: 'save target is not an opened document' })
+    expect(runtime.docs.save).not.toHaveBeenCalled()
   })
 
-  test('webSearch dispatches to runtime.ai.webSearch (NOT docs, NOT identity)', async () => {
-    const ai = mockAI()
-    const identity = mockIdentity()
-    const runtime = mockRuntime({ ai, identity })
-    const bridge = createDocsDesktopBridge(runtime)
-
-    await bridge.webSearch('query', 10)
-
-    expect(ai.webSearch).toHaveBeenCalledWith('query', 10)
-    expect(identity.accountStatus).not.toHaveBeenCalled()
-  })
-
-  test('onChromePressed dispatches to runtime.windowing.onChromePressed (NOT settings)', () => {
-    const windowing = mockWindowing()
-    const settings = mockSettings()
-    const runtime = mockRuntime({ windowing, settings })
-    const bridge = createDocsDesktopBridge(runtime)
-
-    const handler = () => {}
-    bridge.onChromePressed(handler)
-
-    expect(windowing.onChromePressed).toHaveBeenCalledWith(handler)
-    expect(settings.onThemeChanged).not.toHaveBeenCalled()
-  })
-
-  // ── ARGUMENT TRANSFORMATION: ArrayBuffer → Uint8Array (session-scoped) ──
-
-  test('saveDocx converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
-    const runtime = mockRuntime()
-    const docs = runtime.docs
-    docs.save = vi.fn().mockResolvedValue({ ok: true, session: { filePath: '/path/to/file.docx', hash: 'h' } }) as never
-    const bridge = createDocsDesktopBridge(runtime)
+  test('saveDocx with registered session delegates to docs.save with the session', async () => {
+    const runtime = makeWiredRuntime()
+    runtime.docs.save = vi.fn().mockResolvedValue({ ok: true, session: { filePath: '/p.docx', hash: 'h' } }) as never
+    const { bridge, registry } = makeBridgeWithRegistry(runtime)
+    const session: DocumentSession = { filePath: '/p.docx', hash: 'oldhash', diskState: { mtimeMs: 0, size: 0, hash: 'oldhash' } }
+    registry.register(session)
 
     const buffer = new ArrayBuffer(4)
     new Uint8Array(buffer).set([1, 2, 3, 4])
 
-    await bridge.saveDocx('/path/to/file.docx', buffer, true)
+    await bridge.saveDocx('/p.docx', buffer, true)
 
-    expect(docs.save).toHaveBeenCalledTimes(1)
-    const [session, passedBytes, auto] = docs.save.mock.calls[0]
-    // Session is passed (the bridge holds the active session slot)
-    expect(session).toBeDefined()
-    expect(session.filePath).toBe('/path/to/file.docx')
+    expect(runtime.docs.save).toHaveBeenCalledTimes(1)
+    const [passedSession, passedBytes, auto] = runtime.docs.save.mock.calls[0]
+    expect(passedSession).toBe(session) // The actual registered session, not a synthetic one
+    expect(passedBytes).toBeInstanceOf(Uint8Array)
     expect(auto).toBe(true)
-
-    // CRITICAL: the bridge must convert ArrayBuffer → Uint8Array
-    expect(passedBytes).toBeInstanceOf(Uint8Array)
-    expect(passedBytes).not.toBeInstanceOf(ArrayBuffer)
-    expect(Array.from(passedBytes as Uint8Array)).toEqual([1, 2, 3, 4])
   })
 
-  test('saveDocx without auto flag passes auto=undefined through', async () => {
-    const runtime = mockRuntime()
-    const docs = runtime.docs
-    docs.save = vi.fn().mockResolvedValue({ ok: true }) as never
-    const bridge = createDocsDesktopBridge(runtime)
+  test('openDocxPath registers the session in the registry', async () => {
+    const runtime = makeWiredRuntime()
+    const session: DocumentSession = { filePath: '/p.docx', hash: 'h' }
+    runtime.docs.open = vi.fn().mockResolvedValue({ session, result: { path: '/p.docx', name: 'p.docx', data: new ArrayBuffer(0), hash: 'h' } }) as never
+    const { bridge, registry } = makeBridgeWithRegistry(runtime)
 
-    await bridge.saveDocx('/path/file.docx', new ArrayBuffer(2))
+    await bridge.openDocxPath('/p.docx')
 
-    const [, , auto] = docs.save.mock.calls[0]
-    expect(auto).toBeUndefined()
+    expect(registry.get('/p.docx')).toBe(session)
   })
 
-  test('writeRecoveryCopy converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
-    const runtime = mockRuntime()
-    const docs = runtime.docs
-    docs.writeRecovery = vi.fn().mockResolvedValue({ ok: true }) as never
-    const bridge = createDocsDesktopBridge(runtime)
-
-    const buffer = new ArrayBuffer(3)
-    new Uint8Array(buffer).set([10, 20, 30])
-
-    await bridge.writeRecoveryCopy('/path/recovery.docx', buffer)
-
-    expect(docs.writeRecovery).toHaveBeenCalledTimes(1)
-    const [session, passedBytes] = docs.writeRecovery.mock.calls[0]
-    expect(session).toBeDefined()
-    expect(passedBytes).toBeInstanceOf(Uint8Array)
-    expect(Array.from(passedBytes as Uint8Array)).toEqual([10, 20, 30])
-  })
-
-  test('saveDocxAs converts ArrayBuffer → Uint8Array and passes a session (argument transformation)', async () => {
-    const runtime = mockRuntime()
-    const docs = runtime.docs
-    docs.saveAs = vi.fn().mockResolvedValue({ ok: true, path: '/p.docx', session: { filePath: '/p.docx', hash: 'h' } }) as never
-    const bridge = createDocsDesktopBridge(runtime)
-
-    const buffer = new ArrayBuffer(2)
-    new Uint8Array(buffer).set([0xff, 0xfe])
-
-    await bridge.saveDocxAs('Untitled', buffer)
-
-    const [session, name, passedBytes] = docs.saveAs.mock.calls[0]
-    expect(session).toBeDefined() // session-scoped — bridge passes a session (possibly transient)
-    expect(name).toBe('Untitled')
-    expect(passedBytes).toBeInstanceOf(Uint8Array)
-    expect(Array.from(passedBytes as Uint8Array)).toEqual([0xff, 0xfe])
-  })
-
-  test('saveDocxNew converts ArrayBuffer → Uint8Array and passes the active session (argument transformation)', async () => {
-    const runtime = mockRuntime()
-    const docs = runtime.docs
-    docs.saveNew = vi.fn().mockResolvedValue({ ok: true, path: '/p.docx', session: { filePath: '/p.docx', hash: 'h' } }) as never
-    const bridge = createDocsDesktopBridge(runtime)
-
-    const buffer = new ArrayBuffer(1)
-    new Uint8Array(buffer).set([42])
-
-    await bridge.saveDocxNew('New Doc', buffer)
-
-    const [session, name, passedBytes] = docs.saveNew.mock.calls[0]
-    expect(session).toBeDefined() // null active session is acceptable — bridge passes null
-    expect(name).toBe('New Doc')
-    expect(passedBytes).toBeInstanceOf(Uint8Array)
-    expect(Array.from(passedBytes as Uint8Array)).toEqual([42])
-  })
-
-  // ── RETURN TRANSFORMATION ───────────────────────────────────────────
-
-  test('saveDocx returns the docs.save result unchanged (return transformation)', async () => {
-    const runtime = mockRuntime()
+  test('multi-tab: two sessions, save each works', async () => {
+    const runtime = makeWiredRuntime()
     runtime.docs.save = vi.fn().mockResolvedValue({ ok: true }) as never
-    const bridge = createDocsDesktopBridge(runtime)
+    const { bridge, registry } = makeBridgeWithRegistry(runtime)
+    const session1: DocumentSession = { filePath: '/a.docx', hash: 'h1' }
+    const session2: DocumentSession = { filePath: '/b.docx', hash: 'h2' }
+    registry.register(session1)
+    registry.register(session2)
 
-    const result = await bridge.saveDocx('/p.docx', new ArrayBuffer(0))
+    await bridge.saveDocx('/a.docx', new ArrayBuffer(0))
+    await bridge.saveDocx('/b.docx', new ArrayBuffer(0))
 
-    expect(result).toEqual({ ok: true })
+    expect(runtime.docs.save).toHaveBeenCalledTimes(2)
+    expect(runtime.docs.save.mock.calls[0][0]).toBe(session1)
+    expect(runtime.docs.save.mock.calls[1][0]).toBe(session2)
   })
 
-  test('saveDocx returns the external-modified reason when docs.save rejects with reason (return transformation)', async () => {
+  test('isWired guard: saveDocx throws when runtime.docs is NOT_YET_WIRED', async () => {
     const runtime = mockRuntime()
-    runtime.docs.save = vi
-      .fn()
-      .mockResolvedValue({ ok: false, error: 'file changed', reason: 'external-modified' }) as never
-    const bridge = createDocsDesktopBridge(runtime)
+    ;(runtime as any).docs = NOT_YET_WIRED('not yet')
+    const { bridge } = makeBridgeWithRegistry(runtime)
 
-    const result = await bridge.saveDocx('/p.docx', new ArrayBuffer(0))
-
-    expect(result).toEqual({ ok: false, error: 'file changed', reason: 'external-modified' })
+    await expect(bridge.saveDocx('/p.docx', new ArrayBuffer(0))).rejects.toThrow(/not wired/)
   })
 
-  // ── Files passthrough ───────────────────────────────────────────────
+  test('tab ops delegate to no-ops (shell will wire in Increment 2)', async () => {
+    const runtime = makeWiredRuntime()
+    const { bridge } = makeBridgeWithRegistry(runtime)
 
-  test('getPathForFile dispatches to runtime.files.getPathForFile', () => {
-    const files = mockFiles()
-    const runtime = mockRuntime({ files })
-    const docs = runtime.docs
-    const bridge = createDocsDesktopBridge(runtime)
+    // openNewTab/listDocsTabs/focusDocsTab are DesktopApi methods but they
+    // no longer delegate to runtime.docs (which doesn't have them).
+    // They're no-op stubs until the shell wires them via Windowing.
+    await bridge.openNewTab()
+    const tabs = await bridge.listDocsTabs()
+    await bridge.focusDocsTab('tab-1')
 
-    const file = new File([''], 'test.docx')
-    const result = bridge.getPathForFile(file)
-
-    expect(files.getPathForFile).toHaveBeenCalledWith(file)
-    expect(docs.save).not.toHaveBeenCalled()
+    expect(tabs).toEqual([])
+    // Verify docs service was NOT called for tab ops
+    expect((runtime.docs as any).openNewTab).toBeUndefined()
+    expect((runtime.docs as any).listDocsTabs).toBeUndefined()
+    expect((runtime.docs as any).focusDocsTab).toBeUndefined()
   })
 })

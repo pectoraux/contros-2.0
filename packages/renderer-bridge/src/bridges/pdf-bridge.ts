@@ -7,9 +7,10 @@
  */
 import type { PdfApi } from '@genoffice/pdf-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
+import { requireWired } from './require-wired.js'
 
 export function createPdfApiBridge(runtime: RuntimeContext): PdfApi {
-  const pdf = runtime.pdf
+  const pdf = requireWired(runtime.pdf, "pdfService")
   return {
     consumePending: () => pdf.consumePending(),
     readFile: (path) => pdf.readFile(path),

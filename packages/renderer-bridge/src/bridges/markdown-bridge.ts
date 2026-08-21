@@ -6,9 +6,10 @@
  */
 import type { MarkdownApi } from '@genoffice/markdown-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
+import { requireWired } from './require-wired.js'
 
 export function createMarkdownApiBridge(runtime: RuntimeContext): MarkdownApi {
-  const md = runtime.markdown
+  const md = requireWired(runtime.markdown, "markdownService")
   return {
     consumePending: () => md.consumePending(),
     readFile: (path) => md.readFile(path),

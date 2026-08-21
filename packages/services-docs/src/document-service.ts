@@ -1,44 +1,31 @@
 /**
  * DocumentServiceImpl — the Docs domain service.
  *
- * Composes @genoffice/docx-engine (parseDocx, saveDocx, buildBlankDocx) +
- * @genoffice/file-parse (parseFileToText for attachments) + platform capabilities
- * (Storage, Files, AI, Printing, FontRegistry).
+ * Composes @genoffice/docx-engine + @genoffice/file-parse + platform capabilities
+ * (Storage, Files, AI, Printing, FontRegistry, Settings).
  *
- * BOUNDARY CORRECTION (2026-08-21, per Principal Architect review):
- *   - ZERO imports of node:* (no node:fs, node:crypto, node:path, node:buffer)
- *   - ZERO imports of electron
- *   - ZERO knowledge of webContents IDs, path-grant tracking, or shell tab callbacks
- *   - Session-scoped: open() returns a DocumentSession; save() accepts it
- *   - All filesystem operations go through the Files / Storage capabilities
- *   - The byte-preserving DOCX TRANSFORMATION (saveDocx) remains in the renderer
- *     for now; this service handles PERSISTENCE only (when/where to write,
- *     external-modified check, recovery copy management)
+ * BOUNDARY CORRECTION (2026-08-21, FINAL pass):
+ *   - Removed `consumePendingOpen`, `consumeNewBlank` — shell state, not domain
+ *   - Removed `openNewTab`, `listDocsTabs`, `focusDocsTab` — shell ops, not domain
+ *   - Removed `requestOpenTab`/`requestListTabs`/`requestFocusTab` from DocsEventBus
+ *   - `saveNew` is now behavior-complete (uses Settings.getDefaultSaveDir() + Files.uniquePath())
+ *   - ZERO node:* / Electron imports (verified by architecture test)
+ *   - ZERO shell-hook deps (no canWrite/allowWrite/getActiveWcId/openTab/listTabs/focusTab)
+ *   - Session-scoped (open returns { session, result }; save accepts session)
+ *   - The shell owns the SessionRegistry (Map<filePath, DocumentSession>)
  *
- * IMPORTANT (ADR-001 Correction A): constructor injection. This class receives
- * Storage, Files, AI, Printing, FontRegistry via constructor. It does NOT call
- * getRuntime() internally.
+ * PERSISTENCE vs TRANSFORMATION: this service handles PERSISTENCE only.
+ * The byte-preserving DOCX TRANSFORMATION (saveDocx) remains in the renderer.
  *
- * The shell (apps/docs/src/main/) owns:
- *   - The map of wcId → DocumentSession
- *   - Path-grant tracking (canWrite / allowWrite)
- *   - Tab creation / listing / focus
- *   - The close-guard flow
- *   - webContents.send() forwarding of service events
- *
- * The service owns:
- *   - The persistence lifecycle (archive original, save, recovery, recents)
- *   - Attachment collection + text extraction
- *   - Font metrics lookup
- *   - Print / PDF export delegation
+ * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
  */
-import { parseDocx } from '@genoffice/docx-engine'
 import { parseFileToText } from '@genoffice/file-parse'
 import type {
   Storage,
   Files,
   AI,
   Printing,
+  Settings,
   FileStat,
 } from '@genoffice/platform'
 import type { DocumentService, DocumentSession } from '@genoffice/runtime-contracts'
@@ -48,7 +35,6 @@ import type {
   AttachmentAddResult,
   AttachmentReadResult,
   AttachmentImageResult,
-  DocsTabInfo,
   MenuCommand,
 } from '@genoffice/docs-shared'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
@@ -62,7 +48,7 @@ import type {
 
 import { isExternallyModified, type DiskFileState } from './external-change-impl.js'
 
-// ── Constants (mirror apps/docs/src/main/docs-main.ts) ───────────────────
+// ── Constants ──────────────────────────────────────────────────────────
 const ATTACHMENT_EXTS = new Set([
   'docx', 'xlsx', 'pptx', 'pdf', 'txt', 'md', 'markdown', 'csv',
   'png', 'jpg', 'jpeg', 'gif', 'webp',
@@ -77,8 +63,13 @@ const IMAGE_MIME: Record<string, 'image/png' | 'image/jpeg' | 'image/gif'> = {
 }
 const RECENT_FILES_MAX = 50
 
-// ── EventBus: how the service tells the shell about push events ───────
-// The shell subscribes to these and forwards to webContents.send().
+/**
+ * DocsEventBus — DOMAIN-ONLY events. No shell commands.
+ *
+ * The shell subscribes to these and forwards to webContents.send().
+ * The service publishes domain events; it does NOT issue shell commands
+ * (no requestOpenTab / requestListTabs / requestFocusTab — those were removed).
+ */
 export interface DocsEventBus {
   opened: (result: OpenFileResult) => void
   renamed: (paths: { oldPath: string; newPath: string }) => void
@@ -86,12 +77,6 @@ export interface DocsEventBus {
   menuCommand: (command: MenuCommand, payload?: string) => void
   closeCheck: () => void
   closeSaveRequest: () => void
-  /** Request the shell to open a new tab. The shell decides how. */
-  requestOpenTab?: (openPath?: string, opts?: { newBlank?: boolean }) => void
-  /** Request the list of open docs tabs from the shell. */
-  requestListTabs?: () => DocsTabInfo[]
-  /** Request the shell to focus a tab. */
-  requestFocusTab?: (id: string) => void
 }
 
 // ── Dependencies (capability-only — NO shell hooks, NO wcId) ──────────
@@ -100,6 +85,7 @@ export interface DocumentServiceDeps {
   files: Files
   ai: AI
   printing: Printing
+  settings: Settings
   /** FontRegistry — passed in (constructed by platform-electron). */
   fontRegistry: { fontMetrics(family: string): Promise<FaceVerticalMetrics | null> }
 }
@@ -107,8 +93,9 @@ export interface DocumentServiceDeps {
 /**
  * DocumentServiceImpl — PURE DOMAIN, no node:* or electron imports.
  *
- * Persistence-only (the byte-preserving DOCX transformation stays in the renderer).
- * Session-scoped (open() returns a session; save() accepts it).
+ * Every method is either EXTRACTED AND BEHAVIOR-COMPLETE or explicitly
+ * removed (not part of this extraction). See PHASE-1-FINAL-CORRECTION.md
+ * for the method classification table.
  */
 export class DocumentServiceImpl implements DocumentService {
   private readonly eventListeners = {
@@ -172,19 +159,6 @@ export class DocumentServiceImpl implements DocumentService {
     }
   }
 
-  async consumePendingOpen(): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
-    // The pendingOpenPath queue lives in the shell (apps/docs/src/main/docs-main.ts).
-    // The shell calls this.open(path) when there's a pending path.
-    // This method exists for API completeness but is a no-op when called directly.
-    return null
-  }
-
-  async consumeNewBlank(): Promise<boolean> {
-    // The pendingNewBlankIds set lives in the shell.
-    // Same as consumePendingOpen — shell orchestrates.
-    return false
-  }
-
   // ── Save (persistence only — renderer produces the bytes) ───────────
 
   async save(
@@ -195,8 +169,6 @@ export class DocumentServiceImpl implements DocumentService {
     // External-modified check (uses Files.stat, not statSync)
     if (session.diskState && (await this.checkExternalModified(session.filePath, session.diskState))) {
       if (auto === true) return { ok: false, reason: 'external-modified', session }
-      // The shell shows the Overwrite/Cancel dialog (shell orchestration).
-      // For now, fail with reason — the shell intercepts this return.
       return { ok: false, reason: 'external-modified', session }
     }
 
@@ -211,7 +183,7 @@ export class DocumentServiceImpl implements DocumentService {
         diskState: stat ? { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash } : session.diskState,
       }
       // Clear recovery copy (via Storage capability)
-      await this.deps.storage.deleteBlob('recovery:' + this.sha1Hash(session.filePath))
+      await this.deps.storage.deleteBlob('recovery:' + (await this.sha1Hash(session.filePath)))
       // Update recent files
       await this.pushRecent(session.filePath)
       return { ok: true, session: updatedSession }
@@ -249,29 +221,34 @@ export class DocumentServiceImpl implements DocumentService {
   }
 
   async saveNew(
-    _session: DocumentSession | null,
     defaultName: string,
     data: Uint8Array,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }> {
-    // The default save dir is resolved by the Settings capability (passed via deps).
-    // For now, we use Files.uniquePath with a relative default — the shell resolves the absolute dir.
-    // Actually, we need the default save dir. Let's add it as a method on Settings, but since
-    // Settings isn't in our deps, we use a callback. For Phase 1 increment 1, we accept that
-    // the shell provides the absolute default save dir via the EventBus or a separate dep.
-    //
-    // For this corrected skeleton: throw 'not yet implemented' — the saveNew path requires
-    // the Settings capability, which isn't in DocumentServiceDeps. This is a known gap;
-    // the next increment adds Settings to the deps.
-    throw new Error(
-      'DocumentServiceImpl.saveNew not yet implemented — requires Settings capability in deps ' +
-        '(next increment adds it).',
-    )
+    try {
+      // Resolve the default save dir via Settings capability
+      const defaultSaveDir = await this.deps.settings.getDefaultSaveDir()
+      // Find a non-conflicting path via Files.uniquePath
+      const filePath = await this.deps.files.uniquePath(defaultSaveDir, defaultName)
+      // Write the bytes
+      await this.deps.files.write(filePath, data)
+      const stat = await this.deps.files.stat(filePath)
+      const hash = await this.hashBytes(data)
+      const session: DocumentSession = {
+        filePath,
+        hash,
+        diskState: stat ? { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash } : undefined,
+      }
+      await this.pushRecent(filePath)
+      return { ok: true, path: filePath, session }
+    } catch (err) {
+      return { ok: false, error: String(err) }
+    }
   }
 
   async writeRecovery(session: DocumentSession, data: Uint8Array): Promise<{ ok: boolean }> {
     try {
       // Recovery copies are binary blobs keyed by sha1(filePath) — via Storage capability
-      await this.deps.storage.writeBlob('recovery:' + this.sha1Hash(session.filePath), data)
+      await this.deps.storage.writeBlob('recovery:' + (await this.sha1Hash(session.filePath)), data)
       return { ok: true }
     } catch {
       return { ok: false }
@@ -329,7 +306,6 @@ export class DocumentServiceImpl implements DocumentService {
     // Save the pasted image to a temp blob — via Storage capability
     const key = 'pasted-image:' + Date.now() + '.' + ext
     await this.deps.storage.writeBlob(key, new Uint8Array(data))
-    // Return metadata (path is the blob key; the shell resolves it to a real path if needed)
     return {
       accepted: [{ path: key, name: `pasted.${ext}`, ext, sizeBytes: data.byteLength }],
       rejected: [],
@@ -439,21 +415,7 @@ export class DocumentServiceImpl implements DocumentService {
     return this.deps.printing.saveMergedPdf(defaultName, base64Parts, filePath)
   }
 
-  // ── Tab management (delegates to EventBus; shell decides how to open/focus) ──
-
-  async openNewTab(openPath?: string | null): Promise<void> {
-    this.eventBus.requestOpenTab?.(openPath ?? undefined, openPath ? undefined : { newBlank: true })
-  }
-
-  async listDocsTabs(): Promise<DocsTabInfo[]> {
-    return this.eventBus.requestListTabs?.() ?? []
-  }
-
-  async focusDocsTab(id: string): Promise<void> {
-    this.eventBus.requestFocusTab?.(id)
-  }
-
-  // ── AI (delegates to runtime.ai — Phase 1 increment 1: not yet wired) ──
+  // ── AI (delegates to runtime.ai) ─────────────────────────────────────
 
   async getAiSettings(): Promise<AiSettings> {
     return this.deps.ai.getSettings()
@@ -479,7 +441,7 @@ export class DocumentServiceImpl implements DocumentService {
     return this.deps.ai.onStream(handler)
   }
 
-  // ── Events (push from service to shell; shell forwards to webContents) ──
+  // ── Domain events (push from service to shell; shell forwards to webContents) ──
 
   onOpened(handler: (result: OpenFileResult) => void): () => void {
     this.eventListeners.opened.add(handler)
@@ -508,7 +470,6 @@ export class DocumentServiceImpl implements DocumentService {
 
   reportCloseCheck(_state: { dirty: boolean; autoSave: boolean; filePath?: string | null }): void {
     // Forwarded to the shell close-guard flow via EventBus (if connected).
-    // The shell subscribes to onCloseCheck and intercepts the dialog.
   }
 
   onCloseSaveRequest(handler: () => void): () => void {
@@ -527,14 +488,12 @@ export class DocumentServiceImpl implements DocumentService {
   // ── Internal helpers (PURE LOGIC — no fs access) ────────────────────
 
   /**
-   * Compute a sha256 hash of bytes. Uses the AI capability's chat function
-   * indirectly... actually, hashing is a pure computation. We use the
-   * Web Crypto API (crypto.subtle) which is available in both Node 22+
-   * and browsers — no node:* import needed.
+   * Compute a sha256 hash of bytes. Uses the Web Crypto API
+   * (crypto.subtle) which is available in both Node 22+ and browsers —
+   * no node:* import needed.
    */
   private async hashBytes(bytes: Uint8Array): Promise<string> {
-    // Copy into a fresh ArrayBuffer to satisfy crypto.subtle's BufferSource typing
-    // (avoids the SharedArrayBuffer incompatibility with the underlying buffer).
+    // Copy into a fresh ArrayBuffer to satisfy crypto.subtle's BufferSource typing.
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
     const digest = await crypto.subtle.digest('SHA-256', copy)

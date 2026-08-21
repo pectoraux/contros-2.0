@@ -4,9 +4,10 @@
  */
 import type { DesktopApi } from '@genoffice/sheets-shared'
 import type { RuntimeContext } from '@genoffice/runtime-contracts'
+import { requireWired } from './require-wired.js'
 
 export function createSheetsDesktopApiBridge(runtime: RuntimeContext): DesktopApi {
-  const sheets = runtime.sheets
+  const sheets = requireWired(runtime.sheets, "sheetsService")
   return {
     // ── Settings (delegate to runtime.settings) ───────────────────────
     getLanguage: () => runtime.settings.getLanguage() as never,

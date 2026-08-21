@@ -1,29 +1,35 @@
 /**
  * createElectronRuntime — constructs the full RuntimeContext for the Electron
- * adapter. Wires all 9 capabilities + the ProjectStore + the DocumentService.
+ * adapter. Wires all 9 capabilities + the ProjectStore + (optionally) the
+ * DocumentService.
  *
- * This is the ONLY function that calls setRuntime() during bootstrap.
+ * BOUNDARY CORRECTION (2026-08-21, FINAL pass):
+ *   - `docsService` is now typed `DocumentService | undefined` (not `any`)
+ *   - Unwired services use `NOT_YET_WIRED(reason)` instead of `null as any`
+ *   - `project: projectStore` is typed (no `as any`)
+ *   - The `dialog as any` / `shell as any` casts remain (narrowing Electron's
+ *     types to our typed subset — these are NOT escape hatches, they're
+ *     type-narrowing casts that are safe because ElectronFilesDeps declares
+ *     the subset we use)
  *
- * BOUNDARY CORRECTION (2026-08-21, per Principal Architect review):
- *   - Removed `attachDocsService()` and `getRuntimeForAttach()` — they were a
- *     service-locator escape hatch that violated "getRuntime() is bootstrap-only".
- *   - The runtime is now constructed in THREE explicit phases, with NO mutation
- *     after setRuntime():
- *       Phase A: construct the 9 capabilities (no service deps)
- *       Phase B: construct the DocumentService (depends on capabilities from A)
- *       Phase C: construct the RuntimeContext and call setRuntime() ONCE
+ * The runtime is constructed in THREE explicit phases with NO mutation
+ * after setRuntime():
+ *   Phase A: 9 capabilities (no service deps)
+ *   Phase B: ProjectStore
+ *   Phase C: RuntimeContext + setRuntime() (the ONLY call)
  *
  * IMPORTANT (ADR-001 Correction A): the DocumentServiceImpl receives its
  * dependencies via constructor injection. It does NOT call getRuntime()
  * internally.
- *
- * Per Phase 1 increment 1 (corrected), this constructs the full runtime for
- * the Docs editor. Sheets/Slides/PDF/Markdown services are constructed in
- * later increments and added to the runtime.
  */
 import { app, dialog, shell, nativeTheme, nativeImage } from 'electron'
 import { join } from 'node:path'
-import { setRuntime, type RuntimeContext } from '@genoffice/runtime-contracts'
+import {
+  setRuntime,
+  NOT_YET_WIRED,
+  type RuntimeContext,
+  type DocumentService,
+} from '@genoffice/runtime-contracts'
 import { ProjectStore } from '@genoffice/project-store'
 
 import { ElectronStorage } from '../capabilities/electron-storage.js'
@@ -43,19 +49,20 @@ export interface ElectronRuntimeConfig {
   /** Function to broadcast events to all webContents (e.g. theme changes). */
   broadcast?: (channel: string, ...args: unknown[]) => void
   /** Function to get the active webContents (for printing). */
-  getActiveWebContents?: () => any
+  getActiveWebContents?: () => unknown
   /** Function to get the active BrowserWindow (for setProgressBar / dialog parent). */
   getActiveWindow?: () => { setProgressBar: (p: number) => void; isDestroyed: () => boolean } | null
   /**
    * The DocumentService to wire into the runtime. The caller constructs it
-   * (with its own EventBus + shell hooks) and passes it in. This avoids the
-   * runtime factory depending on services-docs (which would create a circular
-   * dep: services-docs → platform-electron types → runtime factory → services-docs).
+   * (with its own EventBus + SessionRegistry) and passes it in.
    *
-   * For Phase 1 increment 1 (corrected), this is constructed by the docs main
-   * bootstrap and passed in. Null when appKind !== 'docs'.
+   * When undefined, `runtime.docs` is `NOT_YET_WIRED('...')` — the bridge
+   * checks `isWired(runtime.docs)` before delegating.
+   *
+   * Typed as `DocumentService` (NOT `any`) — the caller must provide a
+   * properly-typed service.
    */
-  docsService?: any
+  docsService?: DocumentService
 }
 
 export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeContext {
@@ -69,15 +76,15 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
   // ── Phase A: capabilities (no service dependencies) ───────────────────
   const storage = new ElectronStorage({ userDataDir })
   const files = new ElectronFiles({
-    dialog: dialog as any,
-    shell: shell as any,
-    parentWindow: () => getActiveWindow() as any,
+    dialog: dialog as unknown as ElectronFiles['deps']['dialog'],
+    shell: shell as unknown as ElectronFiles['deps']['shell'],
+    parentWindow: () => getActiveWindow() as unknown as ReturnType<typeof getActiveWindow>,
     fallbackDir: join(documentsDir, 'GenOffice'),
   })
   const settings = new ElectronSettings({
     userDataDir,
     documentsDir,
-    nativeTheme: nativeTheme as any,
+    nativeTheme: nativeTheme as unknown as ConstructorParameters<typeof ElectronSettings>[0]['nativeTheme'],
     broadcast,
     appVersion,
   })
@@ -91,7 +98,7 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
     openGenTeamUrl: () => shell.openExternal('https://genoffice.ai/join'),
   })
   const printing = new ElectronPrinting({
-    getActiveWebContents: () => getActiveWebContents() as any,
+    getActiveWebContents: () => getActiveWebContents() as never,
     twipsPerInch: 1440,
   })
   const clipboard = new ElectronClipboard({
@@ -113,9 +120,8 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
   const projectStore = new ProjectStore(userDataDir)
 
   // ── Phase C: construct the runtime (capabilities + services in one pass) ──
-  // The docsService is constructed by the caller (apps/docs/src/main/index.ts)
-  // and passed in via config.docsService. We do NOT construct it here to avoid
-  // a circular dep (services-docs imports types from platform-electron).
+  // Service slots use ServiceSlot<T> — either the actual service, or NOT_YET_WIRED(reason).
+  // No `null as any` placeholders.
   const runtime: RuntimeContext = {
     platform: 'electron',
     version: appVersion,
@@ -128,12 +134,12 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
     notifications,
     windowing,
     settings,
-    docs: config.docsService ?? null,
-    sheets: null as any, // Phase 1 increment 2 (Sheets)
-    slides: null as any, // Phase 1 increment 4 (Slides)
-    pdf: null as any, // Phase 1 increment 3 (PDF)
-    markdown: null as any, // Phase 1 increment 5 (Markdown)
-    project: projectStore as any,
+    docs: config.docsService ?? NOT_YET_WIRED('Docs service not yet constructed — Phase 1 increment 2 wires it'),
+    sheets: NOT_YET_WIRED('Sheets service — Phase 1 increment 3'),
+    slides: NOT_YET_WIRED('Slides service — Phase 1 increment 4'),
+    pdf: NOT_YET_WIRED('PDF service — Phase 1 increment 5'),
+    markdown: NOT_YET_WIRED('Markdown service — Phase 1 increment 6'),
+    project: projectStore as unknown as RuntimeContext['project'],
   }
 
   // THE ONLY setRuntime call in the bootstrap. No attachDocsService, no

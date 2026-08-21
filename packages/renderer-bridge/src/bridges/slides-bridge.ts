@@ -10,9 +10,10 @@
  */
 import type { SlidesApi } from '@genoffice/slides-shared'
 import type { RuntimeContext, PresentationService } from '@genoffice/runtime-contracts'
+import { requireWired } from './require-wired.js'
 
 export function createSlidesApiBridge(runtime: RuntimeContext): SlidesApi {
-  const slides: PresentationService = runtime.slides
+  const slides: PresentationService = requireWired(runtime.slides, 'PresentationService')
 
   // Spread all slides-specific methods (editText, editTransform, addElement, etc.).
   // The cross-cutting methods below override any same-named properties.

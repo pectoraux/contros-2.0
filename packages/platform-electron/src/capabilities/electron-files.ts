@@ -180,11 +180,14 @@ export class ElectronFiles implements Files {
 
   async uniquePath(dir: string, fileName: string): Promise<string> {
     mkdirSync(dir, { recursive: true })
-    const base = fileName.replace(/\.docx$/i, '')
-    let candidate = join(dir, `${base}.docx`)
+    // Strip ANY extension (not just .docx) — e.g. foo.pdf → foo.pdf.pdf is wrong;
+    // we want foo.pdf → foo 1.pdf if foo.pdf already exists.
+    const base = fileName.replace(/\.[^.]+$/, '')
+    const ext = fileName.includes('.') ? '.' + fileName.split('.').pop() : ''
+    let candidate = join(dir, base + ext)
     let n = 1
     while (existsSync(candidate)) {
-      candidate = join(dir, `${base} ${n}.docx`)
+      candidate = join(dir, `${base} ${n}${ext}`)
       n++
     }
     return candidate

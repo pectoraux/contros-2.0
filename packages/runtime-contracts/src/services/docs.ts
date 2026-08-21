@@ -1,28 +1,26 @@
 /**
  * DocumentService — domain runtime service for the docs (`.docx`) editor.
  *
- * Composes @genoffice/docx-engine with platform capabilities (Storage, Files,
- * AI, Printing) to deliver docs product capabilities. The bridge
- * (createDocsDesktopBridge) maps the existing window.desktop API to these
- * methods, performing ArrayBuffer → Uint8Array conversion where needed.
+ * BOUNDARY CORRECTION (2026-08-21, FINAL pass):
+ *   - Removed `consumePendingOpen`, `consumeNewBlank` — the pending-open
+ *     queue and new-blank flag are shell state, not domain state. They
+ *     stay in `apps/docs/src/main/docs-main.ts`.
+ *   - Removed `openNewTab`, `listDocsTabs`, `focusDocsTab` — tab/window
+ *     orchestration belongs in the shell, not in the domain service. The
+ *     bridge delegates these to `runtime.windowing` instead.
+ *   - `saveNew` is now behavior-complete (uses `Settings.getDefaultSaveDir()`
+ *     + `Files.uniquePath()`).
  *
- * SESSION-SCOPED (corrected 2026-08-21 per Principal Architect review):
- *   The service does NOT know about webContents IDs, path-grant tracking, or
- *   shell tab management. It returns a `DocumentSession` from `open()` and
- *   accepts it in `save()` / `saveAs()` / `writeRecovery()` etc. The shell
- *   (apps/docs/src/main/) owns the map of wcId → DocumentSession.
+ * SESSION-SCOPED: open() returns { session, result }; save() accepts the
+ * session. The shell owns the wcId → DocumentSession map (via a
+ * SessionRegistry). The service does not know about wcId.
+ *
+ * PERSISTENCE vs TRANSFORMATION: this service handles PERSISTENCE only.
+ * The byte-preserving DOCX TRANSFORMATION (saveDocx from
+ * @genoffice/docx-engine) remains in the renderer for now.
  *
  * IMPORTANT (ADR-001 Correction A): implementations receive their dependencies
  * via constructor injection. They MUST NOT call getRuntime() internally.
- *
- * PERSISTENCE vs TRANSFORMATION (corrected 2026-08-21):
- *   This service handles PERSISTENCE (when/where to write, external-modified
- *   check, recovery copy management). The byte-preserving DOCX TRANSFORMATION
- *   (saveDocx from @genoffice/docx-engine) remains in the renderer for now;
- *   the renderer produces the bytes and passes them to save(). A future
- *   increment may move the transformation into the service, but only when
- *   the renderer can be unfrozen and the bridge can pass structured save
- *   plans instead of raw bytes.
  */
 import type {
   AiSettings,
@@ -38,13 +36,12 @@ import type {
   AttachmentAddResult,
   AttachmentReadResult,
   AttachmentImageResult,
-  DocsTabInfo,
   MenuCommand,
 } from '@genoffice/docs-shared'
 
 /**
  * Per-document session. Returned from open() and accepted by save() etc.
- * The shell holds the reference and tracks the wcId → session map.
+ * The shell holds the reference (in a SessionRegistry) keyed by file path.
  */
 export interface DocumentSession {
   /** The file path the renderer is editing. */
@@ -67,17 +64,12 @@ export interface DocumentService {
    * Null when the file can't be read.
    */
   open(path: string): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
-  /** Consume a file queued at tab creation; null when none pending. (Shell orchestrates the queue.) */
-  consumePendingOpen(): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
-  /** Returns true once when this tab was opened via "New Document". (Shell orchestrates the queue.) */
-  consumeNewBlank(): Promise<boolean>
 
   // ── Save (persistence only — renderer produces the bytes) ──────────
   /**
    * Persist the bytes the renderer produced. Checks external-modified,
    * writes atomically via Files.write(), clears the recovery copy, updates
-   * recents. The byte-preserving DOCX TRANSFORMATION (saveDocx from
-   * @genoffice/docx-engine) remains in the renderer for now.
+   * recents. Returns the updated session (with new diskState).
    */
   save(
     session: DocumentSession,
@@ -90,15 +82,18 @@ export interface DocumentService {
     defaultName: string,
     data: Uint8Array,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
-  /** First save of a new document: silently write into the default folder. Returns the new session. */
+  /**
+   * First save of a new document: silently write into the default save
+   * folder (resolved via Settings.getDefaultSaveDir() + Files.uniquePath()).
+   * Returns the new session.
+   */
   saveNew(
-    session: DocumentSession | null,
     defaultName: string,
     data: Uint8Array,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
   /** Crash-recovery copy of a dirty document. */
   writeRecovery(session: DocumentSession, data: Uint8Array): Promise<{ ok: boolean }>
-  /** Recent files list (paths). */
+  /** Recent files list (paths that still exist). */
   recentFiles(): Promise<string[]>
 
   // ── Images & attachments ─────────────────────────────────────────────
@@ -134,18 +129,7 @@ export interface DocumentService {
     outPath?: string,
   ): Promise<{ ok: boolean; path?: string; error?: string }>
 
-  // ── Tab management (delegates to EventBus; shell subscribes) ───────
-  /**
-   * Request the shell to open a new tab. The shell decides whether to
-   * create a new BrowserWindow, a WebContentsView, or focus an existing tab.
-   */
-  openNewTab(openPath?: string | null): Promise<void>
-  /** Request the list of open docs tabs from the shell. */
-  listDocsTabs(): Promise<DocsTabInfo[]>
-  /** Request the shell to focus a docs tab by id. */
-  focusDocsTab(id: string): Promise<void>
-
-  // ── AI (delegates to runtime.ai — Phase 1 increment 1: not yet wired) ──
+  // ── AI (delegates to runtime.ai) ───────────────────────────────────
   getAiSettings(): Promise<AiSettings>
   setAiSettings(settings: AiSettings): Promise<void>
   aiChat(request: AiChatRequest): Promise<AiChatResponse>
@@ -153,7 +137,7 @@ export interface DocumentService {
   aiStreamCancel(requestId: string): Promise<void>
   onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
 
-  // ── Events (push from service to shell; shell forwards to webContents) ──
+  // ── Domain events (push from service to shell; shell forwards to webContents) ──
   onOpened(handler: (result: OpenFileResult) => void): () => void
   onRenamed(handler: (paths: { oldPath: string; newPath: string }) => void): () => void
   onTeardown(handler: () => void): () => void

@@ -20,6 +20,10 @@
  *   - window.projectApi (ProjectApi, 10 methods) — used by editor renderers
  *   - window.aiOfficeProject (ProjectHomeApi, 7 methods) — used by shell renderer
  *
+ * BOUNDARY CORRECTION (2026-08-21, final): createDocsDesktopBridge now takes
+ * a DocsBridgeDeps object (runtime + SessionRegistry) instead of just the runtime.
+ * The registry is owned by the shell; the bridge queries it for sessions.
+ *
  * Authoritative contract source: the actual checked-in TypeScript interface files
  * under apps/ (in each app's src/shared/ directory). ADR pseudocode is illustrative only.
  */
@@ -27,7 +31,7 @@ export { createHomeBridge } from './bridges/home-bridge.js'
 export { createTabsBridge } from './bridges/tabs-bridge.js'
 export { createProjectApiBridge, createProjectHomeBridge } from './bridges/project-bridge.js'
 export { createUpdateBridge } from './bridges/update-bridge.js'
-export { createDocsDesktopBridge } from './bridges/docs-bridge.js'
+export { createDocsDesktopBridge, type DocsBridgeDeps } from './bridges/docs-bridge.js'
 export { createSheetsDesktopApiBridge } from './bridges/sheets-bridge.js'
 export { createSlidesApiBridge } from './bridges/slides-bridge.js'
 export { createSlidesDesktopBridge } from './bridges/slides-desktop-bridge.js'

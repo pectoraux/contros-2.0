@@ -1,19 +1,16 @@
 /**
  * RuntimeContext — the platform-neutral runtime bundle.
  *
- * Holds the 9 platform capabilities + 5 domain services + the project store.
- * Produced by a Layer 4 adapter (ElectronRuntime or WebRuntime) and consumed
- * by the renderer-bridge factories.
+ * BOUNDARY CORRECTION (2026-08-21, final pass):
+ *   - Service slots use `ServiceSlot<T>` to explicitly represent the
+ *     partial-migration state. No more `null as any` placeholders.
+ *   - `NOT_YET_WIRED(reason)` is the typed marker for an unwired service.
+ *   - `isWired(slot)` is the type guard.
  *
  * ARCHITECTURAL RULE (ADR-001 Correction A):
  *   getRuntime() / setRuntime() is the SOLE permitted runtime mechanism in
  *   this package. Domain services MUST NOT call getRuntime() internally —
  *   they receive their dependencies via constructor injection.
- *
- *   getRuntime() is bootstrap infrastructure (called once at app startup
- *   by the Electron preload or the Web iframe bootstrap), NOT a domain
- *   dependency. The renderer-bridge factories receive the runtime as a
- *   parameter; they do not call getRuntime() either.
  */
 import type {
   Storage,
@@ -34,13 +31,32 @@ import type { PdfService } from './services/pdf.js'
 import type { MarkdownService } from './services/markdown.js'
 import type { ProjectStoreService } from './services/project.js'
 
+/**
+ * A service slot during migration: either the implemented service, or a
+ * typed marker indicating it's not yet wired.
+ *
+ * This replaces `null as any` placeholders with an explicit, type-safe
+ * representation of the partial-migration state.
+ */
+export type ServiceSlot<T> = T | { readonly __notYetWired: true; readonly reason: string }
+
+/** Marker for an unwired service slot. */
+export function NOT_YET_WIRED(reason: string): { readonly __notYetWired: true; readonly reason: string } {
+  return { __notYetWired: true as const, reason }
+}
+
+/** Type guard: is this service slot wired (i.e. is it the actual service, not the marker)? */
+export function isWired<T>(slot: ServiceSlot<T>): slot is T {
+  return slot !== null && typeof slot === 'object' && !((slot as { __notYetWired?: unknown }).__notYetWired)
+}
+
 export interface RuntimeContext {
   /** Which adapter produced this runtime. */
   readonly platform: 'electron' | 'web'
   /** Application version (from package.json / app.getVersion). */
   readonly version: string
 
-  // ── Platform capabilities (Layer 3) ─────────────────────────────────
+  // ── Platform capabilities (Layer 3) — always present ──────────────
   readonly storage: Storage
   readonly files: Files
   readonly identity: Identity
@@ -51,12 +67,13 @@ export interface RuntimeContext {
   readonly windowing: Windowing
   readonly settings: Settings
 
-  // ── Domain services (Layer 2) ───────────────────────────────────────
-  readonly docs: DocumentService
-  readonly sheets: SpreadsheetService
-  readonly slides: PresentationService
-  readonly pdf: PdfService
-  readonly markdown: MarkdownService
+  // ── Domain services (Layer 2) — ServiceSlot<T> explicitly represents
+  //    the migration state. Use isWired() before delegating. ───────────
+  readonly docs: ServiceSlot<DocumentService>
+  readonly sheets: ServiceSlot<SpreadsheetService>
+  readonly slides: ServiceSlot<PresentationService>
+  readonly pdf: ServiceSlot<PdfService>
+  readonly markdown: ServiceSlot<MarkdownService>
 
   // ── Project store (cross-editor — chat history + file grouping) ─────
   readonly project: ProjectStoreService

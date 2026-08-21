@@ -126,4 +126,31 @@ describe('@genoffice/services-docs architecture boundary', () => {
     const hits = scanForTokens(SRC, ['attachDocsService', 'getRuntimeForAttach', "require('@genoffice/runtime-contracts')"])
     expect(hits).toEqual([])
   })
+
+  test('ZERO tab/window operations in DocumentService interface (openNewTab / listDocsTabs / focusDocsTab)', () => {
+    // These methods were removed from DocumentService — they're shell ops.
+    const hits = scanForTokens(SRC, [
+      'openNewTab(',
+      'listDocsTabs(',
+      'focusDocsTab(',
+      'requestOpenTab',
+      'requestListTabs',
+      'requestFocusTab',
+    ]).filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO stub methods (no "return null" / "return false" / "throw new Error" as the method body for consumePendingOpen / consumeNewBlank)', () => {
+    // These methods were removed from DocumentService — they're shell state.
+    const hits = scanForTokens(SRC, ['consumePendingOpen', 'consumeNewBlank'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO `any` type assertions in DocumentServiceImpl', () => {
+    // The service must be fully typed — no `as any` escape hatches.
+    const hits = scanForTokens(SRC, [' as any'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
 })
