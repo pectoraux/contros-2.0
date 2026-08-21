@@ -1,0 +1,28 @@
+{
+  "name": "@genoffice/platform-electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenOffice Electron adapter — reference implementation of the @genoffice/platform capability interfaces. Wraps existing Electron + node:fs + electron-utils + font-metrics + ai-search + project-store + i18n code behind the platform-neutral contract.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@genoffice/runtime-contracts": "*",
+    "@genoffice/platform": "*",
+    "@genoffice/electron-utils": "*",
+    "@genoffice/font-metrics": "*",
+    "@genoffice/ai-provider": "*",
+    "@genoffice/ai-search": "*",
+    "@genoffice/project-store": "*",
+    "@genoffice/i18n": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

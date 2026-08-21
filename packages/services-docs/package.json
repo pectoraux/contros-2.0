@@ -1,0 +1,26 @@
+{
+  "name": "@genoffice/services-docs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenOffice Docs domain service — DocumentServiceImpl composing @genoffice/docx-engine + platform capabilities. Implements the byte-preserving save plan and the open/save/export lifecycle.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@genoffice/runtime-contracts": "*",
+    "@genoffice/platform": "*",
+    "@genoffice/docx-engine": "*",
+    "@genoffice/file-parse": "*",
+    "@genoffice/ai-provider": "*",
+    "@genoffice/font-metrics": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
