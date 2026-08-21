@@ -67,6 +67,14 @@ async function main() {
     adminUserId = existingAdmin.id
     // Update password via repository method
     await users.updatePasswordHash(adminUserId, hashPassword(adminPassword))
+    // Ensure web auth binding exists (for session resolver) — idempotent
+    const webBinding = await users.getBindingBySubject('web', adminUserId)
+    if (!webBinding) {
+      await users.createBinding({
+        id: entityId(ID_PREFIX.authBinding), userId: adminUserId, provider: 'web', subject: adminUserId,
+        createdAt: new Date().toISOString(), lastUsedAt: null,
+      })
+    }
     console.log('  ✓ admin password updated')
   } else {
     adminUserId = entityId(ID_PREFIX.user)
