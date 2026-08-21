@@ -1,44 +1,15 @@
 /**
- * Migrated Docs IPC handlers.
+ * Migrated Docs IPC handlers — behavioral fidelity version.
  *
- * Replaces specific IPC handlers in docs-main.ts with implementations
- * that delegate to the runtime (DocumentService + coordinator + capabilities).
- *
- * Called AFTER registerDocsIpc() — the handlers here override the existing ones
- * via ipcMain.removeHandler + ipcMain.handle.
- *
- * Only handlers classified as "domain behavior" or "platform primitive" are
- * migrated. Shell/window handlers stay in docs-main.ts.
- *
- * Migrated handlers:
- *   docs:open          → coordinator.openDocx()
- *   docs:open-path     → coordinator.openDocxPath(path)
- *   docs:save          → coordinator.saveDocx(path, data, auto)
- *   docs:save-as       → coordinator.saveDocxAs(defaultName, data)
- *   docs:save-new      → coordinator.saveDocxNew(defaultName, data)
- *   docs:write-recovery → coordinator.writeRecovery(path, data)
- *   docs:recent        → docsService.recentFiles()
- *   docs:pick-image    → docsService.pickImage()
- *   docs:font-metrics  → fontRegistry.fontMetrics(family)
- *   docs:print         → runtime.printing.print()
- *   docs:export-pdf    → docsService.exportPdf(...)
- *   docs:print-pdf-buffer → docsService.printPdfBuffer(...)
- *   docs:save-merged-pdf → docsService.saveMergedPdf(...)
- *
- * NOT migrated (stay in docs-main.ts):
- *   ai:*               → ElectronAI.stream/chat throws; keep existing handlers
- *   docs:consume-*     → shell state (pending-open, new-blank)
- *   docs:close-*       → shell state (close-guard)
- *   docs:view-menu-state → shell state
- *   win:*              → shell state (tab management)
- *   project:*          → could migrate later
- *   files:*            → could migrate later
+ * Preserves all per-renderer semantics by passing wcId + event.sender
+ * to the coordinator.
  */
-import { ipcMain } from 'electron'
+import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { Buffer } from 'node:buffer'
-import type { RuntimeContext, DocumentService } from '@genoffice/runtime-contracts'
+import type { DocumentService } from '@genoffice/runtime-contracts'
 import type { DocsShellCoordinatorImpl } from './docs-coordinator-impl.js'
 import type { ElectronFontRegistry } from '@genoffice/platform-electron'
+import type { RuntimeContext } from '@genoffice/runtime-contracts'
 
 export interface MigratedHandlersDeps {
   runtime: RuntimeContext
@@ -52,15 +23,24 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
 
   // ── docs:open ──────────────────────────────────────────────────────
   ipcMain.removeHandler('docs:open')
-  ipcMain.handle('docs:open', async () => {
-    const r = await coordinator.openDocx()
+  ipcMain.handle('docs:open', async (event: IpcMainInvokeEvent) => {
+    const r = await coordinator.openDocx(event.sender.id)
+    if (r) {
+      // Forward push event to the renderer
+      // The renderer's preload listens for 'docs:opened' — the existing code
+      // sends it from loadDocx via the shell. We send it here.
+      // But wait — the existing code sends 'docs:opened' only for external
+      // opens (Finder/Explorer drop), not for dialog opens. For dialog opens,
+      // the return value IS the opened result. So we DON'T send docs:opened
+      // here — the renderer gets the result from the invoke() return.
+    }
     return r?.result ?? null
   })
 
   // ── docs:open-path ──────────────────────────────────────────────────
   ipcMain.removeHandler('docs:open-path')
-  ipcMain.handle('docs:open-path', async (_event, filePath: string) => {
-    const r = await coordinator.openDocxPath(filePath)
+  ipcMain.handle('docs:open-path', async (event: IpcMainInvokeEvent, filePath: string) => {
+    const r = await coordinator.openDocxPath(event.sender.id, filePath)
     return r?.result ?? null
   })
 
@@ -68,8 +48,8 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.removeHandler('docs:save')
   ipcMain.handle(
     'docs:save',
-    async (_event, filePath: string, data: ArrayBuffer, auto?: boolean) => {
-      return coordinator.saveDocx(filePath, new Uint8Array(data), auto === true)
+    async (event: IpcMainInvokeEvent, filePath: string, data: ArrayBuffer, auto?: boolean) => {
+      return coordinator.saveDocx(event.sender.id, filePath, new Uint8Array(data), auto === true)
     },
   )
 
@@ -77,8 +57,8 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.removeHandler('docs:save-as')
   ipcMain.handle(
     'docs:save-as',
-    async (_event, defaultName: string, data: ArrayBuffer) => {
-      return coordinator.saveDocxAs(defaultName, new Uint8Array(data))
+    async (event: IpcMainInvokeEvent, defaultName: string, data: ArrayBuffer) => {
+      return coordinator.saveDocxAs(event.sender.id, defaultName, new Uint8Array(data))
     },
   )
 
@@ -86,8 +66,8 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.removeHandler('docs:save-new')
   ipcMain.handle(
     'docs:save-new',
-    async (_event, defaultName: string, data: ArrayBuffer) => {
-      return coordinator.saveDocxNew(defaultName, new Uint8Array(data))
+    async (event: IpcMainInvokeEvent, defaultName: string, data: ArrayBuffer) => {
+      return coordinator.saveDocxNew(event.sender.id, defaultName, new Uint8Array(data))
     },
   )
 
@@ -95,8 +75,8 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
   ipcMain.removeHandler('docs:write-recovery')
   ipcMain.handle(
     'docs:write-recovery',
-    async (_event, filePath: string, data: ArrayBuffer) => {
-      return coordinator.writeRecovery(filePath, new Uint8Array(data))
+    async (event: IpcMainInvokeEvent, filePath: string, data: ArrayBuffer) => {
+      return coordinator.writeRecovery(event.sender.id, filePath, new Uint8Array(data))
     },
   )
 
@@ -110,49 +90,63 @@ export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {
 
   // ── docs:font-metrics ───────────────────────────────────────────────
   ipcMain.removeHandler('docs:font-metrics')
-  ipcMain.handle('docs:font-metrics', (_event, family: string) => {
+  ipcMain.handle('docs:font-metrics', (_event: IpcMainInvokeEvent, family: string) => {
     return typeof family === 'string' ? fontRegistry.fontMetrics(family) : Promise.resolve(null)
   })
 
-  // ── docs:print ──────────────────────────────────────────────────────
+  // ── docs:print (caller-specific) ────────────────────────────────────
   ipcMain.removeHandler('docs:print')
-  ipcMain.handle('docs:print', () => runtime.printing.print())
+  ipcMain.handle('docs:print', (event: IpcMainInvokeEvent) => {
+    return coordinator.print(event.sender)
+  })
 
-  // ── docs:export-pdf ─────────────────────────────────────────────────
+  // ── docs:export-pdf (with per-wcId authorization) ───────────────────
   ipcMain.removeHandler('docs:export-pdf')
   ipcMain.handle(
     'docs:export-pdf',
     async (
-      _event,
+      event: IpcMainInvokeEvent,
       defaultName: string,
       pageWidthTwips: number,
       pageHeightTwips: number,
       outPath?: string,
     ) => {
-      return docsService.exportPdf(defaultName, pageWidthTwips, pageHeightTwips, outPath)
+      return coordinator.exportPdf(
+        event.sender.id,
+        defaultName,
+        pageWidthTwips,
+        pageHeightTwips,
+        outPath,
+        event.sender,
+      )
     },
   )
 
-  // ── docs:print-pdf-buffer ───────────────────────────────────────────
+  // ── docs:print-pdf-buffer (caller-specific) ────────────────────────
   ipcMain.removeHandler('docs:print-pdf-buffer')
   ipcMain.handle(
     'docs:print-pdf-buffer',
-    async (_event, pageWidthTwips: number, pageHeightTwips: number) => {
-      return docsService.printPdfBuffer(pageWidthTwips, pageHeightTwips)
+    async (event: IpcMainInvokeEvent, pageWidthTwips: number, pageHeightTwips: number) => {
+      return coordinator.printPdfBuffer(event.sender, pageWidthTwips, pageHeightTwips)
     },
   )
 
-  // ── docs:save-merged-pdf ────────────────────────────────────────────
+  // ── docs:save-merged-pdf (with per-wcId authorization) ──────────────
   ipcMain.removeHandler('docs:save-merged-pdf')
   ipcMain.handle(
     'docs:save-merged-pdf',
     async (
-      _event,
+      event: IpcMainInvokeEvent,
       defaultName: string,
       base64Parts: string[],
       outPath?: string,
     ) => {
-      return docsService.saveMergedPdf(defaultName, base64Parts, outPath)
+      return coordinator.saveMergedPdf(
+        event.sender.id,
+        defaultName,
+        base64Parts,
+        outPath,
+      )
     },
   )
 }
