@@ -1,11 +1,16 @@
 /**
  * Migrated Docs IPC handlers — per-renderer fidelity.
  *
+ * Increment 2D fixes:
+ *   - docs:opened routes to the originating wcId ONLY (no broadcast)
+ *   - caller-window resolution NEVER falls back to getFocusedWindow()
+ *
  * All handlers pass wcId + callerWindow (from event.sender) to the
- * coordinator. Push events route per-wcId. Recovery dialogs use the
- * caller's window.
+ * coordinator. Push events route per-wcId. Recovery / external-modified
+ * dialogs use the caller's window — resolved via BrowserWindow.fromWebContents
+ * (standalone) or the shell-window resolver (shell-tab / WebContentsView).
  */
-import { ipcMain, type IpcMainInvokeEvent, BrowserWindow } from 'electron'
+import { ipcMain, type IpcMainInvokeEvent, BrowserWindow, type WebContents } from 'electron'
 import { Buffer } from 'node:buffer'
 import type { DocumentService } from '@genoffice/runtime-contracts'
 import type { DocsShellCoordinatorImpl } from './docs-coordinator-impl.js'
@@ -19,14 +24,75 @@ export interface MigratedHandlersDeps {
   fontRegistry: ElectronFontRegistry
 }
 
-/** Derive the BrowserWindow from an IPC event sender. */
-function windowFromSender(event: IpcMainInvokeEvent): BrowserWindow | null {
-  const wc = event.sender
-  // The sender's webContents is inside a BrowserWindow (standalone) or
-  // a WebContentsView (shell tab mode). For dialogs, we need a BrowserWindow.
-  // BrowserWindow.fromWebContents works for standalone; for shell tabs,
-  // the shell window is the parent.
-  return BrowserWindow.fromWebContents(wc) ?? BrowserWindow.getFocusedWindow()
+// ── Caller-window resolver ────────────────────────────────────────────────
+//
+// For standalone BrowserWindow usage, BrowserWindow.fromWebContents(wc)
+// returns the BrowserWindow that owns the wc. That's the correct dialog
+// parent for recovery / external-modified / save-as dialogs.
+//
+// For shell-tab / WebContentsView usage, fromWebContents may return null
+// (the wc is inside a WebContentsView, not a BrowserWindow directly). In
+// that case the shell registers a resolver that maps the wc to its owning
+// shell BrowserWindow via the actual shell/tab ownership mechanism
+// (tabManager → BrowserWindow).
+//
+// FALLBACK POLICY (explicit):
+//   If both fromWebContents AND the shell-window resolver return null
+//   (e.g., the wc was destroyed, the shell disconnected, or the wc is in
+//   an unmanaged detached view), the dialog is shown WITHOUT a parent —
+//   `dialog.showMessageBox(options)` (no parent arg) renders a modeless
+//   dialog on the OS default window. This is the safe fallback because:
+//     1. The dialog still appears (the user can see and interact with it).
+//     2. We never attribute the dialog to the wrong window (window B
+//        getting A's recovery dialog just because B is focused).
+//     3. A modeless dialog is recoverable — the user can refocus the
+//        correct window and re-trigger the operation.
+//
+//   We NEVER use BrowserWindow.getFocusedWindow() as a fallback. The
+//   focused window is unrelated to the IPC caller — using it would
+//   attribute A's dialog to B when B is focused, which is the exact
+//   defect Increment 2C introduced and Increment 2D corrects.
+
+let callerWindowResolver: ((wc: WebContents) => BrowserWindow | null) | null = null
+
+/**
+ * Register a resolver that maps a webContents to its owning shell BrowserWindow.
+ *
+ * The shell calls this when it creates the shell window (or when the
+ * tab→window mapping changes). The resolver is used by `windowFromSender`
+ * when `BrowserWindow.fromWebContents(event.sender)` returns null (which
+ * happens when the sender is inside a WebContentsView, not a BrowserWindow).
+ *
+ * Pass `null` to clear the resolver (e.g., when the shell window is closed).
+ */
+export function setCallerWindowResolver(
+  fn: ((wc: WebContents) => BrowserWindow | null) | null,
+): void {
+  callerWindowResolver = fn
+}
+
+/**
+ * Derive the BrowserWindow from an IPC event sender.
+ *
+ * Resolution order:
+ *   1. BrowserWindow.fromWebContents(event.sender) — correct for standalone
+ *      BrowserWindow usage (the wc is the BrowserWindow's own webContents).
+ *   2. callerWindowResolver?.(event.sender) — correct for shell-tab /
+ *      WebContentsView usage (the shell resolves the owning BrowserWindow
+ *      via its tab→window ownership mechanism).
+ *   3. null — the dialog will be shown modeless (no parent). See the
+ *      FALLBACK POLICY above.
+ *
+ * NEVER uses BrowserWindow.getFocusedWindow() — the focused window is
+ * unrelated to the IPC caller and would attribute dialogs to the wrong
+ * window in multi-renderer scenarios.
+ */
+export function windowFromSender(event: IpcMainInvokeEvent): BrowserWindow | null {
+  return (
+    BrowserWindow.fromWebContents(event.sender) ??
+    callerWindowResolver?.(event.sender) ??
+    null
+  )
 }
 
 export function registerMigratedDocsIpc(deps: MigratedHandlersDeps): void {

@@ -49,13 +49,37 @@ export function initDocsRuntime(): DocsRuntimeBundle {
     },
   })
 
-  // ── 2. Per-wcId push-event routing (NOT global activeWc) ───────────
-  // The event bus forwards to the coordinator which routes to the
-  // correct webContents by wcId.
+  // ── 2. Per-wcId push-event routing (NOT global activeWc, NOT broadcast) ─
+  //
+  // The eventBus receives DOMAIN events from the DocumentService.
+  // The coordinator routes IPC push events (docs:opened / docs:renamed /
+  // docs:teardown) to the correct webContents by wcId.
+  //
+  // CRITICAL (Increment 2D): the `opened` callback is a NO-OP here.
+  // The service fires `opened(result)` inside its `open()` method, BEFORE
+  // the coordinator can run the recovery dialog. If we routed the push
+  // from this callback, the renderer would receive the PRE-RECOVERY bytes
+  // AND the coordinator's openDocx/openDocxPath would also send a second
+  // docs:opened with the POST-RECOVERY bytes — a duplicate event with
+  // stale data.
+  //
+  // Instead, the coordinator's openDocx(wcId, callerWindow) and
+  // openDocxPath(wcId, filePath, callerWindow) call sendOpened(wcId, result)
+  // AFTER the recovery decision succeeds, carrying the recovered bytes.
+  // The service's domain `opened` event still fires (for onOpened
+  // subscribers), but the IPC push to the renderer is routed exclusively
+  // by the coordinator.
+  //
+  // `renamed` and `teardown` are service-initiated events that the
+  // coordinator didn't trigger, so they ARE routed from the eventBus
+  // (the coordinator knows which renderers have the renamed file open
+  // via wcSessions, and teardown is per-wcId via markTornDown).
   let coordinatorRef: DocsShellCoordinatorImpl | null = null
 
   const eventBus: DocsEventBus = {
-    opened: (result) => { coordinatorRef?.sendOpenedToCaller(result) },
+    // NO-OP: the coordinator routes docs:opened per-wcId from openDocx/openDocxPath
+    // (after recovery). Routing here would broadcast stale pre-recovery bytes.
+    opened: () => {},
     renamed: (paths) => { coordinatorRef?.sendRenamedToCaller(paths.oldPath, paths.newPath) },
     teardown: () => { coordinatorRef?.sendTeardownToCaller() },
   }

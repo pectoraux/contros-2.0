@@ -133,6 +133,11 @@ export class DocsShellCoordinatorImpl {
     }
     allowDocWrite(wcId, r.session.filePath)
     wcSessions.set(wcId, r.session)
+    // Per-wcId routing: send docs:opened ONLY to the renderer that initiated
+    // this open. The service fires the domain `opened` event too (for any
+    // shell-level subscribers), but the IPC push to the renderer is routed
+    // here — never broadcast.
+    this.sendOpened(wcId, r.result)
     return { result: r.result }
   }
 
@@ -150,6 +155,9 @@ export class DocsShellCoordinatorImpl {
     }
     allowDocWrite(wcId, r.session.filePath)
     wcSessions.set(wcId, r.session)
+    // Per-wcId routing: send docs:opened ONLY to the renderer that initiated
+    // this open-path. Never broadcast.
+    this.sendOpened(wcId, r.result)
     return { result: r.result }
   }
 
@@ -325,33 +333,35 @@ export class DocsShellCoordinatorImpl {
     this.deps.shellHooks?.focusTab(id)
   }
 
-  // ── Push events (per-wcId routing — NOT global activeWc) ─────────────
+  // ── Push events (per-wcId routing — NOT global activeWc, NOT broadcast) ───
 
-  /** Forward docs:opened to the wcId-specific webContents. */
-  sendOpenedToCaller(result: DocumentOpenResult): void {
-    // The service fires this event — the coordinator routes it to ALL
-    // registered webContents (the legacy behavior for docs:opened is
-    // that it's sent to the window that opened the file, which is the
-    // calling wcId). But the service doesn't know the wcId.
-    // The coordinator's eventBus callback fires this method — we need
-    // to route to the correct wcId.
-    // For now: the service fires opened() after open(), which means the
-    // caller is the one that just opened the file. The coordinator's
-    // openDocx/openDocxPath methods set the session before the service
-    // fires the event. We can track the "last open wcId".
-    // But that's global state. Better: the coordinator's open methods
-    // call sendOpened directly (not via the event bus).
-    // The event bus is for events fired by the service that the coordinator
-    // didn't initiate (e.g., external rename). For now, send to all
-    // registered webContents — the renderer checks if the path matches.
-    for (const [wcId, wc] of wcWebContents) {
-      if (!wc.isDestroyed() && !tornDownWcIds.has(wcId)) {
-        wc.send('docs:opened', result)
-      }
+  /**
+   * Forward docs:opened to the wcId-specific webContents ONLY.
+   *
+   * Increment 2D fix: the previous implementation iterated ALL registered
+   * webContents and sent `docs:opened` to each. That broadcast broke the
+   * legacy renderer contract — when Renderer A opened a file, Renderer B
+   * also received `docs:opened` and (if its onOpenDocx listener was wired)
+   * would load a file it never asked for.
+   *
+   * The fix carries the originating wcId through the open path
+   * (openDocx/openDocxPath) and routes the push event to that wcId only.
+   * The coordinator resolves wcId → WebContents via the wcWebContents map
+   * populated by registerWebContents().
+   *
+   * The DocumentService still fires its domain `opened` event (for any
+   * shell-level subscribers via onOpened), but the IPC push to the renderer
+   * is routed here — the service never knows about wcId.
+   */
+  sendOpened(wcId: number, result: DocumentOpenResult): void {
+    if (tornDownWcIds.has(wcId)) return
+    const wc = wcWebContents.get(wcId)
+    if (wc && !wc.isDestroyed()) {
+      wc.send('docs:opened', result)
     }
   }
 
-  /** Forward docs:renamed to the wcId-specific webContents. */
+  /** Forward docs:renamed to the wcId-specific webContents (only those that have the old path open). */
   sendRenamedToCaller(oldPath: string, newPath: string): void {
     for (const [wcId, wc] of wcWebContents) {
       if (!wc.isDestroyed() && !tornDownWcIds.has(wcId)) {

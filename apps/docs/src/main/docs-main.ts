@@ -73,6 +73,7 @@ import { findDocxPath } from '../shared/open-file'
 import { atomicWriteFile, looksLikeZip } from './atomic-write'
 import { isExternallyModified, type DiskFileState } from './external-change'
 import { initDocsAutoUpdater } from './updater'
+import { setCallerWindowResolver } from './docs-migrated-handlers'
 
 /**
  * Docs main-process logic as an embeddable module: no top-level side effects.
@@ -1906,6 +1907,19 @@ export function markDocsNewBlank(wcId: number): void {
 let docsShellWindow: BrowserWindow | null = null
 export function setDocsShellWindow(win: BrowserWindow | null): void {
   docsShellWindow = win
+  // Increment 2D: register the shell window as the caller-window resolver
+  // for the migrated IPC handlers. When a renderer inside a WebContentsView
+  // tab calls docs:open (or any handler that needs a dialog parent),
+  // BrowserWindow.fromWebContents(event.sender) returns null (the wc is in
+  // a WebContentsView, not a BrowserWindow directly). The resolver maps
+  // the wc to this shell window — the actual owning BrowserWindow.
+  //
+  // We pass `() => win` (not `win` itself) so that the resolver always
+  // returns the CURRENT shell window, even if the reference is later
+  // updated. When `win` is null (shell disconnected), we pass null to
+  // clear the resolver — the migrated handlers will fall back to the
+  // modeless-dialog policy (see windowFromSender docs).
+  setCallerWindowResolver(win ? () => win : null)
 }
 
 /** injected by the shell in tab mode: resolves the webContents of the currently active docs tab,
