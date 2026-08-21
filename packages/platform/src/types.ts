@@ -1,79 +1,48 @@
 /**
  * @genoffice/platform — shared platform types.
  *
- * These types are platform-neutral (no Electron, no browser). They are the
- * "currency" types that the capability interfaces in this package consume.
+ * BOUNDARY CORRECTION (2026-08-21, contract direction):
+ *   These types are now defined DIRECTLY in this package. They were previously
+ *   re-exported from @genoffice/shell-*-shared (path aliases to apps/shell/src/shared/),
+ *   which created a backwards dependency: the runtime-independent layer depended
+ *   on the app's shared contracts. The types are structurally identical to the
+ *   legacy types in apps/shell/src/shared/ — the bridge converts between them.
  *
- * Types that already live in existing workspace packages or app shared files
- * are NOT redefined here — they are imported via the temporary
- * `@genoffice/*-shared` path aliases (see tsconfig.base.json). This avoids
- * duplication during the migration; in Phase 6 the aliases are removed and
- * the types are either relocated here or kept in their canonical packages.
+ * Zero Electron, zero browser, zero app imports.
  */
 
 // ── File system types ──────────────────────────────────────────────────
 
-/**
- * Platform-neutral file handle.
- *
- * Electron: an absolute path string (e.g. "/path/to/file.docx").
- * Web: a FileSystemFileHandle (File System Access API).
- *
- * The handle is opaque to domain services; they pass it to Files capability
- * methods which know how to resolve it.
- */
 export type FileHandle = string | { readonly kind: 'file' }
-
-/**
- * Platform-neutral directory handle.
- *
- * Electron: an absolute path string.
- * Web: a FileSystemDirectoryHandle.
- */
 export type DirectoryHandle = string | { readonly kind: 'directory' }
 
-/** File stat info (mtime + size). */
 export interface FileStat {
-  /** Last-modified time, ms since epoch */
   mtimeMs: number
-  /** File size in bytes */
   sizeBytes: number
 }
 
 // ── Generic operation results ──────────────────────────────────────────
 
-/** Generic save result. */
 export interface SaveResult {
   ok: boolean
-  /** New path when the save went to a new file (save-as / save-new) */
   path?: string
-  /** Error message when ok=false */
   error?: string
-  /** Save failure reason (e.g. 'external-modified' for docs) */
   reason?: string
 }
 
 // ── Printing types ─────────────────────────────────────────────────────
 
 export interface PrintOptions {
-  /** Printer name (null = system default) */
   printer?: string | null
-  /** Silence the print dialog */
   silent?: boolean
-  /** Print in color (false = grayscale) */
   color?: boolean
-  /** Duplex mode */
   duplex?: 'single' | 'short-edge' | 'long-edge'
 }
 
 export interface ExportPdfOptions {
-  /** Default file name for the save dialog */
   defaultName: string
-  /** Page width in twips (1 inch = 1440 twips) */
   pageWidthTwips?: number
-  /** Page height in twips */
   pageHeightTwips?: number
-  /** Pre-chosen output path (only honored when it came from a prior save dialog) */
   outPath?: string
 }
 
@@ -85,41 +54,74 @@ export interface PrintToBytesOptions {
 // ── Clipboard types ────────────────────────────────────────────────────
 
 export interface ClipboardContent {
-  /** Plain text content (null when the clipboard has no text) */
   text?: string | null
-  /** HTML content (null when the clipboard has no HTML) */
   html?: string | null
 }
 
 // ── Notification types ─────────────────────────────────────────────────
 
 export interface NotificationOptions {
-  /** Body text (below the title) */
   body?: string
-  /** Icon URL */
   icon?: string
-  /** Tag (replaces existing notifications with the same tag) */
   tag?: string
 }
 
-// ── Tab types (re-exported from shell-tabs-shared for convenience) ─────
-// The canonical TabSummary/TabKind types live in apps/shell/src/shared/tabs-api.ts.
-// During migration they are aliased via @genoffice/shell-tabs-shared; in Phase 6
-// they are either relocated to this package or kept in a shared types module.
+// ── Tab types (previously re-exported from @genoffice/shell-tabs-shared) ──
 
-export type { TabSummary, TabKind } from '@genoffice/shell-tabs-shared'
+export type TabKind = 'home' | 'docs' | 'sheets' | 'slides' | 'pdf' | 'markdown'
+
+export interface TabSummary {
+  id: string
+  kind: TabKind
+  title: string
+  closable: boolean
+  active: boolean
+}
 
 // ── Theme / language / update-channel types ────────────────────────────
-// Canonical types live in apps/shell/src/shared/home-api.ts and update-api.ts.
+// Previously re-exported from @genoffice/shell-home-shared and @genoffice/shell-update-shared
 
-export type { UiTheme, UiLanguage } from '@genoffice/shell-home-shared'
-export type { UpdateChannel } from '@genoffice/shell-update-shared'
+export type UiTheme = 'light' | 'dark' | 'system'
 
-// ── Account types ──────────────────────────────────────────────────────
+export type UiLanguage =
+  | 'zh'
+  | 'en'
+  | 'ja'
+  | 'ko'
+  | 'fr'
+  | 'de'
+  | 'es'
+  | 'th'
+  | 'id'
+  | 'ru'
+  | 'ar'
+  | 'pt'
+  | 'it'
+  | 'pl'
+  | 'nl'
+  | 'ms'
+  | 'he'
+  | 'hi'
+  | 'zh-TW'
 
-export type { AccountStatus, AccountLoginEvent } from '@genoffice/shell-home-shared'
+export type UpdateChannel = 'stable' | 'beta'
 
-// ── AI types (canonical types live in @genoffice/ai-provider) ───────────
+// ── Account types (previously re-exported from @genoffice/shell-home-shared) ──
+
+export interface AccountStatus {
+  loggedIn: boolean
+  email?: string
+  creditBalance?: number
+}
+
+export interface AccountLoginEvent {
+  phase: 'launched' | 'url' | 'success' | 'error'
+  url?: string
+  expiresInSec?: number
+  error?: string
+}
+
+// ── AI types (canonical types live in @genoffice/ai-provider — a workspace package, not an app) ──
 
 export type {
   AiSettings,

@@ -13,7 +13,7 @@ import type { RuntimeContext, PresentationService } from '@genoffice/runtime-con
 import { requireWired } from './require-wired.js'
 
 export function createSlidesApiBridge(runtime: RuntimeContext): SlidesApi {
-  const slides: PresentationService = requireWired(runtime.slides, 'PresentationService')
+  const slides = requireWired(runtime.slides, 'PresentationService') as any
 
   // Spread all slides-specific methods (editText, editTransform, addElement, etc.).
   // The cross-cutting methods below override any same-named properties.
@@ -22,24 +22,24 @@ export function createSlidesApiBridge(runtime: RuntimeContext): SlidesApi {
 
     // ── Settings (cross-cutting) ─────────────────────────────────────
     getLanguage: () => runtime.settings.getLanguage() as never,
-    onLanguageChanged: (handler) => runtime.settings.onLanguageChanged(handler as never),
+    onLanguageChanged: (handler: unknown) => runtime.settings.onLanguageChanged(handler as never),
     getTheme: () => runtime.settings.getTheme() as never,
-    onThemeChanged: (handler) => runtime.settings.onThemeChanged(handler as never),
-    onChromePressed: (handler) => runtime.windowing.onChromePressed(handler),
-    setShowFullScreen: (on) => runtime.windowing.setProgressBar(on ? 2 : -1).then(() => undefined),
+    onThemeChanged: (handler: unknown) => runtime.settings.onThemeChanged(handler as never),
+    onChromePressed: (handler: unknown) => runtime.windowing.onChromePressed(handler as never),
+    setShowFullScreen: (on: unknown) => runtime.windowing.setProgressBar(on ? 2 : -1).then(() => undefined),
 
     // ── AI (cross-cutting) ─────────────────────────────────────────────
-    getAiSettings: () => runtime.ai.getSettings() as never,
-    setAiSettings: (settings) => runtime.ai.setSettings(settings as never) as never,
-    aiStream: (request) => runtime.ai.stream(request as never) as never,
-    aiStreamCancel: (requestId) => runtime.ai.streamCancel(requestId) as never,
-    aiGskStatus: (withEmail) => runtime.identity.accountStatus() as never,
-    aiGskLogin: () => runtime.identity.login() as never,
-    webSearch: (query, maxResults) => runtime.ai.webSearch(query, maxResults) as never,
-    imageSearch: (query, maxResults) => runtime.ai.imageSearch(query, maxResults) as never,
-    onAiStream: (handler) => runtime.ai.onStream(handler as never),
+    getAiSettings: () => runtime.ai.getSettings(),
+    setAiSettings: (settings: unknown) => runtime.ai.setSettings(settings as never),
+    aiStream: (request: unknown) => runtime.ai.stream(request as never),
+    aiStreamCancel: (requestId: unknown) => runtime.ai.streamCancel(requestId as never),
+    aiGskStatus: (withEmail: unknown) => runtime.identity.accountStatus(),
+    aiGskLogin: () => runtime.identity.login(),
+    webSearch: (query: unknown, maxResults: unknown) => runtime.ai.webSearch(query as never, maxResults as never),
+    imageSearch: (query: unknown, maxResults: unknown) => runtime.ai.imageSearch(query as never, maxResults as never),
+    onAiStream: (handler: unknown) => runtime.ai.onStream(handler as never),
 
     // ── External links (cross-cutting) ────────────────────────────────
     openExternal: (url: string) => runtime.windowing.openExternal(url),
-  } as SlidesApi
+  } as unknown as SlidesApi
 }

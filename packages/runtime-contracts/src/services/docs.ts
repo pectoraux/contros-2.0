@@ -1,26 +1,22 @@
 /**
  * DocumentService — domain runtime service for the docs (`.docx`) editor.
  *
- * BOUNDARY CORRECTION (2026-08-21, FINAL pass):
- *   - Removed `consumePendingOpen`, `consumeNewBlank` — the pending-open
- *     queue and new-blank flag are shell state, not domain state. They
- *     stay in `apps/docs/src/main/docs-main.ts`.
- *   - Removed `openNewTab`, `listDocsTabs`, `focusDocsTab` — tab/window
- *     orchestration belongs in the shell, not in the domain service. The
- *     bridge delegates these to `runtime.windowing` instead.
- *   - `saveNew` is now behavior-complete (uses `Settings.getDefaultSaveDir()`
- *     + `Files.uniquePath()`).
+ * BOUNDARY CORRECTION (2026-08-21, contract direction):
+ *   This interface uses runtime-independent types defined in
+ *   @genoffice/runtime-contracts/src/types/docs.ts — NOT imported from
+ *   @genoffice/docs-shared (which is a path alias to apps/docs/src/shared/ipc.ts).
+ *   The runtime-independent layer must not depend on the app's shared contracts.
+ *
+ *   Tab/window operations and pending-open/new-blank state are NOT in this
+ *   interface — they belong in the DocsShellCoordinator (shell orchestration).
  *
  * SESSION-SCOPED: open() returns { session, result }; save() accepts the
- * session. The shell owns the wcId → DocumentSession map (via a
- * SessionRegistry). The service does not know about wcId.
+ * session. The shell (via DocsShellCoordinator) owns the session registry.
  *
  * PERSISTENCE vs TRANSFORMATION: this service handles PERSISTENCE only.
- * The byte-preserving DOCX TRANSFORMATION (saveDocx from
- * @genoffice/docx-engine) remains in the renderer for now.
+ * The byte-preserving DOCX TRANSFORMATION remains in the renderer.
  *
- * IMPORTANT (ADR-001 Correction A): implementations receive their dependencies
- * via constructor injection. They MUST NOT call getRuntime() internally.
+ * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
  */
 import type {
   AiSettings,
@@ -31,82 +27,58 @@ import type {
 } from '@genoffice/ai-provider'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
 import type {
-  OpenFileResult,
-  PickImageResult,
-  AttachmentAddResult,
-  AttachmentReadResult,
-  AttachmentImageResult,
-  MenuCommand,
-} from '@genoffice/docs-shared'
+  DocumentOpenResult,
+  DocumentPickImageResult,
+  DocumentAttachmentAddResult,
+  DocumentAttachmentReadResult,
+  DocumentAttachmentImageResult,
+  DocumentMenuCommand,
+} from '../types/docs.js'
 
 /**
  * Per-document session. Returned from open() and accepted by save() etc.
- * The shell holds the reference (in a SessionRegistry) keyed by file path.
+ * The shell (via DocsShellCoordinator) holds the registry keyed by file path.
  */
 export interface DocumentSession {
-  /** The file path the renderer is editing. */
   readonly filePath: string
-  /** sha256 of the original file (the archive key). */
   readonly hash: string
-  /** Disk state at last read/write (for external-modified detection). */
   diskState?: { mtimeMs: number; size: number; hash: string }
 }
 
 export interface DocumentService {
   // ── File lifecycle (session-scoped) ─────────────────────────────────
-  /**
-   * Show the open-file dialog and open the chosen file; returns a session
-   * the caller (shell) holds. Null when canceled.
-   */
-  openDialog(): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
-  /**
-   * Open a file by absolute path. Returns a session the caller holds.
-   * Null when the file can't be read.
-   */
-  open(path: string): Promise<{ session: DocumentSession; result: OpenFileResult } | null>
+  openDialog(): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null>
+  open(path: string): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null>
 
   // ── Save (persistence only — renderer produces the bytes) ──────────
-  /**
-   * Persist the bytes the renderer produced. Checks external-modified,
-   * writes atomically via Files.write(), clears the recovery copy, updates
-   * recents. Returns the updated session (with new diskState).
-   */
   save(
     session: DocumentSession,
     data: Uint8Array,
     auto?: boolean,
   ): Promise<{ ok: boolean; error?: string; reason?: 'external-modified'; session?: DocumentSession }>
-  /** Save-as: show the save dialog and write to the chosen path. Returns the new session. */
   saveAs(
     session: DocumentSession,
     defaultName: string,
     data: Uint8Array,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
-  /**
-   * First save of a new document: silently write into the default save
-   * folder (resolved via Settings.getDefaultSaveDir() + Files.uniquePath()).
-   * Returns the new session.
-   */
   saveNew(
     defaultName: string,
     data: Uint8Array,
   ): Promise<{ ok: boolean; path?: string; error?: string; session?: DocumentSession }>
-  /** Crash-recovery copy of a dirty document. */
   writeRecovery(session: DocumentSession, data: Uint8Array): Promise<{ ok: boolean }>
-  /** Recent files list (paths that still exist). */
   recentFiles(): Promise<string[]>
 
   // ── Images & attachments ─────────────────────────────────────────────
-  pickImage(): Promise<PickImageResult | null>
-  pickAttachments(): Promise<AttachmentAddResult | null>
-  addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult>
-  addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult>
+  pickImage(): Promise<DocumentPickImageResult | null>
+  pickAttachments(): Promise<DocumentAttachmentAddResult | null>
+  addAttachmentPaths(paths: string[]): Promise<DocumentAttachmentAddResult>
+  addPastedImage(data: ArrayBuffer, ext: string): Promise<DocumentAttachmentAddResult>
   readAttachment(
     path: string,
     offset: number,
     maxChars: number,
-  ): Promise<AttachmentReadResult>
-  readAttachmentImage(path: string): Promise<AttachmentImageResult>
+  ): Promise<DocumentAttachmentReadResult>
+  readAttachmentImage(path: string): Promise<DocumentAttachmentImageResult>
 
   // ── Fonts ────────────────────────────────────────────────────────────
   fontMetrics(family: string): Promise<FaceVerticalMetrics | null>
@@ -138,10 +110,10 @@ export interface DocumentService {
   onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
 
   // ── Domain events (push from service to shell; shell forwards to webContents) ──
-  onOpened(handler: (result: OpenFileResult) => void): () => void
+  onOpened(handler: (result: DocumentOpenResult) => void): () => void
   onRenamed(handler: (paths: { oldPath: string; newPath: string }) => void): () => void
   onTeardown(handler: () => void): () => void
-  onMenuCommand(handler: (command: MenuCommand, payload?: string) => void): () => void
+  onMenuCommand(handler: (command: DocumentMenuCommand, payload?: string) => void): () => void
 
   // ── Close guard (shell forwards; service just exposes the subscription surface) ──
   onCloseCheck(handler: () => void): () => void

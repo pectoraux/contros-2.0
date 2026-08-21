@@ -1,42 +1,24 @@
 /**
  * PresentationService — domain runtime service for the slides (`.pptx`) editor.
  *
- * Composes @genoffice/pptx-engine + @genoffice/pptx-render + session/undo
- * state with platform capabilities. The bridge (createSlidesApiBridge) maps
- * the existing window.slidesApi API to these methods.
+ * BOUNDARY CORRECTION (2026-08-21, contract direction):
+ *   This interface does NOT import from @genoffice/slides-shared (which is a
+ *   path alias to apps/slides/src/shared/ipc.ts). The full
+ *   PresentationService interface (with all ~120 typed methods) will be defined
+ *   when the Slides editor is extracted in Phase 1 increment 4.
  *
- * IMPORTANT (ADR-001 Correction A): implementations receive their dependencies
- * via constructor injection. They MUST NOT call getRuntime() internally.
+ *   For now, the service is NOT_YET_WIRED. This placeholder type allows the
+ *   renderer-bridge to compile without depending on the app's shared contracts.
  *
- * NOTE: For Milestone 1, the service type is derived from the actual SlidesApi
- * interface via Omit (excluding cross-cutting methods that delegate to platform
- * capabilities). This keeps the bridge 1:1 with the repo interface. In Phase 1,
- * the service interface may be refined to higher-level capabilities.
+ * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
  */
-import type { SlidesApi } from '@genoffice/slides-shared'
-
-/** Cross-cutting method names that delegate to platform capabilities, not to PresentationService. */
-export type SlidesCrossCuttingMethods =
-  | 'getLanguage'
-  | 'onLanguageChanged'
-  | 'getTheme'
-  | 'onThemeChanged'
-  | 'onChromePressed'
-  | 'setShowFullScreen'
-  | 'getAiSettings'
-  | 'setAiSettings'
-  | 'aiStream'
-  | 'aiStreamCancel'
-  | 'aiGskStatus'
-  | 'aiGskLogin'
-  | 'webSearch'
-  | 'imageSearch'
-  | 'onAiStream'
-  | 'openExternal'
 
 /**
- * The slides-specific subset of SlidesApi. Every method here delegates to
- * the PresentationService. The remaining SlidesApi methods delegate to
- * runtime.settings / runtime.windowing / runtime.ai / runtime.identity.
+ * Placeholder type for the PresentationService.
+ *
+ * When Phase 1 increment 4 (Slides) begins, this will be replaced with the
+ * full typed interface (with all editText/editTransform/addElement/etc. methods).
+ * The types will be defined in runtime-contracts, NOT imported from
+ * @genoffice/slides-shared.
  */
-export type PresentationService = Omit<SlidesApi, SlidesCrossCuttingMethods>
+export type PresentationService = Record<string, (...args: unknown[]) => unknown>

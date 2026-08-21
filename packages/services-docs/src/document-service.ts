@@ -30,13 +30,13 @@ import type {
 } from '@genoffice/platform'
 import type { DocumentService, DocumentSession } from '@genoffice/runtime-contracts'
 import type {
-  OpenFileResult,
-  PickImageResult,
-  AttachmentAddResult,
-  AttachmentReadResult,
-  AttachmentImageResult,
-  MenuCommand,
-} from '@genoffice/docs-shared'
+  DocumentOpenResult,
+  DocumentPickImageResult,
+  DocumentAttachmentAddResult,
+  DocumentAttachmentReadResult,
+  DocumentAttachmentImageResult,
+  DocumentMenuCommand,
+} from '@genoffice/runtime-contracts'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
 import type {
   AiSettings,
@@ -71,10 +71,10 @@ const RECENT_FILES_MAX = 50
  * (no requestOpenTab / requestListTabs / requestFocusTab — those were removed).
  */
 export interface DocsEventBus {
-  opened: (result: OpenFileResult) => void
+  opened: (result: DocumentOpenResult) => void
   renamed: (paths: { oldPath: string; newPath: string }) => void
   teardown: () => void
-  menuCommand: (command: MenuCommand, payload?: string) => void
+  menuCommand: (command: DocumentMenuCommand, payload?: string) => void
   closeCheck: () => void
   closeSaveRequest: () => void
 }
@@ -99,10 +99,10 @@ export interface DocumentServiceDeps {
  */
 export class DocumentServiceImpl implements DocumentService {
   private readonly eventListeners = {
-    opened: new Set<(r: OpenFileResult) => void>(),
+    opened: new Set<(r: DocumentOpenResult) => void>(),
     renamed: new Set<(p: { oldPath: string; newPath: string }) => void>(),
     teardown: new Set<() => void>(),
-    menuCommand: new Set<(c: MenuCommand, p?: string) => void>(),
+    menuCommand: new Set<(c: DocumentMenuCommand, p?: string) => void>(),
     closeCheck: new Set<() => void>(),
     closeSaveRequest: new Set<() => void>(),
   }
@@ -114,7 +114,7 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── File lifecycle (session-scoped) ───────────────────────────────────
 
-  async openDialog(): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
+  async openDialog(): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
     const handles = await this.deps.files.pickOpen({
       accept: ['docx'],
       multiple: false,
@@ -124,7 +124,7 @@ export class DocumentServiceImpl implements DocumentService {
     return this.open(path)
   }
 
-  async open(path: string): Promise<{ session: DocumentSession; result: OpenFileResult } | null> {
+  async open(path: string): Promise<{ session: DocumentSession; result: DocumentOpenResult } | null> {
     try {
       const { bytes, stat } = await this.deps.files.read(path)
       const hash = await this.hashBytes(bytes)
@@ -141,8 +141,8 @@ export class DocumentServiceImpl implements DocumentService {
         diskState: { mtimeMs: stat.mtimeMs, size: stat.sizeBytes, hash },
       }
 
-      // Build the OpenFileResult (data is an ArrayBuffer copy for the renderer)
-      const result: OpenFileResult = {
+      // Build the DocumentOpenResult (data is an ArrayBuffer copy for the renderer)
+      const result: DocumentOpenResult = {
         path,
         name: this.basename(path),
         data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
@@ -271,7 +271,7 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── Images & attachments ─────────────────────────────────────────────
 
-  async pickImage(): Promise<PickImageResult | null> {
+  async pickImage(): Promise<DocumentPickImageResult | null> {
     const handles = await this.deps.files.pickOpen({
       accept: ['png', 'jpg', 'jpeg', 'gif'],
       multiple: false,
@@ -289,7 +289,7 @@ export class DocumentServiceImpl implements DocumentService {
     }
   }
 
-  async pickAttachments(): Promise<AttachmentAddResult | null> {
+  async pickAttachments(): Promise<DocumentAttachmentAddResult | null> {
     const handles = await this.deps.files.pickOpen({
       accept: [...ATTACHMENT_EXTS],
       multiple: true,
@@ -298,11 +298,11 @@ export class DocumentServiceImpl implements DocumentService {
     return this.collectAttachments(handles as string[])
   }
 
-  async addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult> {
+  async addAttachmentPaths(paths: string[]): Promise<DocumentAttachmentAddResult> {
     return this.collectAttachments(paths)
   }
 
-  async addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult> {
+  async addPastedImage(data: ArrayBuffer, ext: string): Promise<DocumentAttachmentAddResult> {
     // Save the pasted image to a temp blob — via Storage capability
     const key = 'pasted-image:' + Date.now() + '.' + ext
     await this.deps.storage.writeBlob(key, new Uint8Array(data))
@@ -316,7 +316,7 @@ export class DocumentServiceImpl implements DocumentService {
     path: string,
     offset: number,
     maxChars: number,
-  ): Promise<AttachmentReadResult> {
+  ): Promise<DocumentAttachmentReadResult> {
     const name = this.basename(path)
     const ext = name.split('.').pop()?.toLowerCase() ?? ''
     if (!ATTACHMENT_EXTS.has(ext)) {
@@ -342,7 +342,7 @@ export class DocumentServiceImpl implements DocumentService {
     }
   }
 
-  async readAttachmentImage(path: string): Promise<AttachmentImageResult> {
+  async readAttachmentImage(path: string): Promise<DocumentAttachmentImageResult> {
     const name = this.basename(path)
     const ext = name.split('.').pop()?.toLowerCase() ?? ''
     const mime = ATTACHMENT_IMAGE_MIME[ext]
@@ -443,7 +443,7 @@ export class DocumentServiceImpl implements DocumentService {
 
   // ── Domain events (push from service to shell; shell forwards to webContents) ──
 
-  onOpened(handler: (result: OpenFileResult) => void): () => void {
+  onOpened(handler: (result: DocumentOpenResult) => void): () => void {
     this.eventListeners.opened.add(handler)
     return () => this.eventListeners.opened.delete(handler)
   }
@@ -458,7 +458,7 @@ export class DocumentServiceImpl implements DocumentService {
     return () => this.eventListeners.teardown.delete(handler)
   }
 
-  onMenuCommand(handler: (command: MenuCommand, payload?: string) => void): () => void {
+  onMenuCommand(handler: (command: DocumentMenuCommand, payload?: string) => void): () => void {
     this.eventListeners.menuCommand.add(handler)
     return () => this.eventListeners.menuCommand.delete(handler)
   }
@@ -555,8 +555,8 @@ export class DocumentServiceImpl implements DocumentService {
     await this.deps.storage.writeObject('docs', 'recents', filtered.slice(0, RECENT_FILES_MAX))
   }
 
-  private async collectAttachments(paths: string[]): Promise<AttachmentAddResult> {
-    const accepted: AttachmentAddResult['accepted'] = []
+  private async collectAttachments(paths: string[]): Promise<DocumentAttachmentAddResult> {
+    const accepted: DocumentAttachmentAddResult['accepted'] = []
     const rejected: string[] = []
     for (const p of paths) {
       try {

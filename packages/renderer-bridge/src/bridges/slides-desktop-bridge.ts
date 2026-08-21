@@ -13,7 +13,7 @@ import type { RuntimeContext } from '@genoffice/runtime-contracts'
 import { requireWired } from './require-wired.js'
 
 export function createSlidesDesktopBridge(runtime: RuntimeContext): DesktopFilesApi {
-  const sheets = requireWired(runtime.sheets, "sheetsService") // slides renderer reuses sheets attachment methods
+  const sheets = requireWired(runtime.sheets, "sheetsService") as any // slides renderer reuses sheets attachment methods
   return {
     pickAttachments: () => sheets.pickAttachments(),
     addAttachmentPaths: (paths) => sheets.addAttachmentPaths(paths),
