@@ -106,6 +106,10 @@ describe('bootstrap admin web-binding idempotency (Phase 2C.4.1)', () => {
     const identity = new IdentityService(users, memberships)
     const result = await identity.resolveTenantContext('web', existingId, orgId)
     expect(result.ctx.tenantId).toBe(orgId)
+    expect(result.ctx.actor.kind).toBe('user')
+    if (result.ctx.actor.kind !== 'user') {
+      throw new Error('Expected UserActor')
+    }
     expect(result.ctx.actor.userId).toBe(existingId)
     expect(result.membership).not.toBeNull()
     expect(result.membership!.role).toBe('admin')
