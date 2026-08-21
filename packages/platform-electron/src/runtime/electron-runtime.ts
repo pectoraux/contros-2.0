@@ -1,34 +1,18 @@
 /**
- * createElectronRuntime — constructs the full RuntimeContext for the Electron
- * adapter. Wires all 9 capabilities + the ProjectStore + (optionally) the
- * DocumentService.
+ * createElectronCapabilities — constructs all 9 Electron capabilities + ProjectStore
+ * WITHOUT calling setRuntime().
  *
- * BOUNDARY CORRECTION (2026-08-21, FINAL pass):
- *   - `docsService` is now typed `DocumentService | undefined` (not `any`)
- *   - Unwired services use `NOT_YET_WIRED(reason)` instead of `null as any`
- *   - `project: projectStore` is typed (no `as any`)
- *   - The `dialog as any` / `shell as any` casts remain (narrowing Electron's
- *     types to our typed subset — these are NOT escape hatches, they're
- *     type-narrowing casts that are safe because ElectronFilesDeps declares
- *     the subset we use)
+ * The caller constructs domain services using these capabilities, then calls
+ * publishRuntime() to publish the final wired runtime exactly once.
  *
- * The runtime is constructed in THREE explicit phases with NO mutation
- * after setRuntime():
- *   Phase A: 9 capabilities (no service deps)
- *   Phase B: ProjectStore
- *   Phase C: RuntimeContext + setRuntime() (the ONLY call)
- *
- * IMPORTANT (ADR-001 Correction A): the DocumentServiceImpl receives its
- * dependencies via constructor injection. It does NOT call getRuntime()
- * internally.
+ * IMPORTANT (ADR-001 Correction A): capabilities receive their dependencies
+ * via constructor injection. They do NOT call getRuntime() internally.
  */
 import { app, dialog, shell, nativeTheme, nativeImage } from 'electron'
 import { join } from 'node:path'
 import {
-  setRuntime,
   NOT_YET_WIRED,
   type RuntimeContext,
-  type DocumentService,
 } from '@genoffice/runtime-contracts'
 import { ProjectStore } from '@genoffice/project-store'
 
@@ -43,29 +27,30 @@ import { ElectronNotifications } from '../capabilities/electron-notifications.js
 import { ElectronWindowing } from '../capabilities/electron-windowing.js'
 import { ElectronFontRegistry } from '../capabilities/electron-font-registry.js'
 
-export interface ElectronRuntimeConfig {
-  /** Which app is constructing the runtime. */
+export interface ElectronCapabilitiesConfig {
   appKind: 'docs' | 'sheets' | 'slides' | 'pdf' | 'markdown' | 'shell'
-  /** Function to broadcast events to all webContents (e.g. theme changes). */
   broadcast?: (channel: string, ...args: unknown[]) => void
-  /** Function to get the active webContents (for printing). */
   getActiveWebContents?: () => unknown
-  /** Function to get the active BrowserWindow (for setProgressBar / dialog parent). */
   getActiveWindow?: () => { setProgressBar: (p: number) => void; isDestroyed: () => boolean } | null
-  /**
-   * The DocumentService to wire into the runtime. The caller constructs it
-   * (with its own EventBus + SessionRegistry) and passes it in.
-   *
-   * When undefined, `runtime.docs` is `NOT_YET_WIRED('...')` — the bridge
-   * checks `isWired(runtime.docs)` before delegating.
-   *
-   * Typed as `DocumentService` (NOT `any`) — the caller must provide a
-   * properly-typed service.
-   */
-  docsService?: DocumentService
 }
 
-export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeContext {
+export interface ElectronCapabilities {
+  storage: ElectronStorage
+  files: ElectronFiles
+  settings: ElectronSettings
+  ai: ElectronAI
+  identity: ElectronIdentity
+  printing: ElectronPrinting
+  clipboard: ElectronClipboard
+  notifications: ElectronNotifications
+  windowing: ElectronWindowing
+  fontRegistry: ElectronFontRegistry
+  projectStore: ProjectStore
+  /** The partial runtime with NOT_YET_WIRED for all domain services. */
+  partialRuntime: RuntimeContext
+}
+
+export function createElectronCapabilities(config: ElectronCapabilitiesConfig): ElectronCapabilities {
   const userDataDir = app.getPath('userData')
   const documentsDir = app.getPath('documents')
   const appVersion = app.getVersion()
@@ -73,7 +58,6 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
   const getActiveWebContents = config.getActiveWebContents ?? (() => null)
   const getActiveWindow = config.getActiveWindow ?? (() => null)
 
-  // ── Phase A: capabilities (no service dependencies) ───────────────────
   const storage = new ElectronStorage({ userDataDir })
   const files = new ElectronFiles({
     dialog: dialog as unknown as ElectronFiles['deps']['dialog'],
@@ -115,26 +99,13 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
   const fontRegistry = new ElectronFontRegistry({
     cacheDir: join(userDataDir, 'font-metrics'),
   })
-
-  // ── Phase B: project store (filesystem-backed via @genoffice/project-store) ──
   const projectStore = new ProjectStore(userDataDir)
 
-  // ── Phase C: construct the runtime (capabilities + services in one pass) ──
-  // Service slots use ServiceSlot<T> — either the actual service, or NOT_YET_WIRED(reason).
-  // No `null as any` placeholders.
-  const runtime: RuntimeContext = {
+  const partialRuntime: RuntimeContext = {
     platform: 'electron',
     version: appVersion,
-    storage,
-    files,
-    identity,
-    ai,
-    printing,
-    clipboard,
-    notifications,
-    windowing,
-    settings,
-    docs: config.docsService ?? NOT_YET_WIRED('Docs service not yet constructed — Phase 1 increment 2 wires it'),
+    storage, files, identity, ai, printing, clipboard, notifications, windowing, settings,
+    docs: NOT_YET_WIRED('Docs service not yet constructed'),
     sheets: NOT_YET_WIRED('Sheets service — Phase 1 increment 3'),
     slides: NOT_YET_WIRED('Slides service — Phase 1 increment 4'),
     pdf: NOT_YET_WIRED('PDF service — Phase 1 increment 5'),
@@ -142,9 +113,28 @@ export function createElectronRuntime(config: ElectronRuntimeConfig): RuntimeCon
     project: projectStore as unknown as RuntimeContext['project'],
   }
 
-  // THE ONLY setRuntime call in the bootstrap. No attachDocsService, no
-  // getRuntimeForAttach, no service-locator escape hatch.
-  setRuntime(runtime)
+  return { storage, files, settings, ai, identity, printing, clipboard, notifications, windowing, fontRegistry, projectStore, partialRuntime }
+}
 
-  return runtime
+/**
+ * publishRuntime — calls setRuntime() exactly once with the final wired runtime.
+ * The caller constructs domain services using the capabilities, builds the final
+ * RuntimeContext, and passes it here.
+ */
+import { setRuntime } from '@genoffice/runtime-contracts'
+
+export function publishRuntime(runtime: RuntimeContext): void {
+  setRuntime(runtime)
+}
+
+/**
+ * createElectronRuntime — legacy convenience wrapper.
+ * Constructs capabilities + publishes runtime with NOT_YET_WIRED for all
+ * domain services. Use createElectronCapabilities + publishRuntime instead
+ * when you need to construct domain services before publishing.
+ */
+export function createElectronRuntime(config: ElectronCapabilitiesConfig): RuntimeContext {
+  const caps = createElectronCapabilities(config)
+  setRuntime(caps.partialRuntime)
+  return caps.partialRuntime
 }

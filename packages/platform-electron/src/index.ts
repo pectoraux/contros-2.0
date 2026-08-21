@@ -19,6 +19,9 @@ export { ElectronNotifications } from './capabilities/electron-notifications.js'
 export { ElectronWindowing } from './capabilities/electron-windowing.js'
 export { ElectronFontRegistry } from './capabilities/electron-font-registry.js'
 export {
+  createElectronCapabilities,
+  publishRuntime,
   createElectronRuntime,
-  type ElectronRuntimeConfig,
+  type ElectronCapabilitiesConfig,
+  type ElectronCapabilities,
 } from './runtime/electron-runtime.js'
