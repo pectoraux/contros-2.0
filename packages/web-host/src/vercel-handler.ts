@@ -99,11 +99,11 @@ async function getDeps(): Promise<CachedDeps> {
   const users = new UserRepository(db)
   const memberships = new MembershipRepository(db)
   const organizations = new OrganizationRepository(db)
+  const workspaces = new WorkspaceRepository(db)
   // Seed deterministic demo data when running in ephemeral PGlite mode.
   if (demoMode) {
-    await seedDemoData({ users, memberships, organizations })
+    await seedDemoData({ users, memberships, organizations, workspaces })
   }
-  const workspaces = new WorkspaceRepository(db)
   const projects = new ProjectRepository(db)
   const audit = new AuditRepository(db)
   const revisions = new RevisionRepository(db)
@@ -183,6 +183,7 @@ function createDb(): DbClient {
 // Deterministic IDs so demo sessions survive serverless instance recycles.
 const DEMO_ORG_ID = 'org_demo_0001'
 const DEMO_ORG_SLUG = 'genoffice-demo'
+const DEMO_WS_ID = 'ws_demo_default'
 const DEMO_USERS = [
   { id: 'usr_demo_owner', role: 'owner', email: 'demo-owner@contractor.dev', name: 'Demo Owner' },
   { id: 'usr_demo_member', role: 'member', email: 'demo-member@contractor.dev', name: 'Demo Member' },
@@ -193,6 +194,7 @@ async function seedDemoData(deps: {
   users: UserRepository
   memberships: MembershipRepository
   organizations: OrganizationRepository
+  workspaces: WorkspaceRepository
 }): Promise<void> {
   const now = new Date().toISOString()
   // Demo org (idempotent — self-tenant: tenantId === org id).
@@ -203,14 +205,30 @@ async function seedDemoData(deps: {
       status: 'active', createdAt: now,
     })
   }
+  // Default workspace for the demo org (idempotent) so project creation works
+  // out of the box (the Projects screen requires at least one workspace).
+  if (!(await deps.workspaces.getById(DEMO_WS_ID, DEMO_ORG_ID))) {
+    await deps.workspaces.create({
+      id: DEMO_WS_ID, tenantId: DEMO_ORG_ID, organizationId: DEMO_ORG_ID,
+      name: 'Default Workspace', createdAt: now,
+    })
+  }
   // Demo users + memberships (idempotent).
   for (const u of DEMO_USERS) {
     if (await deps.users.getByEmail(u.email)) continue
     await deps.users.createDemoUser(
       { id: u.id, email: u.email, displayName: u.name, status: 'active', createdAt: now },
     )
+    // Email binding (password-auth path).
     await deps.users.createBinding({
       id: `auth_${u.id}`, userId: u.id, provider: 'email', subject: u.email,
+      createdAt: now, lastUsedAt: null,
+    })
+    // Web binding (provider='web', subject=userId) — required by the session
+    // resolver's resolveTenantContext so demo sessions are authorized for
+    // Core API calls (projects, workspaces, etc.).
+    await deps.users.createBinding({
+      id: `web_${u.id}`, userId: u.id, provider: 'web', subject: u.id,
       createdAt: now, lastUsedAt: null,
     })
     const membership: Membership = {
