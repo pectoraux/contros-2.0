@@ -3,31 +3,15 @@
  * pulling PgLiteClient (and @electric-sql/pglite WASM) into the Vercel
  * serverless function bundle.
  *
- * The barrel export at persistence/index.ts re-exports PgLiteClient, which
- * imports @electric-sql/pglite — a WASM module Vercel's esbuild bundler
- * cannot handle. By importing the migration SQL from this separate module,
- * the Vercel handler's import graph never touches pglite.
+ * The SQL content is inlined in `migrations-generated.ts` (auto-generated from
+ * the .sql files in `migrations/`). This avoids runtime `readFileSync` calls
+ * that would fail in the Vercel serverless environment (where only the bundled
+ * .mjs is deployed, not the .sql files). Regenerate with `bun run inline:migrations`.
  */
 
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-export const FOUNDATION_MIGRATION_SQL = readFileSync(
-  join(__dirname, 'migrations/0001_foundation.sql'),
-  'utf8',
-)
-export const COMMERCIAL_MIGRATION_SQL = readFileSync(
-  join(__dirname, 'migrations/0002_commercial.sql'),
-  'utf8',
-)
-export const MAGIC_LINKS_MIGRATION_SQL = readFileSync(
-  join(__dirname, 'migrations/0003_magic_links.sql'),
-  'utf8',
-)
-export const AUTH_MIGRATION_SQL = readFileSync(
-  join(__dirname, 'migrations/0004_auth.sql'),
-  'utf8',
-)
+export {
+  FOUNDATION_MIGRATION_SQL,
+  COMMERCIAL_MIGRATION_SQL,
+  MAGIC_LINKS_MIGRATION_SQL,
+  AUTH_MIGRATION_SQL,
+} from './migrations-generated.js'

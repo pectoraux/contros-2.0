@@ -1,11 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd apps/web && bun run build",
+  "buildCommand": "bun run build:api && cd apps/web && bun run build",
   "outputDirectory": "apps/web/dist",
   "installCommand": "bun install --ignore-scripts",
   "functions": {
-    "api/serverless.ts": {
+    "api/serverless.mjs": {
       "maxDuration": 30
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/serverless" }
+  ]
 }

@@ -178,15 +178,28 @@ async function applyMigrations(db: DbClient): Promise<void> {
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
-    const deps = await getDeps()
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     const method = req.method ?? 'GET'
 
-    // Auth routes
+    // Stateless routes — do NOT require a DB connection.
+    // dev-mode just reports whether DEV auth is enabled (env flag).
+    // logout just clears the session cookie.
+    // These must work even when DATABASE_URL is unset so the frontend can boot
+    // and report its auth mode.
     if (path === '/api/auth/dev-mode' && method === 'GET') {
-      return sendJson(res, 200, { devAuth: deps.config.devAuthEnabled })
+      const devAuthEnabled = process.env.CONTRACTOR_DEV_AUTH === '1'
+      return sendJson(res, 200, { devAuth: devAuthEnabled })
     }
+    if (path === '/api/auth/logout' && method === 'POST') {
+      res.setHeader('Set-Cookie', clearSessionCookieHeader(process.env.NODE_ENV === "production"))
+      return sendJson(res, 200, { ok: true })
+    }
+
+    // All other routes require the full deps (DB + services).
+    const deps = await getDeps()
+
+    // Auth routes (stateful — require DB)
     if (path === '/api/auth/password-login' && method === 'POST') {
       return handlePasswordLogin(req, res, deps)
     }
@@ -216,10 +229,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
     if (path === '/api/auth/select-tenant' && method === 'POST') {
       return handleSelectTenant(req, res, deps)
-    }
-    if (path === '/api/auth/logout' && method === 'POST') {
-      res.setHeader('Set-Cookie', clearSessionCookieHeader(process.env.NODE_ENV === "production"))
-      return sendJson(res, 200, { ok: true })
     }
     if (path === '/api/auth/session' && method === 'GET') {
       return handleSession(req, res, deps)
