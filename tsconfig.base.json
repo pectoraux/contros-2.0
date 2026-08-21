@@ -11,6 +11,16 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
     "noUnusedLocals": false,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@genoffice/docs-shared": ["./apps/docs/src/shared/ipc.ts"],
+      "@genoffice/sheets-shared": ["./apps/sheets/src/shared/desktop-api.ts"],
+      "@genoffice/slides-shared": ["./apps/slides/src/shared/ipc.ts"],
+      "@genoffice/pdf-shared": ["./apps/pdf/src/shared/ipc.ts"],
+      "@genoffice/markdown-shared": ["./apps/markdown/src/shared/ipc.ts"],
+      "@genoffice/shell-home-shared": ["./apps/shell/src/shared/home-api.ts"],
+      "@genoffice/shell-tabs-shared": ["./apps/shell/src/shared/tabs-api.ts"],
+      "@genoffice/shell-update-shared": ["./apps/shell/src/shared/update-api.ts"]
+    }
   }
 }

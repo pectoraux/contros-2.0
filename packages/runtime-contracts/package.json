@@ -1,0 +1,21 @@
+{
+  "name": "@genoffice/runtime-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenOffice platform-neutral runtime contracts — interfaces, types, and the getRuntime()/setRuntime() bootstrap mechanism. Zero implementations.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@genoffice/platform": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}
