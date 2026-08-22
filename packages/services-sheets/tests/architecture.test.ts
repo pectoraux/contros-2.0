@@ -9,6 +9,13 @@
  *   - ZERO references to snapshotPath / sidecarSessionId / engineSessionId
  *   - Does NOT import platform-electron
  *   - DOES import runtime-contracts (dependency direction)
+ *
+ * DOMAIN-EVENT PURITY (Increment 3A correction):
+ *   - ZERO references to SheetsEventBus
+ *   - ZERO references to onOpened / onRenamed / onTeardown
+ *   - ZERO references to oldPath / newPath
+ *   The shell coordinator owns renderer/event routing — the domain service
+ *   must NOT.
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -129,5 +136,42 @@ describe('@genoffice/services-sheets architecture boundary', () => {
   test('imports runtime-contracts (dependency direction)', () => {
     const hits = scanForImports(SRC, ['@genoffice/runtime-contracts'])
     expect(hits.length).toBeGreaterThan(0)
+  })
+
+  // ── DOMAIN-EVENT PURITY (Increment 3A correction) ──────────────────
+  //
+  // The domain service must NOT own renderer/event routing. The shell
+  // coordinator owns `docs/workbook opened`, `renamed`, `teardown` and
+  // dispatches renderer notifications. The runtime-independent service
+  // contract must remain domain-only.
+
+  test('ZERO references to SheetsEventBus (shell owns event routing)', () => {
+    const hits = scanForTokens(SRC, ['SheetsEventBus'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to onOpened / onRenamed / onTeardown', () => {
+    const hits = scanForTokens(SRC, ['onOpened', 'onRenamed', 'onTeardown'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to oldPath / newPath (no filesystem-specific event payloads)', () => {
+    const hits = scanForTokens(SRC, ['oldPath', 'newPath'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to WebContents / BrowserWindow / wcId (shell-layer concerns)', () => {
+    const hits = scanForTokens(SRC, ['WebContents', 'BrowserWindow', 'wcId'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to workbookPath (renamed to workbookName in 3A)', () => {
+    const hits = scanForTokens(SRC, ['workbookPath'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
   })
 })

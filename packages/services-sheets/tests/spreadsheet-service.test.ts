@@ -1,14 +1,33 @@
 /**
- * Service-level tests for SpreadsheetServiceImpl.
+ * Service-level tests for SpreadsheetServiceImpl (Increment 3A correction).
  *
  * Uses a mock SpreadsheetEngine — does NOT use ElectronXlsxSidecarEngine.
- * Tests:
- *   open, readRange, readFormulaCells, recalculate, readMedia,
- *   save (unchanged/changed/unknown), writeRecovery, close,
- *   invalid engine handle, engine errors.
+ *
+ * Coverage:
+ *   - open: session + engineHandle + metadata, workbookName field
+ *   - readRange, readFormulaCells, recalculate, readMedia (session-scoped)
+ *   - save: unchanged (permitted), changed/unknown (refused), engine error
+ *     propagation
+ *   - writeRecovery: returns bytes on success; throws typed error on failure
+ *   - close: void on success; throws typed error on failure
+ *
+ * ERROR PROPAGATION (Increment 3A):
+ *   Each test verifies that the correct TYPED error reaches the service
+ *   caller — the service does NOT swallow engine exceptions into null or
+ *   { ok: false }. Coverage:
+ *     - engine open failure        → EngineError (INTERNAL_ERROR)
+ *     - engine protocol error      → EngineError (PROTOCOL_ERROR)
+ *     - engine invalid session     → InvalidSessionError
+ *     - engine close failure       → EngineError (propagates)
+ *     - engine recovery failure    → EngineError (propagates)
+ *     - save engine failure        → EngineError (propagates, NOT ok: false)
+ *
+ * DOMAIN-EVENT PURITY (Increment 3A):
+ *   No `onOpened` / `onRenamed` / `onTeardown` / `SheetsEventBus` tests —
+ *   the shell coordinator owns event routing. The service is domain-only.
  */
 import { describe, test, expect, vi } from 'vitest'
-import { SpreadsheetServiceImpl, type SpreadsheetServiceDeps, type SheetsEventBus } from '../src/spreadsheet-service.js'
+import { SpreadsheetServiceImpl, type SpreadsheetServiceDeps } from '../src/spreadsheet-service.js'
 import type {
   SpreadsheetEngine,
   EngineSessionHandle,
@@ -18,10 +37,8 @@ import type {
   EngineFormulaCellsResult,
   EngineRecalcResult,
   EngineMediaResult,
-  ExternalChangeStatus,
-  EngineError,
 } from '@genoffice/runtime-contracts'
-import { EngineError as EngineErrorClass, InvalidSessionError } from '@genoffice/runtime-contracts'
+import { EngineError, InvalidSessionError, InvalidInputError } from '@genoffice/runtime-contracts'
 
 // ── Mock helpers ──────────────────────────────────────────────────────
 
@@ -60,20 +77,11 @@ function makeMockEngine(): SpreadsheetEngine & { _handle: EngineSessionHandle } 
   }
 }
 
-function makeMockEventBus(): SheetsEventBus {
-  return {
-    opened: vi.fn(),
-    renamed: vi.fn(),
-    teardown: vi.fn(),
-  }
-}
-
 function makeService(engine?: ReturnType<typeof makeMockEngine>) {
   const eng = engine ?? makeMockEngine()
   const deps: SpreadsheetServiceDeps = { engine: eng }
-  const eventBus = makeMockEventBus()
-  const service = new SpreadsheetServiceImpl(deps, eventBus)
-  return { service, engine: eng, eventBus }
+  const service = new SpreadsheetServiceImpl(deps)
+  return { service, engine: eng }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -85,26 +93,54 @@ describe('SpreadsheetServiceImpl', () => {
     test('returns session + engineHandle + metadata', async () => {
       const { service, engine } = makeService()
       const result = await service.open(new Uint8Array([1, 2, 3]), 'en', 'test.xlsx')
-      expect(result).not.toBeNull()
-      expect(result!.session.workbookPath).toBe('test.xlsx')
-      expect(result!.session.workbookHash).toBe('abc123')
-      expect(result!.session.sheetNames.size).toBe(1)
-      expect(result!.engineHandle).toBe(engine._handle)
-      expect(result!.metadata.name).toBe('test.xlsx')
+      expect(result.session.workbookName).toBe('test.xlsx')
+      expect(result.session.workbookHash).toBe('abc123')
+      expect(result.session.sheetNames.size).toBe(1)
+      expect(result.engineHandle).toBe(engine._handle)
+      expect(result.metadata.name).toBe('test.xlsx')
     })
 
-    test('fires opened event', async () => {
-      const { service, eventBus } = makeService()
-      await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      expect(eventBus.opened).toHaveBeenCalledTimes(1)
-    })
-
-    test('returns null on engine error', async () => {
+    test('engine open failure → throws EngineError with INTERNAL_ERROR code', async () => {
       const engine = makeMockEngine()
-      engine.open = vi.fn(async () => { throw new EngineErrorClass('fail', 'INTERNAL_ERROR') })
+      engine.open = vi.fn(async () => { throw new EngineError('fail', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
-      const result = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      expect(result).toBeNull()
+      await expect(service.open(new Uint8Array([1]), 'en', 'test.xlsx')).rejects.toThrow(EngineError)
+      await expect(service.open(new Uint8Array([1]), 'en', 'test.xlsx')).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'INTERNAL_ERROR',
+      })
+    })
+
+    test('engine protocol error → throws EngineError with PROTOCOL_ERROR code', async () => {
+      const engine = makeMockEngine()
+      engine.open = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
+      const { service } = makeService(engine)
+      await expect(service.open(new Uint8Array([1]), 'en', 'test.xlsx')).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'PROTOCOL_ERROR',
+      })
+    })
+
+    test('engine invalid session → throws InvalidSessionError', async () => {
+      const engine = makeMockEngine()
+      engine.open = vi.fn(async () => { throw new InvalidSessionError('invalid') })
+      const { service } = makeService(engine)
+      await expect(service.open(new Uint8Array([1]), 'en', 'test.xlsx')).rejects.toBeInstanceOf(InvalidSessionError)
+    })
+
+    test('invalid workbook input → throws InvalidInputError (distinguishable from engine failure)', async () => {
+      const engine = makeMockEngine()
+      engine.open = vi.fn(async () => { throw new InvalidInputError('not a valid xlsx') })
+      const { service } = makeService(engine)
+      await expect(service.open(new Uint8Array([1]), 'en', 'test.xlsx')).rejects.toBeInstanceOf(InvalidInputError)
+      // Verify the caller can distinguish InvalidInputError from generic EngineError
+      try {
+        await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      } catch (err) {
+        expect(err).toBeInstanceOf(InvalidInputError)
+        expect(err).toBeInstanceOf(EngineError)
+        expect((err as EngineError).code).toBe('INVALID_INPUT')
+      }
     })
   })
 
@@ -116,6 +152,14 @@ describe('SpreadsheetServiceImpl', () => {
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       await service.readRange(opened!.session, opened!.engineHandle, 'Sheet1', 'A1:B2')
       expect(engine.readRange).toHaveBeenCalledWith(engine._handle, 'Sheet1', 'A1:B2')
+    })
+
+    test('engine failure → throws EngineError (not swallowed)', async () => {
+      const engine = makeMockEngine()
+      engine.readRange = vi.fn(async () => { throw new EngineError('range fail', 'INTERNAL_ERROR') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.readRange(opened!.session, opened!.engineHandle, 'Sheet1', 'A1:B2')).rejects.toThrow(EngineError)
     })
   })
 
@@ -147,18 +191,26 @@ describe('SpreadsheetServiceImpl', () => {
     })
   })
 
-  // ── readMedia ────────────────────────────────────────────────────
+  // ── readMedia (session-scoped, per Increment 3A) ────────────────
 
   describe('readMedia', () => {
-    test('delegates to engine', async () => {
+    test('delegates to engine with engineHandle + visualId (session accepted for consistency)', async () => {
       const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      await service.readMedia(opened!.engineHandle, 'img1')
+      await service.readMedia(opened!.session, opened!.engineHandle, 'img1')
       expect(engine.readMedia).toHaveBeenCalledWith(engine._handle, 'img1')
+    })
+
+    test('engine failure → throws EngineError (not swallowed)', async () => {
+      const engine = makeMockEngine()
+      engine.readMedia = vi.fn(async () => { throw new EngineError('media fail', 'INTERNAL_ERROR') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.readMedia(opened!.session, opened!.engineHandle, 'img1')).rejects.toThrow(EngineError)
     })
   })
 
-  // ── save: external-change policy ──────────────────────────────────
+  // ── save: external-change policy + engine error propagation ──────
 
   describe('save', () => {
     test('unchanged → save permitted, returns data', async () => {
@@ -170,7 +222,7 @@ describe('SpreadsheetServiceImpl', () => {
       expect(engine.saveArchive).toHaveBeenCalledWith(engine._handle, [])
     })
 
-    test('changed → save refused with external-modified', async () => {
+    test('changed → save refused with external-modified (legitimate business outcome)', async () => {
       const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const result = await service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'changed')
@@ -188,77 +240,140 @@ describe('SpreadsheetServiceImpl', () => {
       expect(engine.saveArchive).not.toHaveBeenCalled()
     })
 
-    test('engine error → save fails gracefully', async () => {
+    test('engine failure → throws EngineError (NOT converted to { ok: false })', async () => {
       const engine = makeMockEngine()
-      engine.saveArchive = vi.fn(async () => { throw new EngineErrorClass('save failed', 'INTERNAL_ERROR') })
+      engine.saveArchive = vi.fn(async () => { throw new EngineError('save failed', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const result = await service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'unchanged')
-      expect(result.ok).toBe(false)
-      expect(result.error).toBeDefined()
+      // The error must propagate as a typed EngineError — the caller
+      // must NOT see { ok: false, error: '...' }. This is the
+      // Increment 3A error-semantics requirement.
+      await expect(service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'unchanged')).rejects.toThrow(EngineError)
+      await expect(service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'unchanged')).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'INTERNAL_ERROR',
+      })
+    })
+
+    test('engine protocol error → throws EngineError with PROTOCOL_ERROR (distinguishable from engine failure)', async () => {
+      const engine = makeMockEngine()
+      engine.saveArchive = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'unchanged')).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'PROTOCOL_ERROR',
+      })
+    })
+
+    test('engine invalid session → throws InvalidSessionError (distinguishable from engine failure)', async () => {
+      const engine = makeMockEngine()
+      engine.saveArchive = vi.fn(async () => { throw new InvalidSessionError('session expired') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.save(opened!.session, opened!.engineHandle, { patches: [] }, 'unchanged')).rejects.toBeInstanceOf(InvalidSessionError)
     })
   })
 
-  // ── writeRecovery ────────────────────────────────────────────────
+  // ── writeRecovery: returns bytes on success; throws on failure ───
 
   describe('writeRecovery', () => {
     test('returns archive bytes for recovery', async () => {
       const { service } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const result = await service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })
-      expect(result.ok).toBe(true)
-      expect(result.data).toBeInstanceOf(Uint8Array)
+      const data = await service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })
+      expect(data).toBeInstanceOf(Uint8Array)
     })
 
-    test('engine error → recovery fails gracefully', async () => {
+    test('engine failure → throws EngineError (NOT converted to { ok: false })', async () => {
       const engine = makeMockEngine()
-      engine.saveArchive = vi.fn(async () => { throw new Error('fail') })
+      engine.saveArchive = vi.fn(async () => { throw new EngineError('recovery fail', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const result = await service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })
-      expect(result.ok).toBe(false)
+      await expect(service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })).rejects.toThrow(EngineError)
+    })
+
+    test('engine protocol error → throws EngineError with PROTOCOL_ERROR', async () => {
+      const engine = makeMockEngine()
+      engine.saveArchive = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'PROTOCOL_ERROR',
+      })
+    })
+
+    test('engine invalid session → throws InvalidSessionError', async () => {
+      const engine = makeMockEngine()
+      engine.saveArchive = vi.fn(async () => { throw new InvalidSessionError('session expired') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.writeRecovery(opened!.session, opened!.engineHandle, { patches: [] })).rejects.toBeInstanceOf(InvalidSessionError)
     })
   })
 
-  // ── close ────────────────────────────────────────────────────────
+  // ── close: void on success; throws on failure ────────────────────
 
   describe('close', () => {
-    test('delegates to engine.close', async () => {
+    test('delegates to engine.close and returns void on success', async () => {
       const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const result = await service.close(opened!.engineHandle)
-      expect(result.ok).toBe(true)
+      await service.close(opened!.engineHandle)
       expect(engine.close).toHaveBeenCalledWith(engine._handle)
     })
 
-    test('engine error → close fails gracefully', async () => {
+    test('engine failure → throws EngineError (NOT converted to { ok: false })', async () => {
       const engine = makeMockEngine()
-      engine.close = vi.fn(async () => { throw new Error('fail') })
+      engine.close = vi.fn(async () => { throw new EngineError('close fail', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const result = await service.close(opened!.engineHandle)
-      expect(result.ok).toBe(false)
+      await expect(service.close(opened!.engineHandle)).rejects.toThrow(EngineError)
+    })
+
+    test('engine invalid session → throws InvalidSessionError', async () => {
+      const engine = makeMockEngine()
+      engine.close = vi.fn(async () => { throw new InvalidSessionError('already closed') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.close(opened!.engineHandle)).rejects.toBeInstanceOf(InvalidSessionError)
+    })
+
+    test('engine protocol error → throws EngineError with PROTOCOL_ERROR', async () => {
+      const engine = makeMockEngine()
+      engine.close = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
+      const { service } = makeService(engine)
+      const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+      await expect(service.close(opened!.engineHandle)).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'PROTOCOL_ERROR',
+      })
     })
   })
 
-  // ── domain events ────────────────────────────────────────────────
+  // ── Error model: caller can distinguish all failure modes ─────────
 
-  describe('domain events', () => {
-    test('onOpened handler receives result', async () => {
-      const { service } = makeService()
-      const handler = vi.fn()
-      service.onOpened(handler)
-      const result = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      expect(handler).toHaveBeenCalledWith(result)
-    })
+  describe('error model — caller can distinguish all failure modes', () => {
+    test('open() failure modes are distinguishable by error class + code', async () => {
+      const cases = [
+        { make: () => new InvalidInputError('bad bytes'), expectedClass: InvalidInputError, expectedCode: 'INVALID_INPUT' },
+        { make: () => new InvalidSessionError('no session'), expectedClass: InvalidSessionError, expectedCode: 'INVALID_SESSION' },
+        { make: () => new EngineError('engine', 'INTERNAL_ERROR'), expectedClass: EngineError, expectedCode: 'INTERNAL_ERROR' },
+        { make: () => new EngineError('protocol', 'PROTOCOL_ERROR'), expectedClass: EngineError, expectedCode: 'PROTOCOL_ERROR' },
+      ]
 
-    test('onOpened unsubscribe works', async () => {
-      const { service } = makeService()
-      const handler = vi.fn()
-      const unsub = service.onOpened(handler)
-      unsub()
-      await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      expect(handler).not.toHaveBeenCalled()
+      for (const { make, expectedClass, expectedCode } of cases) {
+        const engine = makeMockEngine()
+        engine.open = vi.fn(async () => { throw make() })
+        const { service } = makeService(engine)
+        try {
+          await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
+          expect.fail('open() should have thrown')
+        } catch (err) {
+          expect(err).toBeInstanceOf(expectedClass)
+          expect((err as EngineError).code).toBe(expectedCode)
+        }
+      }
     })
   })
 })
