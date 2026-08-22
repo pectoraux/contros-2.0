@@ -20,7 +20,15 @@
       "@genoffice/markdown-shared": ["./apps/markdown/src/shared/ipc.ts"],
       "@genoffice/shell-home-shared": ["./apps/shell/src/shared/home-api.ts"],
       "@genoffice/shell-tabs-shared": ["./apps/shell/src/shared/tabs-api.ts"],
-      "@genoffice/shell-update-shared": ["./apps/shell/src/shared/update-api.ts"]
+      "@genoffice/shell-update-shared": ["./apps/shell/src/shared/update-api.ts"],
+      "@genoffice/xlsx-gateway": ["./apps/sheets/src/gateway/xlsx-gateway.ts"],
+      "@genoffice/xlsx-sheets": ["./apps/sheets/src/gateway/xlsx-sheets.ts"],
+      "@genoffice/xlsx-structure": ["./apps/sheets/src/gateway/xlsx-structure.ts"],
+      "@genoffice/xlsx-filter": ["./apps/sheets/src/gateway/xlsx-filter.ts"],
+      "@genoffice/xlsx-defined-names": ["./apps/sheets/src/gateway/xlsx-defined-names.ts"],
+      "@genoffice/xlsx-page-setup": ["./apps/sheets/src/gateway/xlsx-page-setup.ts"],
+      "@genoffice/xlsx-theme": ["./apps/sheets/src/gateway/xlsx-theme.ts"],
+      "@genoffice/xlsx-package-io": ["./apps/sheets/src/gateway/xlsx-package-io.ts"]
     }
   }
 }

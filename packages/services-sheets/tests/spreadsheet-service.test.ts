@@ -323,7 +323,7 @@ describe('SpreadsheetServiceImpl', () => {
     test('unchanged → save permitted, delegates to engine.applySavePlan, returns data + touchedEntries', async () => {
       const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }] }
       const result = await service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')
       expect(result.ok).toBe(true)
       expect(result.data).toBeInstanceOf(Uint8Array)
@@ -354,7 +354,7 @@ describe('SpreadsheetServiceImpl', () => {
     test('unknown sheetId in edits → throws InvalidInputError (fail-closed)', async () => {
       const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'unknown', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'unknown', row: 0, column: 0, writeValue: true, value: '42' }] }
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(InvalidInputError)
       expect(engine.applySavePlan).not.toHaveBeenCalled()
     })
@@ -412,7 +412,7 @@ describe('SpreadsheetServiceImpl', () => {
       engine.applySavePlan = vi.fn(async () => { throw new EngineError('save failed', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }] }
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(EngineError)
     })
 
@@ -421,7 +421,7 @@ describe('SpreadsheetServiceImpl', () => {
       engine.applySavePlan = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }] }
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toMatchObject({
         name: 'EngineError',
         code: 'PROTOCOL_ERROR',
@@ -435,7 +435,7 @@ describe('SpreadsheetServiceImpl', () => {
     test('returns archive bytes for recovery', async () => {
       const { service } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }] }
       const data = await service.writeRecovery(opened.session, opened.engineHandle, { plan })
       expect(data).toBeInstanceOf(Uint8Array)
     })
@@ -443,7 +443,7 @@ describe('SpreadsheetServiceImpl', () => {
     test('unknown sheetId → throws InvalidInputError', async () => {
       const { service } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'unknown', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'unknown', row: 0, column: 0, writeValue: true, value: '42' }] }
       await expect(service.writeRecovery(opened.session, opened.engineHandle, { plan })).rejects.toThrow(InvalidInputError)
     })
 
@@ -452,7 +452,7 @@ describe('SpreadsheetServiceImpl', () => {
       engine.applySavePlan = vi.fn(async () => { throw new EngineError('recovery fail', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
-      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
+      const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }] }
       await expect(service.writeRecovery(opened.session, opened.engineHandle, { plan })).rejects.toThrow(EngineError)
     })
   })
@@ -540,7 +540,7 @@ describe('SpreadsheetServiceImpl', () => {
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan: SavePlan = {
         ...makeEmptySavePlan(),
-        edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }],
+        edits: [{ sheetId: 'sheet-1', row: 0, column: 0, writeValue: true, value: '42' }],
         structuralOps: [{ sheetId: 'sheet-2', kind: 'insert-row', index: 0, count: 1 }],
         formulaValues: [{ sheetId: 'sheet-1', row: 0, column: 0, value: 42 }],
         filterStates: [{ sheetId: 'sheet-1', filter: {}, hiddenRows: [] }],

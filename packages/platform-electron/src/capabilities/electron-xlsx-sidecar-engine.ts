@@ -17,7 +17,7 @@
  *   Consumers cannot discover the internal state — even with Reflect.ownKeys.
  */
 
-import { mkdtempSync, writeFileSync, unlinkSync, existsSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -42,6 +42,7 @@ import {
   ENGINE_SESSION_HANDLE_BRAND,
 } from '@genoffice/runtime-contracts'
 import type { SavePlan } from '@genoffice/runtime-contracts'
+import type { EntrySource } from '@genoffice/xlsx-gateway'
 import { SidecarProtocolClient } from './sidecar-protocol-client.js'
 import {
   validateOpenResult,
@@ -51,23 +52,9 @@ import {
   validateRecalcResult,
   validateMediaResult,
 } from './sidecar-validators.js'
+import { translateSavePlan, type EngineArchivePatch } from './save-plan-translator.js'
 
 // ── Internal types ────────────────────────────────────────────────────
-
-/**
- * INTERNAL engine archive-patch type (Increment 3C).
- *
- * This type is PRIVATE to the ElectronXlsxSidecarEngine — it does NOT
- * appear in runtime-contracts. The engine uses it to translate a domain
- * SavePlan into the sidecar's `save_archive` wire format
- * ({ replacements, removals, additions }).
- */
-interface EngineArchivePatch {
-  /** The ZIP entry path within the archive (e.g., 'xl/worksheets/sheet1.xml'). */
-  readonly entryPath: string
-  /** The new content for the entry (UTF-8 string). */
-  readonly content: string
-}
 
 interface SessionState {
   readonly sidecarSessionId: string
@@ -97,6 +84,13 @@ export interface ElectronXlsxSidecarEngineConfig {
 export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
   private readonly client: SidecarProtocolClient
   private readonly sessions = new WeakMap<EngineSessionHandle, SessionState>()
+  /**
+   * Parallel map of handle → sheetNames (sheetId → file sheet name).
+   * Stored at open() time so applySavePlan's translator can resolve
+   * domain sheetIds → file sheet names without the engine having access
+   * to the domain session.
+   */
+  private readonly sessionSheetNames = new WeakMap<EngineSessionHandle, ReadonlyMap<string, string>>()
   /** Parallel iterable set — enables invalidateAllSessions() to enumerate handles. */
   private readonly activeHandles = new Set<EngineSessionHandle>()
   private readonly tempDir: string
@@ -125,6 +119,13 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
         sidecarSessionId: validated.sessionId,
         tempPath,
       })
+      // Store the sheetNames map (sheetId → file sheet name) for applySavePlan.
+      // Built from [sheet.id, sheet.name] — the stable XLSX sheetId attribute.
+      const sheetNames = new Map<string, string>()
+      for (const sheet of validated.sheets) {
+        sheetNames.set(sheet.id, sheet.name)
+      }
+      this.sessionSheetNames.set(handle, sheetNames)
       this.activeHandles.add(handle)
       return { handle, metadata: buildWorkbookMetadata(validated, fileName) }
     } catch (error) {
@@ -221,45 +222,64 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     plan: SavePlan,
   ): Promise<EngineSaveResult> {
     const session = this.resolveSession(handle)
-    // Translate the domain SavePlan to the engine's INTERNAL archive-patch
-    // representation. This translation is PRIVATE to the engine implementation
-    // — the runtime-independent contract exposes only the SavePlan and
-    // EngineSaveResult types, never EngineArchivePatch.
-    //
-    // The full xlsx-gateway.ts planning logic (planCellEditsToXlsx) is
-    // complex and will be wired in when the shell coordinator is extracted
-    // (Increment 4). For now, this stub produces an empty patch list —
-    // sufficient to satisfy the contract and let tests verify the delegation.
-    // The shell will later inject the full planning logic via the engine's
-    // constructor deps (a `SavePlanPlanner` function), OR the engine will
-    // import xlsx-gateway.ts directly (it already lives in apps/sheets —
-    // extraction to packages/platform-electron is a future increment).
-    const patches = this.translateSavePlanToPatches(plan)
-    const touchedEntries = patches.map((p) => p.entryPath)
-
     const workDir = mkdtempSync(join(this.tempDir, 'genoffice-save-'))
     const targetPath = join(workDir, `output-${randomUUID()}.xlsx`)
     try {
-      const replacements = patches.map((p) => {
-        const contentPath = join(workDir, `patch-${randomUUID()}.xml`)
-        writeFileSync(contentPath, p.content)
-        return { name: p.entryPath, contentPath }
-      })
+      // Create a sidecar-backed EntrySource (abstract archive reader).
+      // Mirrors createSidecarEntrySource in apps/sheets/src/gateway/xlsx-package-io.ts.
+      const source = this.createEntrySource(session.tempPath, workDir)
+
+      // The engine stores the sheetNames map at open() time so the translator
+      // can resolve domain sheetIds → file sheet names. The service validates
+      // sheetIds before calling applySavePlan, but the translator needs the
+      // actual sheetNames map to perform the resolution.
+      const sheetNames = this.sessionSheetNames.get(handle)
+      if (sheetNames === undefined) {
+        throw new InvalidSessionError('Session sheetNames not found — was the session closed?')
+      }
+
+      // Translate the domain SavePlan to engine archive patches via the legacy
+      // planCellEditsToXlsx planning logic. The translator:
+      //   1. Resolves sheetIds → sheetNames (fail-closed → InvalidInputError)
+      //   2. Builds gateway-style mutation types (mirrors writeWorkbookTo)
+      //   3. Calls planCellEditsToXlsx with the sidecar-backed EntrySource
+      //   4. Converts MutationPlan → EngineArchivePatch[] + touched/removed/added
+      const translation = await translateSavePlan(plan, sheetNames, source)
+
+      // Write each patch's content to a temp file (the sidecar's save_archive
+      // command expects { name, contentPath } pairs, not inline content).
+      const replacements: { name: string; contentPath: string }[] = []
+      const additions: { name: string; contentPath: string }[] = []
+      const addedSet = new Set(translation.addedEntries)
+      for (const patch of translation.patches) {
+        const contentPath = join(workDir, `patch-${randomUUID()}.bin`)
+        if (typeof patch.content === 'string') {
+          writeFileSync(contentPath, patch.content, 'utf8')
+        } else {
+          writeFileSync(contentPath, patch.content)
+        }
+        if (addedSet.has(patch.entryPath)) {
+          additions.push({ name: patch.entryPath, contentPath })
+        } else {
+          replacements.push({ name: patch.entryPath, contentPath })
+        }
+      }
+
       await this.client.request(
         {
           command: 'save_archive',
           sourcePath: session.tempPath,
           targetPath,
           replacements,
-          removals: [],
-          additions: [],
+          removals: translation.removedEntries,
+          additions,
         },
         SidecarProtocolClient.ARCHIVE_TIMEOUT_MS,
       )
       const bytes = readFileSync(targetPath)
       return {
         data: new Uint8Array(bytes),
-        touchedEntries,
+        touchedEntries: translation.touchedEntries,
       }
     } catch (error) {
       throw this.translateError(error)
@@ -269,41 +289,76 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
   }
 
   /**
-   * Translate a domain SavePlan to the engine's INTERNAL archive-patch list.
+   * Create a sidecar-backed EntrySource for the save planner.
    *
-   * This is the private translation boundary (Increment 3C): the SavePlan
-   * (a runtime-independent domain type) is converted to EngineArchivePatch[]
-   * (an engine-internal type defined in this file, NOT in runtime-contracts).
-   *
-   * The full translation mirrors the legacy xlsx-gateway.ts planning logic
-   * (planCellEditsToXlsx). For now, this stub returns an empty patch list —
-   * the full planning logic will be wired in when the shell coordinator
-   * is extracted (Increment 4). The stub is sufficient to:
-   *   - Verify the delegation path (service → engine.applySavePlan → sidecar)
-   *   - Verify the engine contract is satisfied
-   *   - Verify no EngineArchivePatch leakage above the engine boundary
-   *
-   * The shell coordinator (Increment 4) will provide the real planning
-   * logic, either by injecting a planner function into the engine's
-   * constructor deps OR by extracting xlsx-gateway.ts into a shared
-   * package that platform-electron can import.
+   * Mirrors `createSidecarEntrySource` in apps/sheets/src/gateway/xlsx-package-io.ts.
+   * The EntrySource abstracts archive reading: the planner calls readText/has/
+   * canPatch/containsText, and this implementation backs them with sidecar
+   * wire commands (archive_manifest, read_entries, scan_entries).
    */
-  private translateSavePlanToPatches(plan: SavePlan): EngineArchivePatch[] {
-    // Stub: return an empty patch list. The full planning logic is deferred
-    // to the shell coordinator extraction (Increment 4). This is acceptable
-    // because:
-    //   1. The runtime-independent contract (SavePlan → EngineSaveResult) is
-    //      fully defined and tested.
-    //   2. The engine delegation path is verified (service → engine → sidecar).
-    //   3. No EngineArchivePatch leakage above the engine boundary.
-    //   4. The shell coordinator will inject the real planning logic.
-    //
-    // The stub does NOT silently discard mutations — it returns an empty
-    // patch list, which the sidecar's save_archive command treats as "no
-    // changes" (the saved bytes equal the source bytes). This is correct
-    // behavior for a stub; the real planning logic is a separate concern.
-    void plan
-    return []
+  private createEntrySource(sourcePath: string, workDir: string): EntrySource {
+    // Fetch the archive manifest up front to know entry sizes.
+    // The sidecar returns { entries: [{ name, crc32, compressedSize, uncompressedSize }] }.
+    const manifestPromise = this.client.request(
+      { command: 'archive_manifest', path: sourcePath },
+      SidecarProtocolClient.ARCHIVE_TIMEOUT_MS,
+    )
+    const cache = new Map<string, string>()
+    let extractionCount = 0
+    const MAX_PATCH_ENTRY_BYTES = 256 * 1024 * 1024
+
+    return {
+      paths: async () => {
+        const manifest = await manifestPromise
+        const entries = (manifest as { entries: Array<{ name: string }> }).entries
+        return entries.map((e) => e.name)
+      },
+      has: async (path: string) => {
+        const manifest = await manifestPromise
+        const entries = (manifest as { entries: Array<{ name: string }> }).entries
+        return entries.some((e) => e.name === path)
+      },
+      canPatch: async (path: string) => {
+        const manifest = await manifestPromise
+        const entries = (manifest as { entries: Array<{ name: string; uncompressedSize: number }> }).entries
+        const entry = entries.find((e) => e.name === path)
+        return (entry?.uncompressedSize ?? 0) <= MAX_PATCH_ENTRY_BYTES
+      },
+      containsText: async (path: string, needle: string) => {
+        const scanned = await this.client.request(
+          { command: 'scan_entries', path: sourcePath, entries: [path], needle },
+          SidecarProtocolClient.ARCHIVE_TIMEOUT_MS,
+        )
+        const matches = (scanned as { matches: string[] }).matches
+        return matches.includes(path)
+      },
+      readText: async (path: string) => {
+        const cached = cache.get(path)
+        if (cached !== undefined) return cached
+        const manifest = await manifestPromise
+        const entries = (manifest as { entries: Array<{ name: string; uncompressedSize: number }> }).entries
+        const entry = entries.find((e) => e.name === path)
+        if (!entry) throw new EngineErrorClass(`Workbook is missing ${path}`, 'PROTOCOL_ERROR')
+        if (entry.uncompressedSize > MAX_PATCH_ENTRY_BYTES) {
+          throw new EngineErrorClass(
+            `${path} is ${entry.uncompressedSize} bytes uncompressed — too large to edit.`,
+            'INTERNAL_ERROR',
+          )
+        }
+        const extractDir = join(workDir, `extract-${extractionCount}`)
+        extractionCount += 1
+        mkdirSync(extractDir, { recursive: true })
+        const extracted = await this.client.request(
+          { command: 'read_entries', path: sourcePath, entries: [path], outputDir: extractDir },
+          SidecarProtocolClient.ARCHIVE_TIMEOUT_MS,
+        )
+        const filePath = (extracted as { entries: Array<{ name: string; path: string }> }).entries[0]?.path
+        if (!filePath) throw new EngineErrorClass(`Sidecar did not extract ${path}`, 'PROTOCOL_ERROR')
+        const content = readFileSync(filePath, 'utf8')
+        cache.set(path, content)
+        return content
+      },
+    }
   }
 
   async convertWorkbook(
@@ -335,6 +390,7 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     const session = this.sessions.get(handle)
     if (!session) throw new InvalidSessionError('Unknown engine session handle')
     this.sessions.delete(handle)
+    this.sessionSheetNames.delete(handle)
     this.activeHandles.delete(handle)
     try {
       await this.client.request({ command: 'close', sessionId: session.sidecarSessionId })
@@ -372,6 +428,7 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
       if (session) {
         this.cleanupTempFile(session.tempPath)
         this.sessions.delete(handle)
+        this.sessionSheetNames.delete(handle)
       }
     }
     this.activeHandles.clear()

@@ -24,21 +24,26 @@
 /**
  * A cell edit in the domain save plan.
  * Keyed by `sheetId` (domain), resolved to file sheet name by the service.
+ *
+ * Mirrors the legacy `WorkbookCellEdit` (apps/sheets/src/shared/desktop-api.ts:748)
+ * but as a domain type, not a Zod schema.
  */
 export interface SheetCellEdit {
   /** Domain sheetId (the renderer's sheet identifier). */
   readonly sheetId: string
   readonly row: number
   readonly column: number
-  /** The value to write (string for formulas, number for numeric). */
-  readonly value: string
+  /** false = style-only edit; the cell's stored content stays untouched. */
+  readonly writeValue: boolean
+  /** The cell value (string, number, boolean, or null). */
+  readonly value: string | number | boolean | null
   /** Optional formula string (without leading =). */
   readonly formula?: string
-  /** Optional style index to apply. */
-  readonly styleIndex?: number
-  /** Optional rich-text runs. */
-  readonly rich?: unknown
-  /** Whether to reset the cell's style. */
+  /** Optional style edit (mirrors WorkbookStyleEdit). */
+  readonly style?: unknown
+  /** Optional rich-text runs (mirrors WorkbookRichRun[]). */
+  readonly rich?: readonly unknown[]
+  /** Reset the cell to the default style before applying `style`. */
   readonly styleReset?: boolean
 }
 
