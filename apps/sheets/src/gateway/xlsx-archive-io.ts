@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { open, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -31,7 +31,6 @@ import type {
   WorkbookVisualEdit,
 } from '@genoffice/xlsx-gateway'
 import { planCellEditsToXlsx } from '@genoffice/xlsx-gateway'
-import { syncFileBestEffort } from './xlsx-file-ops.js'
 
 /// Mirrors the sidecar's per-entry extraction cap: only entries the gateway
 /// patches must fit in memory — the archive as a whole has no size limit.
@@ -332,4 +331,36 @@ export function assertManifestPreserved(
 async function promoteFileAtomically(temporaryPath: string, path: string): Promise<void> {
   await syncFileBestEffort(temporaryPath)
   await rename(temporaryPath, path)
+}
+
+/**
+ * Flush a freshly written file before it is renamed into place. Best-effort:
+ * inside cloud-sync folders or under AV locks, reopening or syncing can be
+ * refused with EPERM/EACCES/EBUSY. The bytes are already written at this
+ * point, so a refused flush only weakens crash durability and must not fail
+ * the save itself.
+ *
+ * (Increment 3G: inlined here from the former xlsx-file-ops.ts to avoid an
+ * apps/sheets → platform-electron dependency. The platform-electron copy
+ * remains for the atomic-sync test.)
+ */
+async function syncFileBestEffort(path: string): Promise<void> {
+  const tolerated = (error: unknown) =>
+    ['EPERM', 'EACCES', 'EBUSY', 'EINVAL', 'ENOSYS'].includes(
+      (error as NodeJS.ErrnoException).code ?? '',
+    )
+  let handle
+  try {
+    handle = await open(path, 'r+')
+  } catch (error: unknown) {
+    if (tolerated(error)) return
+    throw error
+  }
+  try {
+    await handle.sync()
+  } catch (error: unknown) {
+    if (!tolerated(error)) throw error
+  } finally {
+    await handle.close()
+  }
 }
