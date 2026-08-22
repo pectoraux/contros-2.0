@@ -13,7 +13,9 @@
       "@genoffice/markdown-shared": ["../../apps/markdown/src/shared/ipc.ts"],
       "@genoffice/shell-home-shared": ["../../apps/shell/src/shared/home-api.ts"],
       "@genoffice/shell-tabs-shared": ["../../apps/shell/src/shared/tabs-api.ts"],
-      "@genoffice/shell-update-shared": ["../../apps/shell/src/shared/update-api.ts"]
+      "@genoffice/shell-update-shared": ["../../apps/shell/src/shared/update-api.ts"],
+      "@genoffice/renderer-bridge": ["../../packages/renderer-bridge/src/index.ts"],
+      "@genoffice/renderer-bridge/*": ["../../packages/renderer-bridge/src/*"]
     }
   },
   "include": ["src", "tests", "electron.vite.config.ts", "vitest.config.ts"]

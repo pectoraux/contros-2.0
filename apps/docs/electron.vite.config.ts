@@ -9,6 +9,17 @@ const localAlias = {
   '@genoffice/docx-engine': resolve(__dirname, '../../packages/docx-engine/src/index.ts'),
 }
 
+// Increment 3: the preload imports directly from
+// @genoffice/renderer-bridge/bridges/docs-bridge (deep import) to avoid
+// pulling in the slides bridge, which imports @genoffice/slides-shared
+// (whose `declare global { Window.desktop }` conflicts with the docs
+// DesktopApi). This alias resolves the deep import at build time.
+const rendererBridgeSrc = resolve(__dirname, '../../packages/renderer-bridge/src')
+const rendererBridgeAlias = [
+  { find: /^@genoffice\/renderer-bridge\/(.+)$/, replacement: resolve(rendererBridgeSrc, '$1') },
+  { find: /^@genoffice\/renderer-bridge$/, replacement: resolve(rendererBridgeSrc, 'index.ts') },
+]
+
 export default defineConfig({
   // Main and preload use only electron + node builtins; bundle everything so
   // the packaged app doesn't rely on node_modules at runtime.
@@ -21,7 +32,9 @@ export default defineConfig({
     ],
     resolve: { alias: localAlias },
   },
-  preload: {},
+  preload: {
+    resolve: { alias: [...rendererBridgeAlias, ...Object.entries(localAlias).map(([find, replacement]) => ({ find, replacement }))] },
+  },
   renderer: {
     plugins: [react()],
     resolve: { alias: localAlias },

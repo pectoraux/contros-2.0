@@ -25,6 +25,7 @@
     "@genoffice/docx-engine": "*",
     "@genoffice/file-parse": "*",
     "@genoffice/project-store": "*",
+    "@genoffice/renderer-bridge": "*",
     "@genoffice/ui": "*",
     "@tiptap/core": "^3.28.0",
     "@tiptap/extensions": "^3.28.0",
