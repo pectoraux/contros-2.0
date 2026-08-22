@@ -39,8 +39,25 @@ desktopCapturer + screen.getAllDisplays()
 
 ```text
 ScreenCapture {
+    // Enumerate available capture sources (displays and windows).
+    // Returns an empty array if the runtime does not support programmatic
+    // enumeration (e.g., browsers require user-mediated source selection).
     enumerateSources(): Promise<ScreenSource[]>
+
+    // Request a capture of a specific source by ID (from enumerateSources).
+    // In browser runtimes that do not support enumerateSources, the caller
+    // should use requestCapture() instead.
     captureSource(sourceId: string): Promise<ScreenCaptureResult>
+
+    // Request a capture with user-mediated source selection.
+    // In Electron, this delegates to enumerateSources + captureSource.
+    // In browsers, this uses navigator.mediaDevices.getDisplayMedia() which
+    // prompts the user to pick a source at capture time — no programmatic
+    // enumeration is possible.
+    // Returns the capture result directly (the user chose the source).
+    requestCapture(): Promise<ScreenCaptureResult | null>
+
+    // Check the OS-level permission status for screen recording.
     getPermissionStatus(): Promise<ScreenCapturePermission>
 }
 ```
@@ -70,10 +87,28 @@ ScreenCapturePermission = 'granted' | 'denied' | 'prompt' | 'unknown'
 `enumerateSources()` returns all available capture sources (displays and
 application windows). The caller filters which sources to present.
 
-### Capture request
+**Portability**: In Electron, `enumerateSources()` uses
+`desktopCapturer.getSources()` and returns all sources. In a browser
+runtime, `enumerateSources()` returns an empty array — browsers do not
+allow programmatic enumeration of system windows for privacy reasons.
+The caller must check the return value: if empty, fall back to
+`requestCapture()` which triggers the browser's native source-selection
+prompt.
+
+### Capture request (by source ID)
 
 `captureSource(sourceId)` captures a full-resolution screenshot of the
-identified source. The `sourceId` comes from `enumerateSources()`.
+identified source. The `sourceId` comes from `enumerateSources()`. This
+method is only available in runtimes that support programmatic source
+enumeration (Electron). Browser runtimes should use `requestCapture()`.
+
+### Capture request (user-mediated)
+
+`requestCapture()` requests a capture with user-mediated source selection.
+In Electron, this is equivalent to calling `enumerateSources()` +
+`captureSource()` (the caller may present a picker UI). In browsers, this
+uses `navigator.mediaDevices.getDisplayMedia()` which prompts the user
+to pick a source at capture time. Returns `null` if the user cancels.
 
 ### Permission / denied semantics
 
