@@ -8,10 +8,13 @@
  *   conflicts with the docs `Window.desktop: DesktopApi` declaration.
  *
  *   This entry point exports ONLY the Docs bridge + typed transport +
- *   IPC contract — NO slides, sheets, pdf, or markdown bridges. This
- *   allows application preloads (like apps/docs/src/preload) to import
- *   the docs bridge without the slides global declaration polluting
- *   their type space.
+ *   IPC contract — NO slides, sheets, pdf, or markdown bridges, and NO
+ *   shell UI types (ShellTabInfo/ShellMenuCommand). This allows application
+ *   preloads (like apps/docs/src/preload) to import the docs bridge without
+ *   the slides global declaration polluting their type space.
+ *
+ *   Shell types remain available from the application-boundary module
+ *   (./shell/docs-coordinator.js) for consumers that need them.
  *
  * Usage:
  *   import { createDocsDesktopBridge } from '@genoffice/renderer-bridge/docs'
@@ -29,6 +32,3 @@ export type {
   IpcSendChannel,
   IpcEventChannel,
 } from './docs-ipc-contract.js'
-
-// Shell types (application-boundary, NOT runtime-contracts)
-export type { ShellTabInfo, ShellMenuCommand } from './shell/docs-coordinator.js'

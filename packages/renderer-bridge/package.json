@@ -13,7 +13,18 @@
   },
   "dependencies": {
     "@genoffice/runtime-contracts": "*",
-    "@genoffice/platform": "*"
+    "@genoffice/platform": "*",
+    "@genoffice/docs-shared": "*",
+    "@genoffice/ai-provider": "*",
+    "@genoffice/font-metrics": "*",
+    "@genoffice/project-store": "*",
+    "@genoffice/shell-home-shared": "*",
+    "@genoffice/shell-tabs-shared": "*",
+    "@genoffice/shell-update-shared": "*",
+    "@genoffice/sheets-shared": "*",
+    "@genoffice/slides-shared": "*",
+    "@genoffice/pdf-shared": "*",
+    "@genoffice/markdown-shared": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
