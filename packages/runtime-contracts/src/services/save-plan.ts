@@ -50,21 +50,52 @@ export interface SheetCellEdit {
 /**
  * A structural operation (insert/delete/resize/hide/outline rows or columns).
  * Keyed by `sheetId` (domain), resolved to file sheet name by the service.
+ *
+ * This is a discriminated union matching the legacy `WorkbookStructuralOp`
+ * schema (apps/sheets/src/shared/desktop-api.ts:771). The `kind` field
+ * determines which other fields are present.
  */
-export interface SheetStructuralOp {
-  readonly sheetId: string
-  readonly kind: string
-  readonly start?: number
-  readonly end?: number
-  readonly index?: number
-  readonly count?: number
-  readonly size?: number
-  readonly level?: number
-  readonly collapsed?: boolean
-  readonly hidden?: boolean
-  readonly before?: boolean
-  readonly range?: unknown
-}
+export type SheetStructuralOp =
+  | {
+      readonly sheetId: string
+      readonly kind: 'insert-rows' | 'remove-rows' | 'insert-cols' | 'remove-cols'
+      readonly index: number
+      readonly count: number
+    }
+  | {
+      readonly sheetId: string
+      readonly kind: 'move-rows'
+      readonly index: number
+      readonly count: number
+      readonly before: number
+    }
+  | {
+      readonly sheetId: string
+      readonly kind: 'merge-cells' | 'unmerge-cells'
+      readonly range: unknown
+    }
+  | {
+      readonly sheetId: string
+      readonly kind: 'set-row-size' | 'set-col-size'
+      readonly start: number
+      readonly end: number
+      readonly size: number | null
+    }
+  | {
+      readonly sheetId: string
+      readonly kind: 'set-rows-hidden' | 'set-cols-hidden'
+      readonly start: number
+      readonly end: number
+      readonly hidden: boolean
+    }
+  | {
+      readonly sheetId: string
+      readonly kind: 'set-rows-outline' | 'set-cols-outline'
+      readonly start: number
+      readonly end: number
+      readonly level: number
+      readonly collapsed?: boolean
+    }
 
 // ── Sheet-level mutations ───────────────────────────────────────────
 

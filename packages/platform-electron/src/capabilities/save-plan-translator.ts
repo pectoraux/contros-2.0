@@ -45,35 +45,35 @@
 import type { SavePlan } from '@genoffice/runtime-contracts'
 import { InvalidInputError } from '@genoffice/runtime-contracts'
 
-// Import the legacy gateway types and planning function.
-// These are the AUTHORITATIVE implementations — the translator does NOT
-// reinvent XLSX mutation. The path alias maps to
-// apps/sheets/src/gateway/xlsx-gateway.ts.
+// Import the canonical gateway types and planning function from the
+// @genoffice/xlsx-gateway workspace package. This is the AUTHORITATIVE
+// implementation — the translator does NOT reinvent XLSX mutation.
 import type {
   CellEdit,
   EntrySource,
   MutationPlan,
   SheetStructuralOps,
+  StructuralOp,
   SheetHyperlinkEdits,
   SheetCfState,
   SheetDvState,
   SheetProtectionState,
   SheetProtectedRangesState,
   SheetFormulaValues,
+  SheetFilterState,
   SheetNoteState,
   SheetVisualAddition,
   SheetTableAddition,
   SheetPivotAddition,
   SheetSparklineAddition,
   PivotRefreshUpdate,
+  SheetEditPlan,
+  DefinedNamesState,
+  SheetPageSetupState,
+  WorkbookThemeState,
+  WorkbookChartEdit,
+  WorkbookVisualEdit,
 } from '@genoffice/xlsx-gateway'
-import type { StructuralOp } from '@genoffice/xlsx-structure'
-import type { SheetFilterState } from '@genoffice/xlsx-filter'
-import type { SheetEditPlan } from '@genoffice/xlsx-sheets'
-import type { DefinedNamesState } from '@genoffice/xlsx-defined-names'
-import type { SheetPageSetupState } from '@genoffice/xlsx-page-setup'
-import type { WorkbookThemeState } from '@genoffice/xlsx-theme'
-import type { WorkbookChartEdit, WorkbookVisualEdit } from '@genoffice/sheets-shared'
 import { planCellEditsToXlsx } from '@genoffice/xlsx-gateway'
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -222,17 +222,18 @@ export async function translateSavePlan(
   }))
 
   // Structural ops: group by sheet, resolve sheetId → sheetName.
-  // The domain SheetStructuralOp has a loose `kind: string`; the gateway
-  // StructuralOp is a discriminated union. Cast through unknown — the
-  // renderer's Zod validation guarantees the kind+fields match.
+  // The domain SheetStructuralOp is now a proper discriminated union
+  // (Increment 3E) matching the gateway StructuralOp. The `sheetId` field
+  // is stripped and `sheetName` is added — the rest of the fields pass
+  // through type-safely.
   const opsBySheet = new Map<string, StructuralOp[]>()
   for (const op of plan.structuralOps) {
     const sheetName = resolveSheetName(op.sheetId)
     const sheetOps = opsBySheet.get(sheetName) ?? []
-    // Cast through unknown: the domain op has the right fields (validated
-    // by Zod at the renderer boundary), but TypeScript can't prove the
-    // discriminated union matches.
-    sheetOps.push(op as unknown as StructuralOp)
+    // Strip sheetId, keep all other fields. The discriminated union ensures
+    // kind+fields match the gateway StructuralOp exactly.
+    const { sheetId: _sheetId, ...opFields } = op
+    sheetOps.push(opFields as StructuralOp)
     opsBySheet.set(sheetName, sheetOps)
   }
   const structuralOps: SheetStructuralOps[] = [...opsBySheet].map(([sheetName, ops]) => ({ sheetName, ops }))

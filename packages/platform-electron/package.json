@@ -19,7 +19,8 @@
     "@genoffice/ai-provider": "*",
     "@genoffice/ai-search": "*",
     "@genoffice/project-store": "*",
-    "@genoffice/i18n": "*"
+    "@genoffice/i18n": "*",
+    "@genoffice/xlsx-gateway": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

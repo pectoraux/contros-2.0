@@ -32,6 +32,7 @@
     "@genoffice/file-parse": "*",
     "@genoffice/i18n": "*",
     "@genoffice/ui": "*",
+    "@genoffice/xlsx-gateway": "*",
     "@univerjs/core": "^0.25.1",
     "@univerjs/data-validation": "^0.25.1",
     "@univerjs/engine-render": "^0.25.1",
