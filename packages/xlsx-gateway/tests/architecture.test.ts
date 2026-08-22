@@ -1,5 +1,5 @@
 /**
- * Architecture-boundary test for @genoffice/xlsx-gateway (Increment 3F).
+ * Architecture-boundary test for @genoffice/xlsx-gateway (Increment 3F/3H).
  *
  * Recursively scans EVERY production source file under packages/xlsx-gateway/src/**
  * and fails on actual production imports of:
@@ -7,12 +7,23 @@
  *   - electron
  *   - child_process
  *   - BrowserWindow / WebContents / ipcMain / ipcRenderer
+ *   - apps/sheets (no upward dependency on the application)
+ *   - @genoffice/platform-electron
+ *   - @genoffice/platform
+ *   - @genoffice/runtime-contracts
+ *
+ * SCANNER (Increment 3H):
+ *   Uses a strengthened regex that detects ALL import forms:
+ *     import '...'
+ *     import type { ... } from '...'
+ *     import { ... } from '...'
+ *     export { ... } from '...'
+ *     export type { ... } from '...'
+ *     export * from '...'
+ *     require('...')
  *
  * The test file itself (THIS file) is the ONLY exception — it imports node:fs
  * and node:path to perform the scan. Test files are NOT production source.
- *
- * This test was corrected in Increment 3F — the previous version falsely
- * reported ZERO Node imports because it did not include a node:* check.
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -38,17 +49,32 @@ function listSourceFiles(rootDir: string): string[] {
   return out
 }
 
+/**
+ * Strong import scanner (Increment 3H).
+ *
+ * Detects ALL forms of module references:
+ *   - import 'mod'
+ *   - import type 'mod'
+ *   - import { ... } from 'mod'
+ *   - import type { ... } from 'mod'
+ *   - export { ... } from 'mod'
+ *   - export type { ... } from 'mod'
+ *   - export * from 'mod'
+ *   - require('mod')
+ */
 function scanForImports(
   rootDir: string,
   forbidden: Array<string | RegExp>,
 ): Array<{ file: string; line: number; text: string }> {
   const hits: Array<{ file: string; line: number; text: string }> = []
-  const importPattern = /(?:from\s+|require\s*\(\s*)['"]([^'"]+)['"]/g
+  const importPattern =
+    /(?:^|\s)(?:import|export)(?:\s+type)?(?:\s+\{[^}]*\}|\s+\*\s+as\s+\w+|\s+\w+)?\s+from\s+['"`]([^'"`]+)['"`]|(?:^|\s)import\s+['"`]([^'"`]+)['"`]|require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/gm
   for (const file of listSourceFiles(rootDir)) {
     const text = readFileSync(file, 'utf8')
     let m: RegExpExecArray | null
     while ((m = importPattern.exec(text)) !== null) {
-      const mod = m[1]
+      const mod = m[1] ?? m[2] ?? m[3]
+      if (!mod) continue
       const lineNum = text.slice(0, m.index).split('\n').length
       for (const f of forbidden) {
         const isHit = typeof f === 'string' ? mod === f || mod.startsWith(f + '/') : f.test(mod)
@@ -76,7 +102,7 @@ function scanForTokens(rootDir: string, forbidden: string[]): Array<{ file: stri
   return hits
 }
 
-describe('@genoffice/xlsx-gateway architecture boundary (Increment 3F — pure package)', () => {
+describe('@genoffice/xlsx-gateway architecture boundary (Increment 3F/3H — pure package)', () => {
   test('ZERO imports of node:* (the package must be pure — no Node builtins)', () => {
     const hits = scanForImports(SRC, [/^node:/])
     if (hits.length > 0) {
@@ -100,6 +126,12 @@ describe('@genoffice/xlsx-gateway architecture boundary (Increment 3F — pure p
 
   test('ZERO imports of apps/sheets (no upward dependency on the application)', () => {
     const hits = scanForImports(SRC, [/apps\/sheets/, /\.\.\/\.\.\/apps\/sheets/, /\.\.\/\.\.\/\.\.\/apps\/sheets/])
+    if (hits.length > 0) {
+      console.error('Found apps/sheets imports in xlsx-gateway source:')
+      for (const h of hits) {
+        console.error(`  ${h.file}:${h.line}: ${h.text}`)
+      }
+    }
     expect(hits).toEqual([])
   })
 
