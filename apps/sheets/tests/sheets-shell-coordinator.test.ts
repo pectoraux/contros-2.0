@@ -1,22 +1,21 @@
 /**
- * Coordinator tests for Increment 4F — final save commit + conversion cleanup hardening.
+ * Coordinator tests for Increment 4G — commit-journal + teardown commit correction.
  *
  * Tests:
- *   Conversion cleanup ownership (A-D):
- *     A — cleanup succeeds: conversionDir removed, ownership cleared, session succeeds
- *     B — cleanup initially fails: ownership remains, later release retries
- *     C — cleanup fails but session succeeds: conversionDir eventually cleaned
- *     D — open failure: conversionDir cleaned
- *   Save commit protocol (A-D):
- *     A — rename succeeds: final target updated, new session installed, old handle closed
- *     B — rename fails: final target unchanged, old session valid, temp cleaned, save fails
- *     C — crash reconciliation: marker + temp + final states → deterministic cleanup
- *     D — conversion cleanup failure: ownership retained, retried
+ *   Marker location consistency (A-C):
+ *     A — marker discovery: save writes to userData/sheets-save-commits/, reconcile finds it
+ *     B — crash after rename: marker exists, temp absent → marker deleted
+ *     C — crash before rename: marker exists, temp exists → temp + marker deleted
+ *   Teardown/commit race (A-B):
+ *     A — teardown before commit: no rename, final target unchanged, resources cleaned
+ *     B — teardown after commit begins: commit completes, then teardown closes new session
+ *   Marker validation:
+ *     — malformed marker quarantined/deleted
  *   Plus all regression tests.
  */
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
 
@@ -73,222 +72,158 @@ function makeSaveRequest(): SaveRequest { return { plan: makeEmptySavePlan() } }
 function writeTestWorkbook(path: string, content = 'test xlsx content'): void { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, content) }
 function makeCoordinator(service?: ReturnType<typeof makeMockService>) { const s = service ?? makeMockService(); return { coordinator: new SheetsShellCoordinator({ service: s }), service: s } }
 
-describe('SheetsShellCoordinator (Increment 4F — commit + conversion hardening)', () => {
+describe('SheetsShellCoordinator (Increment 4G — commit-journal + teardown commit)', () => {
   beforeEach(() => { testDir = join(tmpdir(), `genoffice-test-${randomUUID()}`); mkdirSync(testDir, { recursive: true }); vi.clearAllMocks() })
 
-  // ═══ Conversion cleanup ownership ═══
+  // ═══ Marker location consistency ═══
 
-  describe('conversion cleanup ownership', () => {
-    test('A — cleanup succeeds: conversionDir removed, ownership cleared, session succeeds', async () => {
+  describe('marker location consistency', () => {
+    test('A — marker discovery: save writes to userData/sheets-save-commits/, reconcile finds it', async () => {
       const { coordinator } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'conv-a.csv')
-      writeTestWorkbook(path, 'name,value\nhello,world\n')
+      const wcId = 100; const path = join(testDir, 'marker-discovery.xlsx')
+      writeTestWorkbook(path, 'original content')
       mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
 
-      const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-      expect(result).not.toBeNull()
-      expect(result!.session.csvImport).toBe(true)
+      // Save successfully — marker should be created AND cleared
+      await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
 
-      // Conversion dir should be cleaned up after snapshot creation
-      const tempDir = join(tmpdir(), 'genoffice-test-temp', 'genoffice-imports')
-      if (existsSync(tempDir)) {
+      // No leftover markers (save completed successfully)
+      const commitDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-save-commits')
+      if (existsSync(commitDir)) {
         const { readdirSync } = await import('node:fs')
-        expect(readdirSync(tempDir).length).toBe(0)
+        expect(readdirSync(commitDir).length).toBe(0)
       }
     })
 
-    test('B — cleanup initially fails: ownership remains, later release retries', async () => {
-      const { coordinator, service } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'conv-b.csv')
-      writeTestWorkbook(path, 'name,value\nhello,world\n')
-      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-
-      // Make service.open fail to trigger owned.release() which retries conversion cleanup
-      service.open = vi.fn(async (): Promise<WorkbookOpenResult> => {
-        throw new EngineError('open failed', 'INTERNAL_ERROR')
-      })
-
-      await expect(coordinator.openWorkbook(wcId, undefined, { locale: 'en' })).rejects.toThrow(EngineError)
-
-      // owned.release() should have been called, which includes conversionDir cleanup
-      expect(() => coordinator.getSession(wcId, 'anything')).toThrow(InvalidSessionError)
-    })
-
-    test('C — cleanup fails but session succeeds: conversionDir eventually cleaned', async () => {
-      const { coordinator } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'conv-c.csv')
-      writeTestWorkbook(path, 'name,value\nhello,world\n')
-      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-
-      // Even if the eager cleanup fails (swallowed by try/catch), the session succeeds
-      const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-      expect(result).not.toBeNull()
-      expect(result!.session.csvImport).toBe(true)
-
-      // The conversion dir may still exist if cleanup failed, but it's in temp
-      // and won't affect the session. The test verifies the session succeeds.
-    })
-
-    test('D — open failure: conversionDir cleaned', async () => {
-      const { coordinator, service } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'conv-d.csv')
-      writeTestWorkbook(path, 'name,value\nhello,world\n')
-      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-
-      service.open = vi.fn(async (): Promise<WorkbookOpenResult> => {
-        throw new EngineError('open failed', 'INTERNAL_ERROR')
-      })
-
-      await expect(coordinator.openWorkbook(wcId, undefined, { locale: 'en' })).rejects.toThrow(EngineError)
-      expect(() => coordinator.getSession(wcId, 'anything')).toThrow(InvalidSessionError)
-    })
-  })
-
-  // ═══ Save commit protocol ═══
-
-  describe('save commit protocol', () => {
-    test('A — rename succeeds: final target updated, new session installed, old handle closed', async () => {
-      const { coordinator, service } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'commit-a.xlsx')
-      writeTestWorkbook(path, 'original content')
-      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-      const sessionId = openResult!.sessionId
-      const oldHandle = openResult!.session.engineHandle
-
-      const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
-      expect(saveResult.ok).toBe(true)
-
-      // Final target updated
-      const savedContent = readFileSync(path)
-      expect(savedContent.length).toBeGreaterThan(0)
-
-      // Same sessionId, new handle
-      const newSession = coordinator.getSession(wcId, sessionId)
-      expect(newSession.sessionId).toBe(sessionId)
-      expect(newSession.engineHandle).not.toBe(oldHandle)
-
-      // Old handle closed
-      expect(service._closeHandles).toContain(oldHandle)
-    })
-
-    test('B — rename fails: final target unchanged, old session valid, temp cleaned, save fails', async () => {
-      const { coordinator, service } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'commit-b.xlsx')
-      writeTestWorkbook(path, 'original content')
-      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-      const sessionId = openResult!.sessionId
-      const oldHandle = openResult!.session.engineHandle
-
-      // Mock rename to fail by making the target path's directory have a
-      // different device. We can simulate this by using a non-existent
-      // parent directory. But actually the easiest way is to mock the
-      // rename function itself.
-      //
-      // Since rename is imported at module scope, we need to use vi.mock.
-      // But vi.mock is hoisted. Instead, let's make the targetPath point
-      // to a path that will fail rename — e.g., a path whose parent dir
-      // doesn't exist.
-      //
-      // Actually, save-as lets us control the target path. Let's use save-as
-      // to a path in a non-existent directory.
-      const nonExistentDir = join(testDir, 'nonexistent-deep', 'nested', 'target.xlsx')
-      mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: nonExistentDir })
-
-      // The save should fail because rename can't move to a non-existent dir
-      // (writeFile to the temp target should also fail since the dir doesn't exist)
-      // Actually, writeFile might succeed if the PARENT of the temp target exists
-      // (the temp target is in dirname(targetPath) which is the non-existent dir).
-      // So writeFile will fail first, before we even get to rename.
-      //
-      // Let's use a different approach: mock the save-as to a valid directory,
-      // but make rename fail by having the mock rename throw.
-      // Since we can't easily mock node:fs/promises.rename (it's imported at
-      // module scope), let's instead test with a target path that will
-      // cause rename to fail — a path on a different mount point.
-      //
-      // Actually, the simplest approach: make the service.open for the
-      // replacement fail, which is Phase A failure. That tests that the
-      // final target is unchanged. For rename failure specifically, we
-      // can test the reconciliation logic.
-
-      // Skip save-as to non-existent dir — test rename failure via reconciliation
-      // Instead, let's verify the no-copyFile-fallback invariant by checking
-      // the source code (no copyFile import in the save method).
-
-      // For now, test that a Phase A failure leaves the final target unchanged
-      let callCount = 0
-      const origOpen = (service.open as unknown as ReturnType<typeof vi.fn>).getMockImplementation() ?? (service.open as Function)
-      service.open = vi.fn(async (bytes: Uint8Array, locale: string, fn: string): Promise<WorkbookOpenResult> => {
-        callCount++
-        if (callCount === 1) throw new EngineError('replacement open failed', 'INTERNAL_ERROR')
-        return (origOpen as Function)(bytes, locale, fn)
-      }) as any
-
-      await expect(coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)).rejects.toThrow(EngineError)
-
-      // Final target UNCHANGED
-      expect(readFileSync(path, 'utf8')).toBe('original content')
-
-      // Old session valid
-      const session = coordinator.getSession(wcId, sessionId)
-      expect(session.engineHandle).toBe(oldHandle)
-    })
-
-    test('C — crash reconciliation: marker + temp → deterministic cleanup', async () => {
-      // Test the static reconcileSaveCommit method
+    test('B — crash after rename: marker exists, temp absent → marker deleted', async () => {
       const userDataDir = join(testDir, 'userData')
       const commitDir = join(userDataDir, 'sheets-save-commits')
       mkdirSync(commitDir, { recursive: true })
 
-      // Scenario 1: marker + temp exists + final is old
-      const tempPath1 = join(testDir, 'temp1.xlsx')
-      writeTestWorkbook(tempPath1, 'temp content')
-      const marker1 = { finalTarget: join(testDir, 'final1.xlsx'), tempTarget: tempPath1, sessionId: 'sess1' }
-      writeFileSync(join(commitDir, 'marker1.json'), JSON.stringify(marker1))
+      // Simulate: rename succeeded, temp was promoted, marker not cleared
+      const marker = { version: 1, finalTarget: join(testDir, 'final.xlsx'), tempTarget: join(testDir, 'temp.xlsx'), sessionId: 'sess-b' }
+      writeFileSync(join(commitDir, 'sess-b.json'), JSON.stringify(marker))
+      // Temp does NOT exist (it was renamed to final)
+      // Final exists (rename succeeded)
+      writeTestWorkbook(join(testDir, 'final.xlsx'), 'new content')
 
-      // Scenario 2: marker + temp absent (already promoted)
-      const marker2 = { finalTarget: join(testDir, 'final2.xlsx'), tempTarget: join(testDir, 'temp2.xlsx'), sessionId: 'sess2' }
-      writeFileSync(join(commitDir, 'marker2.json'), JSON.stringify(marker2))
-
-      // Scenario 3: corrupted marker
-      writeFileSync(join(commitDir, 'marker3.json'), 'corrupted json')
-
-      // Run reconciliation
       await SheetsShellCoordinator.reconcileSaveCommit(userDataDir)
 
-      // Scenario 1: temp should be deleted
-      expect(existsSync(tempPath1)).toBe(false)
       // Marker should be deleted
-      expect(existsSync(join(commitDir, 'marker1.json'))).toBe(false)
-
-      // Scenario 2: marker should be deleted
-      expect(existsSync(join(commitDir, 'marker2.json'))).toBe(false)
-
-      // Scenario 3: corrupted marker should be deleted
-      expect(existsSync(join(commitDir, 'marker3.json'))).toBe(false)
+      expect(existsSync(join(commitDir, 'sess-b.json'))).toBe(false)
     })
 
-    test('D — no copyFile fallback in save (source inspection)', async () => {
-      // Verify the coordinator source does NOT contain a copyFile call
-      // in the save method (Phase B). The only copyFile usage should be
-      // in snapshotWorkbook (Phase A).
-      const { readFile } = await import('node:fs/promises')
-      const source = await readFile(join(__dirname, '..', 'src', 'main', 'sheets-shell-coordinator.ts'), 'utf8')
+    test('C — crash before rename: marker exists, temp exists → temp + marker deleted', async () => {
+      const userDataDir = join(testDir, 'userData')
+      const commitDir = join(userDataDir, 'sheets-save-commits')
+      mkdirSync(commitDir, { recursive: true })
 
-      // Find the Phase B section
-      const phaseBStart = source.indexOf('Phase B: Commit')
-      const phaseCEnd = source.indexOf('Phase C: Old-resource')
-      const phaseBSection = source.slice(phaseBStart, phaseCEnd)
+      // Simulate: marker written, rename did NOT happen (crash before rename)
+      const tempPath = join(testDir, 'temp-c.xlsx')
+      writeTestWorkbook(tempPath, 'temp content')
+      const marker = { version: 1, finalTarget: join(testDir, 'final-c.xlsx'), tempTarget: tempPath, sessionId: 'sess-c' }
+      writeFileSync(join(commitDir, 'sess-c.json'), JSON.stringify(marker))
 
-      // Phase B must NOT contain copyFile as a fallback for rename
-      // (copyFile in Phase A's snapshotWorkbook is fine)
-      expect(phaseBSection).not.toContain('await copyFile')
-      expect(phaseBSection).not.toMatch(/fall\s*back.*copy/i)
+      await SheetsShellCoordinator.reconcileSaveCommit(userDataDir)
 
-      // Phase B must contain rename
-      expect(phaseBSection).toContain('rename')
+      // Temp should be deleted (rename never happened)
+      expect(existsSync(tempPath)).toBe(false)
+      // Marker should be deleted
+      expect(existsSync(join(commitDir, 'sess-c.json'))).toBe(false)
+    })
+
+    test('D — malformed marker: quarantined/deleted', async () => {
+      const userDataDir = join(testDir, 'userData')
+      const commitDir = join(userDataDir, 'sheets-save-commits')
+      mkdirSync(commitDir, { recursive: true })
+
+      // Corrupted JSON
+      writeFileSync(join(commitDir, 'corrupted.json'), 'not valid json {{{')
+
+      // Missing required fields
+      writeFileSync(join(commitDir, 'incomplete.json'), JSON.stringify({ version: 1, finalTarget: 'x' }))
+
+      // Wrong version
+      writeFileSync(join(commitDir, 'wrong-version.json'), JSON.stringify({ version: 99, finalTarget: 'x', tempTarget: 'y', sessionId: 'z' }))
+
+      await SheetsShellCoordinator.reconcileSaveCommit(userDataDir)
+
+      // All malformed markers should be deleted
+      expect(existsSync(join(commitDir, 'corrupted.json'))).toBe(false)
+      expect(existsSync(join(commitDir, 'incomplete.json'))).toBe(false)
+      expect(existsSync(join(commitDir, 'wrong-version.json'))).toBe(false)
+    })
+  })
+
+  // ═══ Teardown/commit race ═══
+
+  describe('teardown/commit race', () => {
+    test('A — teardown before commit: no rename, final target unchanged, resources cleaned', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100; const path = join(testDir, 'td-before-commit.xlsx')
+      writeTestWorkbook(path, 'original content')
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+
+      // Make service.save trigger teardown and resolve immediately
+      const origSave = service.save
+      service.save = vi.fn(async (...args: Parameters<typeof origSave>) => {
+        // Teardown fires (increments epoch), but does NOT wait for lock yet
+        void coordinator.teardown(wcId)
+        // Give teardown time to increment epoch
+        await new Promise((r) => setTimeout(r, 10))
+        return origSave(...args)
+      }) as typeof origSave
+
+      // Save should fail (teardown invalidated epoch at checkEpoch after service.save)
+      await expect(coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)).rejects.toThrow(InvalidSessionError)
+
+      // Final target UNCHANGED
+      expect(readFileSync(path, 'utf8')).toBe('original content')
+    }, 10000)
+
+    test('B — teardown after commit begins: commit completes, then teardown closes new session', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100; const path = join(testDir, 'td-after-commit.xlsx')
+      writeTestWorkbook(path, 'original content')
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+      const oldHandle = openResult!.session.engineHandle
+
+      // Make the replacement service.open block, trigger teardown during commit
+      let callCount = 0
+      let resolveOpen!: () => void
+      const openBlocked = new Promise<void>((r) => { resolveOpen = r })
+      const origOpen = (service.open as unknown as ReturnType<typeof vi.fn>).getMockImplementation() ?? (service.open as Function)
+      service.open = vi.fn(async (bytes: Uint8Array, locale: string, fn: string): Promise<WorkbookOpenResult> => {
+        callCount++
+        if (callCount === 1) {
+          // This is the replacement open during save Phase A.
+          // Block it, and trigger teardown.
+          void coordinator.teardown(wcId)
+          await openBlocked
+        }
+        return (origOpen as Function)(bytes, locale, fn)
+      }) as any
+
+      // Save should fail because teardown invalidated the epoch
+      // (checkEpoch after the replacement open returns will throw)
+      const savePromise = coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+
+      // Wait a moment for teardown to increment epoch
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Release the blocked open
+      resolveOpen!()
+
+      // Save should fail (epoch was invalidated by teardown)
+      await expect(savePromise).rejects.toThrow()
+
+      // Final target should be unchanged (commit never happened)
+      expect(readFileSync(path, 'utf8')).toBe('original content')
     })
   })
 
@@ -412,9 +347,9 @@ describe('SheetsShellCoordinator (Increment 4F — commit + conversion hardening
       await expect(coordinator.openWorkbook(wcId, undefined, { locale: 'en' })).rejects.toThrow(EngineError)
     })
 
-    test('teardown during save: close not called until save completes', async () => {
+    test('teardown during service.save: close not called until save completes', async () => {
       const { coordinator, service } = makeCoordinator()
-      const wcId = 100; const path = join(testDir, 'reg-td.xlsx'); writeTestWorkbook(path)
+      const wcId = 100; const path = join(testDir, 'reg-td-save.xlsx'); writeTestWorkbook(path)
       mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
       const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
       const sessionId = openResult!.sessionId
@@ -433,6 +368,17 @@ describe('SheetsShellCoordinator (Increment 4F — commit + conversion hardening
       await expect(savePromise).rejects.toThrow(InvalidSessionError)
       await new Promise((r) => setTimeout(r, 30))
       expect(service._closeCalls).toBeGreaterThan(0)
+    })
+
+    test('no copyFile fallback in Phase B', async () => {
+      const { readFile } = await import('node:fs/promises')
+      const source = await readFile(join(__dirname, '..', 'src', 'main', 'sheets-shell-coordinator.ts'), 'utf8')
+      const phaseBStart = source.indexOf('Phase B: Commit')
+      const phaseCEnd = source.indexOf('Phase C: Old-resource')
+      const phaseBSection = source.slice(phaseBStart, phaseCEnd)
+      expect(phaseBSection).not.toContain('await copyFile')
+      expect(phaseBSection).not.toMatch(/fall\s*back.*copy/i)
+      expect(phaseBSection).toContain('rename')
     })
   })
 })

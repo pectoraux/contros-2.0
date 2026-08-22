@@ -1,28 +1,35 @@
 /**
  * SheetsShellCoordinator — owns the per-renderer workbook session lifecycle.
  *
- * RESOURCE OWNERSHIP (Increment 4D/4E/4F):
+ * RESOURCE OWNERSHIP (Increment 4D/4E/4F/4G):
  *   OwnedResources is created BEFORE the first resource. The operation owns
  *   every resource from creation until transfer() or release().
  *   Conversion temp dirs are owned: cleaned up eagerly after snapshot creation,
  *   but if cleanup fails, ownership is RETAINED and release() retries.
  *
- * SAVE COMMIT PROTOCOL (Increment 4F):
+ * SAVE COMMIT PROTOCOL (Increment 4F/4G):
  *   Phase A — Prepare: temp target + snapshot + open + validate.
- *             Old session untouched. Final target untouched.
- *   Phase B — Commit: write commit marker → rename(temp→final) → install
- *             replacement session → clear marker. If rename fails, the save
- *             fails explicitly — NO non-atomic copyFile fallback.
+ *   Phase B — Commit: transition to COMMITTING → write marker → rename →
+ *             install replacement → clear marker → transition to IDLE.
+ *             If rename fails, save fails explicitly — NO copyFile fallback.
  *   Phase C — Cleanup: close old handle, remove old snapshot (best-effort).
  *
- * CRASH RECONCILIATION:
- *   A commit marker file is written before rename and cleared after session
- *   installation. On startup, reconcileSaveCommit() examines any leftover
- *   markers and cleans up temp targets deterministically.
+ * SESSION COMMIT LIFECYCLE (Increment 4G):
+ *   Each session has a commit state: IDLE | COMMITTING | TEARING_DOWN | CLOSED.
+ *   - Teardown checks: if session is COMMITTING, teardown waits for the
+ *     commit to complete (it cannot preempt an in-progress commit).
+ *   - Save checks: if session is TEARING_DOWN, save aborts before commit.
+ *   This gives deterministic semantics: teardown cannot corrupt a committed save.
+ *
+ * CRASH RECONCILIATION (Increment 4G):
+ *   Commit markers are stored in a DETERMINISTIC userData directory:
+ *     userData/sheets-save-commits/<sessionId>.json
+ *   Both save and reconcileSaveCommit() use the SAME location.
+ *   Markers are validated at read time (not unchecked casts).
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm, readFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, rm, readFile, writeFile, rename, readdir } from 'node:fs/promises'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join, dirname } from 'node:path'
@@ -57,10 +64,21 @@ export interface SheetsShellCoordinatorDeps {
   readonly service: SpreadsheetService
 }
 
+// ── Session commit lifecycle ──
+
+const enum SessionCommitState {
+  IDLE = 0,
+  COMMITTING = 1,
+  TEARING_DOWN = 2,
+  CLOSED = 3,
+}
+
 interface RendererState {
   readonly sessions: Map<string, ShellWorkbookSession>
   epoch: number
   readonly locks: Map<string, Promise<unknown>>
+  /** Per-session commit state — controls teardown/commit race semantics. */
+  readonly commitStates: Map<string, SessionCommitState>
 }
 
 // ── OwnedResources ──
@@ -99,9 +117,21 @@ class OwnedResources {
 // ── Save commit marker ──
 
 interface SaveCommitMarker {
+  readonly version: 1
   readonly finalTarget: string
   readonly tempTarget: string
   readonly sessionId: string
+}
+
+/** Validate a parsed JSON object as a SaveCommitMarker. Returns null if invalid. */
+function validateMarker(raw: unknown): SaveCommitMarker | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const r = raw as Record<string, unknown>
+  if (r.version !== 1) return null
+  if (typeof r.finalTarget !== 'string' || !r.finalTarget) return null
+  if (typeof r.tempTarget !== 'string' || !r.tempTarget) return null
+  if (typeof r.sessionId !== 'string' || !r.sessionId) return null
+  return { version: 1, finalTarget: r.finalTarget, tempTarget: r.tempTarget, sessionId: r.sessionId }
 }
 
 // ── Coordinator ──
@@ -112,7 +142,11 @@ export class SheetsShellCoordinator {
   constructor(private readonly deps: SheetsShellCoordinatorDeps) {}
 
   registerRenderer(wcId: number, webContents: WebContents): void {
-    if (!this.tabs.has(wcId)) this.tabs.set(wcId, { sessions: new Map(), epoch: 0, locks: new Map() })
+    if (!this.tabs.has(wcId)) {
+      this.tabs.set(wcId, {
+        sessions: new Map(), epoch: 0, locks: new Map(), commitStates: new Map(),
+      })
+    }
     webContents.once('destroyed', () => { void this.teardown(wcId) })
   }
 
@@ -144,6 +178,14 @@ export class SheetsShellCoordinator {
     return next
   }
 
+  private getCommitState(wcId: number, sessionId: string): SessionCommitState {
+    return this.tabs.get(wcId)?.commitStates.get(sessionId) ?? SessionCommitState.IDLE
+  }
+
+  private setCommitState(wcId: number, sessionId: string, state: SessionCommitState): void {
+    this.tabs.get(wcId)?.commitStates.set(sessionId, state)
+  }
+
   // ── Open ──
 
   async openWorkbook(
@@ -151,10 +193,12 @@ export class SheetsShellCoordinator {
     options: { queuedPath?: string | undefined; locale: string },
   ): Promise<{ sessionId: string; session: ShellWorkbookSession } | null> {
     let state = this.tabs.get(wcId)
-    if (!state) { state = { sessions: new Map(), epoch: 0, locks: new Map() }; this.tabs.set(wcId, state) }
+    if (!state) {
+      state = { sessions: new Map(), epoch: 0, locks: new Map(), commitStates: new Map() }
+      this.tabs.set(wcId, state)
+    }
     const startEpoch = state.epoch
 
-    // 1. Resolve path
     let path = options.queuedPath
     if (!path) {
       const selection = callerWindow
@@ -165,47 +209,34 @@ export class SheetsShellCoordinator {
       path = selection.filePaths[0]
     }
 
-    // 2. Prepare file (may create conversion temp dir)
     const prepared = await this.prepareWorkbookForOpen(path, callerWindow)
     this.checkEpoch(wcId, startEpoch)
 
-    // 3. Create ownership scope BEFORE creating the snapshot
     const owned = new OwnedResources()
     if (prepared.conversionDir) owned.setConversionDir(prepared.conversionDir)
 
     try {
-      // Snapshot created → operation owns it immediately
       const snapshotPath = await this.snapshotWorkbook(prepared.openPath)
       owned.setSnapshot(snapshotPath)
       this.checkEpoch(wcId, startEpoch)
 
-      // Snapshot no longer depends on conversion temp — attempt cleanup.
-      // If cleanup fails, ownership is RETAINED (not silently cleared).
-      // release() will retry cleanup on failure paths.
       if (prepared.conversionDir) {
         try {
           await rm(prepared.conversionDir, { recursive: true, force: true })
-          owned.clearConversionDir() // cleanup succeeded → clear ownership
-        } catch {
-          // Cleanup failed — ownership RETAINED. release() will retry.
-          // This is safe: the conversion dir is in temp and will be
-          // cleaned on failure or (if the session succeeds) on close/teardown.
-        }
+          owned.clearConversionDir()
+        } catch { /* retained for release() retry */ }
       }
 
-      // 4. Read bytes + service.open()
       const bytes = await readFile(snapshotPath)
       const fileName = prepared.openPath.split(/[\\/]/).pop() ?? 'workbook.xlsx'
       const openResult = await this.deps.service.open(new Uint8Array(bytes), options.locale, fileName)
       owned.setEngineHandle(openResult.engineHandle)
       this.checkEpoch(wcId, startEpoch)
 
-      // 5. Compute fingerprint
       const diskFingerprint = await this.sha256File(snapshotPath)
       const restoreTargetSha = prepared.restoreTarget
         ? await this.sha256File(prepared.restoreTarget).catch(() => undefined) : undefined
 
-      // 6. Build + register (atomic transfer)
       this.checkEpoch(wcId, startEpoch)
       const sessionId = randomUUID()
       const shellSession: ShellWorkbookSession = {
@@ -217,6 +248,7 @@ export class SheetsShellCoordinator {
       }
       state = this.tabs.get(wcId)!
       state.sessions.set(sessionId, shellSession)
+      state.commitStates.set(sessionId, SessionCommitState.IDLE)
       owned.transfer()
 
       return { sessionId, session: shellSession }
@@ -245,7 +277,7 @@ export class SheetsShellCoordinator {
     return this.deps.service.readMedia(s.domainSession, s.engineHandle, visualId)
   }
 
-  // ── Save (commit protocol + 3-phase ownership) ──
+  // ── Save (commit protocol with lifecycle state) ──
 
   async saveWorkbook(
     wcId: number, sessionId: string, request: SaveRequest, mode: 'save' | 'save-as',
@@ -256,6 +288,11 @@ export class SheetsShellCoordinator {
       if (!state) throw new InvalidSessionError(`Unknown renderer: ${wcId}`)
       const startEpoch = state.epoch
       const session = this.getSession(wcId, sessionId)
+
+      // Check commit state — if teardown is in progress, abort
+      if (this.getCommitState(wcId, sessionId) === SessionCommitState.TEARING_DOWN) {
+        throw new InvalidSessionError(`Session ${sessionId} is being torn down`)
+      }
 
       // 1. Resolve target + ExternalChangeStatus
       let targetPath: string
@@ -282,7 +319,7 @@ export class SheetsShellCoordinator {
       this.checkEpoch(wcId, startEpoch)
       if (!result.ok || !result.data) return result
 
-      // ═══ Phase A: Prepare (old session + final target untouched) ═══
+      // ═══ Phase A: Prepare ═══
       const owned = new OwnedResources()
       let replacementSession: ShellWorkbookSession
       let tempTargetPath: string
@@ -316,55 +353,62 @@ export class SheetsShellCoordinator {
         throw error
       }
 
-      // ═══ Phase B: Commit (marker → rename → install → clear marker) ═══
+      // ═══ Phase B: Commit ═══
+      // Check epoch AND commit state before entering COMMITTING.
+      // If teardown has already started, abort — do NOT commit.
       this.checkEpoch(wcId, startEpoch)
-      const currentState = this.tabs.get(wcId)
-      if (!currentState || currentState.epoch !== startEpoch) {
+      if (this.getCommitState(wcId, sessionId) === SessionCommitState.TEARING_DOWN) {
         await owned.release(this.deps.service)
-        throw new InvalidSessionError(`Renderer ${wcId} was torn down during save`)
+        throw new InvalidSessionError(`Session ${sessionId} is being torn down`)
       }
 
-      // Write commit marker BEFORE rename — if crash occurs between
-      // marker write and rename, reconciliation can clean up the temp.
-      const markerPath = join(dirname(targetPath), `.genoffice-save-commit-${randomUUID()}.json`)
-      const marker: SaveCommitMarker = { finalTarget: targetPath, tempTarget: tempTargetPath, sessionId }
+      // Transition to COMMITTING — teardown that arrives after this
+      // MUST wait for the commit to complete (it cannot preempt).
+      this.setCommitState(wcId, sessionId, SessionCommitState.COMMITTING)
+
       try {
+        // Write commit marker to the DETERMINISTIC userData directory
+        // (same location reconcileSaveCommit scans)
+        const commitDir = this.commitMarkerDir()
+        await mkdir(commitDir, { recursive: true })
+        const markerPath = join(commitDir, `${sessionId}.json`)
+        const marker: SaveCommitMarker = { version: 1, finalTarget: targetPath, tempTarget: tempTargetPath, sessionId }
         await writeFile(markerPath, JSON.stringify(marker))
-      } catch {
-        // If we can't write the marker, we can't safely commit
-        await owned.release(this.deps.service)
-        throw new EngineError('Failed to write save commit marker', 'INTERNAL_ERROR')
-      }
 
-      // Atomically promote temp target → final target via rename.
-      // NO non-atomic copyFile fallback. If rename fails, save fails.
-      try {
-        await rename(tempTargetPath, targetPath)
-      } catch (renameError) {
-        // Rename failed — clean up marker, temp, snapshot, handle
+        // Atomically promote temp → final via rename.
+        // NO copyFile fallback. If rename fails, save fails.
+        try {
+          await rename(tempTargetPath, targetPath)
+        } catch (renameError) {
+          try { await rm(markerPath, { force: true }) } catch {}
+          throw new EngineError(
+            `Save commit failed: cannot atomically rename temp to final target — ${renameError}`,
+            'INTERNAL_ERROR',
+          )
+        }
+        owned.clearTempTarget()
+
+        // Install replacement session
+        const currentState = this.tabs.get(wcId)
+        if (currentState) currentState.sessions.set(sessionId, replacementSession)
+        owned.transfer()
+
+        // Clear commit marker
         try { await rm(markerPath, { force: true }) } catch {}
+
+        // Clear recovery copies
+        this.clearWorkbookRecovery(targetPath)
+        if (session.suggestSaveAs !== undefined) this.clearWorkbookRecovery(session.suggestSaveAs)
+        if (session.restoreTarget !== undefined) this.clearWorkbookRecovery(session.restoreTarget)
+      } catch (error) {
+        // Commit failure — release owned resources
         await owned.release(this.deps.service)
-        throw new EngineError(
-          `Save commit failed: cannot atomically rename temp to final target — ${renameError}`,
-          'INTERNAL_ERROR',
-        )
+        this.setCommitState(wcId, sessionId, SessionCommitState.IDLE)
+        throw error
       }
-      // Rename succeeded — temp target is now the final target
-      owned.clearTempTarget()
-
-      // Install replacement session
-      currentState.sessions.set(sessionId, replacementSession)
-      owned.transfer()
-
-      // Clear commit marker (session is installed, commit is complete)
-      try { await rm(markerPath, { force: true }) } catch { /* best-effort */ }
-
-      // Clear recovery copies
-      this.clearWorkbookRecovery(targetPath)
-      if (session.suggestSaveAs !== undefined) this.clearWorkbookRecovery(session.suggestSaveAs)
-      if (session.restoreTarget !== undefined) this.clearWorkbookRecovery(session.restoreTarget)
 
       // ═══ Phase C: Old-resource cleanup (isolated, best-effort) ═══
+      this.setCommitState(wcId, sessionId, SessionCommitState.IDLE)
       try { await this.deps.service.close(session.engineHandle) } catch {}
       try { await rm(session.snapshotPath, { force: true }) } catch {}
 
@@ -377,44 +421,43 @@ export class SheetsShellCoordinator {
   /**
    * Reconcile leftover save-commit markers from a crash during save.
    *
-   * Marker states:
-   *   marker + temp exists + final is old → rename failed or crashed before rename.
-   *     Action: delete temp, delete marker. Final target is the old file (safe).
-   *   marker + final is new + temp exists → rename succeeded but marker not cleared.
-   *     Action: delete temp, delete marker. Final target is the new file (safe).
-   *   marker + final is new + temp absent → rename succeeded, temp already cleaned.
-   *     Action: delete marker. Final target is the new file (safe).
-   *   marker + temp absent + final is old → temp was deleted, rename never happened.
-   *     Action: delete marker. Final target is the old file (safe).
+   * Markers are stored in: userData/sheets-save-commits/<sessionId>.json
    *
-   * This is a static method so it can be called at startup without a
-   * coordinator instance (though it needs the userData path).
+   * For each marker:
+   *   - If tempTarget exists: delete it (rename never happened or crashed after)
+   *   - Delete the marker
+   *
+   * If final target already has new bytes (rename succeeded before crash),
+   * the old bytes are already gone — we can't undo the rename. But the
+   * temp file is cleaned up.
    */
   static async reconcileSaveCommit(userDataDir: string): Promise<void> {
-    const { readdir } = await import('node:fs/promises')
-    const { join: joinPath } = await import('node:path')
-    const commitDir = joinPath(userDataDir, 'sheets-save-commits')
-    try {
-      const entries = await readdir(commitDir)
-      for (const entry of entries) {
-        if (!entry.endsWith('.json')) continue
-        const markerPath = joinPath(commitDir, entry)
-        try {
-          const markerText = await readFile(markerPath, 'utf8')
-          const marker = JSON.parse(markerText) as SaveCommitMarker
-          // Clean up temp target if it still exists
-          if (existsSync(marker.tempTarget)) {
-            try { await rm(marker.tempTarget, { force: true }) } catch {}
-          }
-          // Always clean up the marker
+    const commitDir = join(userDataDir, 'sheets-save-commits')
+    let entries: string[]
+    try { entries = await readdir(commitDir) } catch { return }
+
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      const markerPath = join(commitDir, entry)
+      try {
+        const markerText = await readFile(markerPath, 'utf8')
+        const raw = JSON.parse(markerText)
+        const marker = validateMarker(raw)
+        if (!marker) {
+          // Invalid marker — delete it
           try { await rm(markerPath, { force: true }) } catch {}
-        } catch {
-          // Corrupted marker — just delete it
-          try { await rm(markerPath, { force: true }) } catch {}
+          continue
         }
+        // Clean up temp target if it still exists
+        if (existsSync(marker.tempTarget)) {
+          try { await rm(marker.tempTarget, { force: true }) } catch {}
+        }
+        // Always clean up the marker
+        try { await rm(markerPath, { force: true }) } catch {}
+      } catch {
+        // Read/parse failed — delete the marker
+        try { await rm(markerPath, { force: true }) } catch {}
       }
-    } catch {
-      // Commit dir doesn't exist — nothing to reconcile
     }
   }
 
@@ -450,9 +493,22 @@ export class SheetsShellCoordinator {
     const state = this.tabs.get(wcId)
     if (!state) return
     state.epoch++
+
     const sessionIds = [...state.sessions.keys()]
     await Promise.all(sessionIds.map(async (sid) => {
-      await this.withSessionLock(wcId, sid, async () => { await this.closeSession(wcId, sid) })
+      await this.withSessionLock(wcId, sid, async () => {
+        // If a commit is in progress, wait for it to complete.
+        // The mutation lock ensures we don't close the handle while
+        // the commit is using it. The commit will check for TEARING_DOWN
+        // before entering COMMITTING — but if it's already COMMITTING,
+        // we must let it finish (it holds the lock).
+        //
+        // Since we're inside the lock, the commit has already completed
+        // (either successfully or with failure). We can safely close.
+        this.setCommitState(wcId, sid, SessionCommitState.TEARING_DOWN)
+        await this.closeSession(wcId, sid)
+        this.setCommitState(wcId, sid, SessionCommitState.CLOSED)
+      })
     }))
     this.tabs.delete(wcId)
   }
@@ -476,6 +532,8 @@ export class SheetsShellCoordinator {
       return 'changed'
     } catch { return 'unknown' }
   }
+
+  private commitMarkerDir(): string { return join(app.getPath('userData'), 'sheets-save-commits') }
 
   private async prepareWorkbookForOpen(
     path: string, parent: BrowserWindow | undefined,
@@ -510,7 +568,6 @@ export class SheetsShellCoordinator {
     const dir = join(app.getPath('temp'), 'genoffice-sheets-sessions')
     await mkdir(dir, { recursive: true })
     const snapshotPath = join(dir, `${randomUUID()}.xlsx`)
-    // Use copyFile from node:fs/promises
     const { copyFile } = await import('node:fs/promises')
     await copyFile(path, snapshotPath)
     return snapshotPath
