@@ -62,6 +62,12 @@ export interface ShellWorkbookSession {
 
 export interface SheetsShellCoordinatorDeps {
   readonly service: SpreadsheetService
+  /**
+   * Optional commit gate — called after COMMITTING is set but BEFORE
+   * the irreversible rename. Used for deterministic testing of the
+   * teardown-during-commit race. In production, this is undefined.
+   */
+  readonly onCommitGate?: (sessionId: string) => Promise<void>
 }
 
 // ── Session commit lifecycle ──
@@ -125,13 +131,14 @@ interface SaveCommitMarker {
 
 /** Validate a parsed JSON object as a SaveCommitMarker. Returns null if invalid. */
 function validateMarker(raw: unknown): SaveCommitMarker | null {
-  if (typeof raw !== 'object' || raw === null) return null
-  const r = raw as Record<string, unknown>
-  if (r.version !== 1) return null
-  if (typeof r.finalTarget !== 'string' || !r.finalTarget) return null
-  if (typeof r.tempTarget !== 'string' || !r.tempTarget) return null
-  if (typeof r.sessionId !== 'string' || !r.sessionId) return null
-  return { version: 1, finalTarget: r.finalTarget, tempTarget: r.tempTarget, sessionId: r.sessionId }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  // Runtime-safe property access — no unchecked type assertions
+  const obj = raw as { version?: unknown; finalTarget?: unknown; tempTarget?: unknown; sessionId?: unknown }
+  if (obj.version !== 1) return null
+  if (typeof obj.finalTarget !== 'string' || obj.finalTarget.length === 0) return null
+  if (typeof obj.tempTarget !== 'string' || obj.tempTarget.length === 0) return null
+  if (typeof obj.sessionId !== 'string' || obj.sessionId.length === 0) return null
+  return { version: 1, finalTarget: obj.finalTarget, tempTarget: obj.tempTarget, sessionId: obj.sessionId }
 }
 
 // ── Coordinator ──
@@ -366,6 +373,14 @@ export class SheetsShellCoordinator {
       // MUST wait for the commit to complete (it cannot preempt).
       this.setCommitState(wcId, sessionId, SessionCommitState.COMMITTING)
 
+      // Commit gate — injectable barrier for deterministic testing.
+      // In production, this is a no-op. In tests, it pauses the save
+      // between COMMITTING and the irreversible rename, allowing the
+      // test to verify the state and trigger teardown.
+      if (this.deps.onCommitGate) {
+        await this.deps.onCommitGate(sessionId)
+      }
+
       try {
         // Write commit marker to the DETERMINISTIC userData directory
         // (same location reconcileSaveCommit scans)
@@ -592,4 +607,25 @@ export class SheetsShellCoordinator {
       return copy
     } catch { return null }
   }
+}
+
+// ── Startup reconciliation helper ──
+
+/**
+ * Reconcile leftover save-commit markers from a previous crash.
+ *
+ * This must be called once during Sheets main-process startup, BEFORE
+ * any migrated workbook operations can begin. It uses app.getPath('userData')
+ * to locate the commit marker directory.
+ *
+ * The function is safe and idempotent — calling it when no markers exist
+ * is a no-op.
+ *
+ * Usage (in sheets-main.ts startup):
+ *   import { reconcileSheetsSaveCommits } from './sheets-shell-coordinator'
+ *   // ... after app.whenReady():
+ *   await reconcileSheetsSaveCommits()
+ */
+export async function reconcileSheetsSaveCommits(): Promise<void> {
+  await SheetsShellCoordinator.reconcileSaveCommit(app.getPath('userData'))
 }
