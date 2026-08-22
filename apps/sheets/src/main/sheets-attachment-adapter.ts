@@ -179,6 +179,66 @@ export function savePastedImage(data: unknown, ext: unknown): string | null {
   return filePath
 }
 
+// ── Local image reading (for AI image insertion) ────────────────────
+
+const MAX_LOCAL_IMAGE_BYTES = 20 * 1024 * 1024
+
+/**
+ * Read a local image file as base64 with MIME detection.
+ * Matches the legacy readLocalImage handler behavior:
+ *   - Resolves ~ → home directory
+ *   - Validates absolute path
+ *   - Validates file exists + is a file
+ *   - Enforces 20MB max size
+ *   - Detects MIME from magic bytes (not extension)
+ *   - Returns { mediaType, base64 }
+ */
+export function readLocalImage(filePath: string): { mediaType: string; base64: string } {
+  const { isAbsolute } = require('node:path')
+  const { statSync, readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const app_module = require('electron')
+
+  const resolved = filePath.startsWith('~/')
+    ? join(app_module.app.getPath('home'), filePath.slice(2))
+    : filePath
+  if (!isAbsolute(resolved)) throw new Error('Path must be absolute')
+  const info = statSync(resolved)
+  if (!info.isFile()) throw new Error(`File not found: ${filePath}`)
+  if (info.size > MAX_LOCAL_IMAGE_BYTES) throw new Error('Image too large (20MB max)')
+  const bytes = readFileSync(resolved)
+  const mediaType = sniffImageType(bytes)
+  if (mediaType === null) throw new Error('Unsupported image type')
+  return { mediaType, base64: bytes.toString('base64') }
+}
+
+/**
+ * Detect image MIME type from magic bytes.
+ * Returns null if the bytes don't match a known image format.
+ */
+function sniffImageType(bytes: Buffer): string | null {
+  if (bytes.length >= 8 &&
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
+    return 'image/png'
+  }
+  if (bytes.length >= 3 &&
+      bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (bytes.length >= 6 &&
+      (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) ||
+      (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38)) {
+    return 'image/gif'
+  }
+  if (bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return 'image/webp'
+  }
+  return null
+}
+
 // ── Attachment extension set (for file picker filters) ──────────────
 
 export function getAttachmentExtensions(): string[] {

@@ -55,6 +55,7 @@ import {
   readAttachmentImage,
   savePastedImage,
   getAttachmentExtensions,
+  readLocalImage,
 } from './sheets-attachment-adapter'
 
 // ── Session resolution ──
@@ -501,6 +502,17 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator, s
     return filePath
       ? collectAttachments([filePath])
       : { accepted: [], rejected: ['not an image'] }
+  })
+
+  // ── shell:read-local-image (INCREMENT 11) ──
+  // Thin adapter: validates path, calls readLocalImage() from the adapter.
+  // The adapter handles: path resolution (~ → home), stat validation,
+  // size limit (20MB), MIME sniffing from magic bytes, base64 encoding.
+  ipcMain.removeHandler(IPC_CHANNELS.readLocalImage)
+  ipcMain.handle(IPC_CHANNELS.readLocalImage, async (_event, input: unknown) => {
+    const { localImageRequestSchema } = await import('../shared/desktop-api')
+    const request = localImageRequestSchema.parse(input)
+    return readLocalImage(request.path)
   })
 }
 
