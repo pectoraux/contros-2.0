@@ -156,6 +156,30 @@ export interface WorksheetMetadata {
   defaultColumnWidth: number
   /** Tab color (ARGB hex), if set. */
   tabColor?: string
+  /**
+   * Column width overrides (opaque array — the renderer interprets these).
+   * Captured from the sidecar's open response so the save response can
+   * carry them back to the renderer without loss (Increment 6).
+   */
+  columnWidths?: unknown[]
+  /**
+   * Tables in this sheet (opaque array — the renderer interprets these).
+   * Captured from the sidecar's open response so the save response can
+   * carry them back to the renderer without loss (Increment 6).
+   */
+  tables?: unknown[]
+  /**
+   * Cell comments/notes (opaque array — the renderer interprets these).
+   * Captured from the sidecar's open response so the save response can
+   * carry them back to the renderer without loss (Increment 6).
+   */
+  comments?: unknown[]
+  /**
+   * Pivot table range info (opaque array — the renderer interprets these).
+   * Captured from the sidecar's open response so the save response can
+   * carry them back to the renderer without loss (Increment 6).
+   */
+  pivotRanges?: unknown[]
 }
 
 /**
@@ -175,12 +199,37 @@ export interface WorkbookMetadata {
   sheets: WorksheetMetadata[]
   /** Active sheet index (workbookView/@activeTab). */
   activeTab: number
-  /** Defined names (workbook-level named ranges). */
-  definedNames: Array<{ name: string; value: string }>
+  /**
+   * Defined names (workbook-level named ranges).
+   *
+   * INCREMENT 6: Changed from `{ name: string; value: string }` to
+   * `{ name: string; formula: string; sheetIndex?: number }` to match
+   * the sidecar's native response shape. This eliminates the lossy
+   * `formula → value` translation that discarded `sheetIndex` (the
+   * localSheetId attribute for sheet-scoped names). The renderer's
+   * `WorkbookFile.definedNames` expects `{ name, formula, sheetIndex? }`.
+   */
+  definedNames: Array<{ name: string; formula: string; sheetIndex?: number }>
   /** Theme color scheme (ARGB hex values). */
   themeColors: string[]
   /** Theme font scheme (major/minor font names). */
   themeFonts: { major: string; minor: string }
+  /**
+   * Cell styles (opaque array — the renderer interprets these).
+   * Captured from the sidecar's open response so the save response can
+   * carry them back to the renderer without loss (Increment 6).
+   */
+  styles?: unknown[]
+  /**
+   * Differential styles for conditional formatting (opaque array).
+   * Captured from the sidecar's open response (Increment 6).
+   */
+  dxfStyles?: unknown[]
+  /**
+   * Visual objects (charts, images, shapes) in the workbook (opaque array).
+   * Captured from the sidecar's open response (Increment 6).
+   */
+  visuals?: unknown[]
 }
 
 /** A cell record within a range result. */

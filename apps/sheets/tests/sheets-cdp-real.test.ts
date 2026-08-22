@@ -74,6 +74,8 @@ describe.skipIf(!canRun)('Increment 5B — Real Electron CDP smoke test', () => 
     expect(combined).toContain('[SIDECAR-SHARING] SUCCESS — exactly ONE sidecar process')
     expect(combined).toContain('[MIGRATED-READ-RANGE] SUCCESS')
     expect(combined).toContain('[MIGRATED-READ-FORMULAS] SUCCESS')
+    expect(combined).toContain('[MIGRATED-SAVE] SUCCESS')
+    expect(combined).toContain('[SESSION-CONTINUITY] SUCCESS')
     expect(combined).toContain('[INVALID-SESSION] SUCCESS')
     expect(combined).toContain('ALL CHECKS PASSED')
   }, 180_000)

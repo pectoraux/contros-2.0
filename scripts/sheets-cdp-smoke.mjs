@@ -262,7 +262,79 @@ async function main() {
       log('MIGRATED-READ-FORMULAS', `SUCCESS — ${formulasResult.result.cells?.length ?? 0} formula cell(s)`)
     }
 
-    // REAL INVALID-SESSION PATH: close, then re-invoke read-range
+    // ═══ INCREMENT 6: MIGRATED save path ═══
+    // The save handler is migrated: renderer → preload → ipcRenderer.invoke('workbook:save')
+    // → migrated handler → coordinator.saveWorkbook() → service.save()
+    // → engine.applySavePlan() → real sidecar save_archive → response → renderer
+    //
+    // We use mode='save' with restoreWriteBack=true for a minimal valid save
+    // request (the Zod schema requires at least one mutation OR restoreWriteBack).
+    log('MIGRATED-SAVE', 'invoking window.desktopApi.saveWorkbookEdits()...')
+    const saveResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.saveWorkbookEdits({
+          sessionId: ${JSON.stringify(sessionId)},
+          mode: 'save',
+          restoreWriteBack: true,
+          edits: [],
+          structuralOps: [],
+          chartEdits: [],
+          visualEdits: [],
+          visualAdditions: [],
+          tableAdditions: [],
+          pivotAdditions: [],
+          sheetOps: [],
+          sheetOrder: [],
+          filterStates: [],
+          hyperlinkEdits: [],
+          cfStates: [],
+          dvStates: [],
+          pageSetupStates: [],
+          noteStates: [],
+          pivotCacheRefreshPaths: [],
+          pivotRefreshUpdates: [],
+          sheetProtections: [],
+          sparklineAdditions: [],
+          formulaValues: [],
+          definedNamesState: null,
+          themeState: null,
+          workbookProtectionState: null,
+          protectedRangeStates: [],
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name, stack: e.stack }
+      }
+    })()`)
+
+    if (!saveResult.ok) {
+      fail(`saveWorkbookEdits failed: ${saveResult.error}\nstack: ${saveResult.stack}`)
+    }
+    if (saveResult.result.canceled) {
+      fail('saveWorkbookEdits was canceled — unexpected for mode=save')
+    }
+    log('MIGRATED-SAVE', `SUCCESS — saved: file.name=${saveResult.result.file?.name}, touchedEntries=${saveResult.result.touchedEntries?.length ?? 0}`)
+
+    // SESSION CONTINUITY: read with SAME sessionId after save
+    log('SESSION-CONTINUITY', 'reading with SAME sessionId after save...')
+    const postSaveRange = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readWorkbookRange({
+          sessionId: ${JSON.stringify(sessionId)},
+          sheetId: ${JSON.stringify(sheet1Id)},
+          range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 },
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name }
+      }
+    })()`)
+    if (!postSaveRange.ok) {
+      fail(`readWorkbookRange after save failed: ${postSaveRange.error}`)
+    }
+    log('SESSION-CONTINUITY', `SUCCESS — SAME sessionId works after save, ${postSaveRange.result.cells?.length ?? 0} cell(s)`)
+
+    // ═══ REAL INVALID-SESSION PATH (after save) ═══
     log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')
     await evaluate(ws, `(async () => {
       try {

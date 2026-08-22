@@ -49,9 +49,12 @@ export interface ValidatedOpenResult {
   entryCount: number
   sheets: WorksheetMetadata[]
   activeTab: number
-  definedNames: Array<{ name: string; value: string }>
+  definedNames: Array<{ name: string; formula: string; sheetIndex?: number }>
   themeColors: string[]
   themeFonts: { major: string; minor: string }
+  styles: unknown[]
+  dxfStyles: unknown[]
+  visuals: unknown[]
 }
 
 export function validateOpenResult(raw: unknown): ValidatedOpenResult {
@@ -61,11 +64,18 @@ export function validateOpenResult(raw: unknown): ValidatedOpenResult {
   const sha256 = isString(raw.sha256) ? raw.sha256 : ''
   const entryCount = isNumber(raw.entryCount) ? raw.entryCount : 0
   const activeTab = isNumber(raw.activeTab) ? raw.activeTab : 0
+  // INCREMENT 6: Capture definedNames with { name, formula, sheetIndex? }
+  // (the sidecar's native shape). Previously the validator translated
+  // formula → value and discarded sheetIndex — a lossy translation that
+  // broke sheet-scoped names. The renderer expects { name, formula,
+  // sheetIndex? }, so we pass them through directly now.
   const definedNames = isArray(raw.definedNames)
     ? raw.definedNames.map((d, i) => {
-        if (!isRecord(d) || !isString(d.name) || !isString(d.value))
+        if (!isRecord(d) || !isString(d.name) || !isString(d.formula))
           throw new EngineError(`Invalid open response: definedNames[${i}] malformed`, 'PROTOCOL_ERROR')
-        return { name: d.name, value: d.value }
+        const result: { name: string; formula: string; sheetIndex?: number } = { name: d.name, formula: d.formula }
+        if (isNumber(d.sheetIndex)) result.sheetIndex = d.sheetIndex
+        return result
       })
     : []
   const themeColors = isArray(raw.themeColors) ? raw.themeColors.filter(isString) : []
@@ -78,34 +88,40 @@ export function validateOpenResult(raw: unknown): ValidatedOpenResult {
   const sheets: WorksheetMetadata[] = sheetsRaw.map((s, i) => {
     if (!isRecord(s)) throw new EngineError(`Invalid open response: sheets[${i}] not a record`, 'PROTOCOL_ERROR')
     if (!isString(s.name)) throw new EngineError(`Invalid open response: sheets[${i}].name`, 'PROTOCOL_ERROR')
-    // Increment 3C: FAIL-CLOSED on missing/non-string sheets[].id.
-    // The runtime contract requires a stable WorksheetMetadata.id (the XLSX
-    // sheetId attribute, immutable across renames). A sidecar binary that
-    // does not return `id` is PROTOCOL-INCOMPATIBLE — we do NOT silently
-    // fall back to the sheet name (that recreates the broken 3A mapping).
-    // The caller gets an EngineError(PROTOCOL_ERROR) and must update the
-    // sidecar binary.
     if (!isString(s.id)) throw new EngineError(`Invalid open response: sheets[${i}].id (missing or non-string)`, 'PROTOCOL_ERROR')
-    return {
+    const result: WorksheetMetadata = {
       id: s.id,
       name: s.name,
       index: i,
       hidden: opt(s.hidden, isBoolean) ?? false,
       rtl: opt(s.rtl, isBoolean) ?? false,
-      gridlineColor: opt(s.gridlineColor, isString),
-      showGridlines: opt(s.showGridlines, isBoolean) ?? true,
+      showGridlines: opt(s.showGridLines, isBoolean) ?? true,
       rowCount: opt(s.rowCount, isNumber) ?? 0,
       columnCount: opt(s.columnCount, isNumber) ?? 0,
       defaultRowHeight: opt(s.defaultRowHeight, isNumber) ?? 15,
       defaultColumnWidth: opt(s.defaultColumnWidth, isNumber) ?? 8.43,
-      tabColor: opt(s.tabColor, isString),
     }
+    const gc = opt(s.gridlineColor, isString)
+    if (gc !== undefined) result.gridlineColor = gc
+    const tc = opt(s.tabColor, isString)
+    if (tc !== undefined) result.tabColor = tc
+    // INCREMENT 6: Capture per-sheet opaque arrays so the save response
+    // can carry them back to the renderer without loss.
+    if (isArray(s.columnWidths)) result.columnWidths = s.columnWidths
+    if (isArray(s.tables)) result.tables = s.tables
+    if (isArray(s.comments)) result.comments = s.comments
+    if (isArray(s.pivotRanges)) result.pivotRanges = s.pivotRanges
+    return result
   })
-  return { sessionId, sha256, entryCount, sheets, activeTab, definedNames, themeColors, themeFonts }
+  // INCREMENT 6: Capture workbook-level opaque arrays.
+  const styles = isArray(raw.styles) ? raw.styles : []
+  const dxfStyles = isArray(raw.dxfStyles) ? raw.dxfStyles : []
+  const visuals = isArray(raw.visuals) ? raw.visuals : []
+  return { sessionId, sha256, entryCount, sheets, activeTab, definedNames, themeColors, themeFonts, styles, dxfStyles, visuals }
 }
 
 export function buildWorkbookMetadata(v: ValidatedOpenResult, fileName: string): WorkbookMetadata {
-  return {
+  const result: WorkbookMetadata = {
     name: fileName,
     sha256: v.sha256,
     entryCount: v.entryCount,
@@ -115,6 +131,10 @@ export function buildWorkbookMetadata(v: ValidatedOpenResult, fileName: string):
     themeColors: v.themeColors,
     themeFonts: v.themeFonts,
   }
+  if (v.styles.length > 0) result.styles = v.styles
+  if (v.dxfStyles.length > 0) result.dxfStyles = v.dxfStyles
+  if (v.visuals.length > 0) result.visuals = v.visuals
+  return result
 }
 
 // ── Range result ──────────────────────────────────────────────────────

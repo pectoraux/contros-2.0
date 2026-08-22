@@ -2966,41 +2966,54 @@ async function adoptLegacySessionFromWorkbookFile(
     return
   }
 
-  // Build the contract-level WorksheetMetadata[] from the legacy schema.
-  // The legacy schema has rich per-sheet metadata (columnWidths, freeze,
-  // tables, comments); the contract-level metadata is a subset. We pick
-  // only the fields the contract requires.
-  const sheets: WorksheetMetadata[] = file.sheets.map((s, i) => ({
-    id: s.id,
-    name: s.name,
-    index: i,
-    hidden: s.hidden,
-    rtl: false, // legacy schema does not carry RTL — defaulted to false
-    showGridlines: s.showGridLines,
-    rowCount: s.rowCount,
-    columnCount: s.columnCount,
-    defaultRowHeight: s.defaultRowHeight ?? 15,
-    defaultColumnWidth: s.defaultColumnWidth ?? 8.43,
-    ...(s.tabColor !== null && s.tabColor !== undefined ? { tabColor: s.tabColor } : {}),
-  }))
+  // INCREMENT 6: Build contract-level WorksheetMetadata from the legacy
+  // WorkbookFile's sheets. The contract now carries opaque arrays
+  // (columnWidths, tables, comments, pivotRanges) so the save response
+  // can return them to the renderer without loss.
+  const sheets: WorksheetMetadata[] = file.sheets.map((s, i) => {
+    const result: WorksheetMetadata = {
+      id: s.id,
+      name: s.name,
+      index: i,
+      hidden: s.hidden,
+      rtl: false,
+      showGridlines: s.showGridLines,
+      rowCount: s.rowCount,
+      columnCount: s.columnCount,
+      defaultRowHeight: s.defaultRowHeight ?? 15,
+      defaultColumnWidth: s.defaultColumnWidth ?? 8.43,
+    }
+    if (s.tabColor !== null && s.tabColor !== undefined) result.tabColor = s.tabColor
+    if (s.columnWidths) result.columnWidths = s.columnWidths
+    if (s.tables) result.tables = s.tables
+    if (s.comments) result.comments = s.comments
+    // The legacy schema uses `pivotRanges` (camelCase).
+    const pr = (s as { pivotRanges?: unknown[] }).pivotRanges
+    if (pr) result.pivotRanges = pr
+    return result
+  })
 
-  // Build the contract-level WorkbookMetadata. The legacy `definedNames`
-  // use `{name, formula, sheetIndex?}` while the contract uses `{name, value}`
-  // — translate `formula → value` (the sidecar's `formula` IS the value
-  // expression for the defined name). Sheet-scoped names (sheetIndex set)
-  // lose their sheet-binding in this translation — a known limitation
-  // (the contract does not carry sheet-scoped name info; future increment
-  // can extend WorkbookMetadata.definedNames if needed).
+  // INCREMENT 6: definedNames now use { name, formula, sheetIndex? }
+  // (matching the sidecar's native shape and the renderer's expectation).
+  // No translation needed — pass through directly.
   const metadata: WorkbookMetadata = {
     name: file.name,
     sha256: file.sha256,
     entryCount: file.entryCount,
     sheets,
     activeTab: file.activeTab,
-    definedNames: file.definedNames.map((d) => ({ name: d.name, value: d.formula })),
+    definedNames: file.definedNames.map((d) => {
+      const r: { name: string; formula: string; sheetIndex?: number } = { name: d.name, formula: d.formula }
+      if (d.sheetIndex !== undefined) r.sheetIndex = d.sheetIndex
+      return r
+    }),
     themeColors: file.themeColors ?? [],
     themeFonts: file.themeFonts ?? { major: '', minor: '' },
   }
+  // INCREMENT 6: Carry styles/dxfStyles/visuals if the legacy file has them.
+  if (file.styles) metadata.styles = file.styles
+  if (file.dxfStyles) metadata.dxfStyles = file.dxfStyles
+  if (file.visuals) metadata.visuals = file.visuals
 
   // The `originalPath` the renderer should consider for save: if the session
   // opened a restored crash-recovery copy, the renderer-facing path is the
