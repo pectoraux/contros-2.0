@@ -81,6 +81,8 @@ export interface ElectronXlsxSidecarEngineConfig {
 export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
   private readonly client: SidecarProtocolClient
   private readonly sessions = new WeakMap<EngineSessionHandle, SessionState>()
+  /** Parallel iterable set — enables invalidateAllSessions() to enumerate handles. */
+  private readonly activeHandles = new Set<EngineSessionHandle>()
   private readonly tempDir: string
 
   constructor(config: ElectronXlsxSidecarEngineConfig) {
@@ -107,6 +109,7 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
         sidecarSessionId: validated.sessionId,
         tempPath,
       })
+      this.activeHandles.add(handle)
       return { handle, metadata: buildWorkbookMetadata(validated, fileName) }
     } catch (error) {
       this.cleanupTempFile(tempPath)
@@ -259,6 +262,7 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     const session = this.sessions.get(handle)
     if (!session) throw new InvalidSessionError('Unknown engine session handle')
     this.sessions.delete(handle)
+    this.activeHandles.delete(handle)
     try {
       await this.client.request({ command: 'close', sessionId: session.sidecarSessionId })
     } catch {
@@ -284,15 +288,20 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     return session
   }
 
-  /** Invalidate ALL sessions on unexpected sidecar exit. Clean temp files. */
+  /**
+   * Invalidate ALL sessions on unexpected sidecar exit.
+   * Iterates activeHandles, deletes WeakMap entries, cleans temp directories,
+   * and clears the Set. After this, all existing handles produce InvalidSessionError.
+   */
   private invalidateAllSessions(): void {
-    // WeakMap doesn't support iteration, so we can't enumerate sessions directly.
-    // Instead, we mark a flag — any existing handle will fail the WeakMap lookup
-    // and produce InvalidSessionError. We also can't clean temp files here
-    // because WeakMap doesn't expose its keys. The temp files will be cleaned
-    // by the OS temp cleanup or on the next stop().
-    //
-    // To enable cleanup, we also maintain a parallel Set of active temp paths:
+    for (const handle of this.activeHandles) {
+      const session = this.sessions.get(handle)
+      if (session) {
+        this.cleanupTempFile(session.tempPath)
+        this.sessions.delete(handle)
+      }
+    }
+    this.activeHandles.clear()
   }
 
   private cleanupTempFile(path: string): void {

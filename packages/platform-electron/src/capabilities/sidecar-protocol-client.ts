@@ -150,18 +150,16 @@ export class SidecarProtocolClient {
   }
 
   private handleLine(line: string): void {
-    let response: SidecarResponse
+    let parsed: unknown
     try {
-      response = JSON.parse(line) as SidecarResponse
+      parsed = JSON.parse(line)
     } catch {
       this.rejectPending(new Error('XLSX sidecar returned invalid JSON.'))
       return
     }
-    if (
-      response.version !== PROTOCOL_VERSION ||
-      typeof response.requestId !== 'string' ||
-      typeof response.ok !== 'boolean'
-    ) {
+    // Runtime-validate the protocol envelope (no `as SidecarResponse` cast)
+    const response = this.validateEnvelope(parsed)
+    if (response === null) {
       this.rejectPending(new Error('XLSX sidecar returned an invalid response.'))
       return
     }
@@ -174,6 +172,31 @@ export class SidecarProtocolClient {
       return
     }
     pending.reject(new Error(response.error?.message ?? 'XLSX sidecar request failed.'))
+  }
+
+  /** Runtime-validate the sidecar protocol envelope. Returns null if malformed. */
+  private validateEnvelope(raw: unknown): SidecarResponse | null {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+    const obj = raw as Record<string, unknown>
+    if (obj.version !== PROTOCOL_VERSION) return null
+    if (typeof obj.requestId !== 'string') return null
+    if (typeof obj.ok !== 'boolean') return null
+    // result is `unknown` — the engine's validators check it
+    // error is optional but must be well-formed if present
+    let error: { code: string; message: string } | undefined
+    if (obj.error !== undefined) {
+      if (typeof obj.error !== 'object' || obj.error === null) return null
+      const err = obj.error as Record<string, unknown>
+      if (typeof err.code !== 'string' || typeof err.message !== 'string') return null
+      error = { code: err.code, message: err.message }
+    }
+    return {
+      version: obj.version,
+      requestId: obj.requestId,
+      ok: obj.ok,
+      result: obj.result,
+      error,
+    }
   }
 
   private rejectPending(error: Error): void {
