@@ -79,6 +79,7 @@ describe.skipIf(!canRun)('Increment 5B — Real Electron CDP smoke test', () => 
     expect(combined).toContain('[SAVE-RESPONSE-FIDELITY] SUCCESS')
     expect(combined).toContain('[SAVE-CONTENT-FIDELITY] SUCCESS')
     expect(combined).toContain('[MIGRATED-PDF-EXPORT] SUCCESS')
+    expect(combined).toContain('[MIGRATED-SCREEN-CAPTURE] SUCCESS')
     expect(combined).toContain('[INVALID-SESSION] SUCCESS')
     expect(combined).toContain('ALL CHECKS PASSED')
   }, 180_000)

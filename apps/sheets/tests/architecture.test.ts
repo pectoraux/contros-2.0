@@ -271,4 +271,60 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
     expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.exportPdf\)/)
   })
+
+  // ═══ INCREMENT 8 — Screen capture migration architecture guards ═══
+
+  test('migrated screen-capture handlers have ZERO desktopCapturer imports', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/desktopCapturer/)
+  })
+
+  test('migrated screen-capture handlers have ZERO screen.getAllDisplays calls', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/screen\.getAllDisplays/)
+  })
+
+  test('migrated screen-capture handlers have ZERO getFocusedWindow calls', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).not.toMatch(/getFocusedWindow\s*\(/)
+  })
+
+  test('migrated screen-capture handlers delegate to ScreenCapture capability', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/screenCapture\.enumerateSources/)
+    expect(src).toMatch(/screenCapture\.captureSource/)
+  })
+
+  test('migrated screen-capture handlers replace legacy handlers', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.captureScreenSources\)/)
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.captureScreenSource\)/)
+  })
+
+  test('ScreenCapture contract (platform) has ZERO Electron/node imports', () => {
+    const src = readFileSync(
+      join(__dirname, '..', '..', '..', 'packages', 'platform', 'src', 'capabilities', 'screen-capture.ts'),
+      'utf8',
+    )
+    // Check import statements only (JSDoc may mention desktopCapturer for documentation)
+    expect(src).not.toMatch(/from\s+['"]electron['"]/)
+    expect(src).not.toMatch(/from\s+['"]node:/)
+  })
+
+  test('ElectronScreenCapture is the ONLY implementation with desktopCapturer', () => {
+    const src = readFileSync(
+      join(__dirname, '..', '..', '..', 'packages', 'platform-electron', 'src', 'capabilities', 'electron-screen-capture.ts'),
+      'utf8',
+    )
+    expect(src).toMatch(/desktopCapturer/)
+    expect(src).toMatch(/class ElectronScreenCapture/)
+  })
+
+  test('migrated screen-capture handlers have ZERO global capture state', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/^(let|var|const)\s+(activeSource|activeDisplay|currentCapture|activeRenderer|globalCaptureSource)\b/m)
+  })
 })

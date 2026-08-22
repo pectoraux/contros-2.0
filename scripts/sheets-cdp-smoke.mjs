@@ -454,6 +454,48 @@ async function main() {
     // Clean up the PDF file
     try { (await import('node:fs')).rmSync(pdfPath, { force: true }) } catch { /* best effort */ }
 
+    // ═══ INCREMENT 8: REAL SCREEN CAPTURE E2E ═══
+    // The screen capture path: renderer → preload → ipcRenderer.invoke
+    // → migrated handler → ScreenCapture capability → ElectronScreenCapture
+    // → desktopCapturer → renderer
+    log('MIGRATED-SCREEN-CAPTURE', 'invoking window.desktopApi.captureScreenSources()...')
+    const sourcesResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.captureScreenSources()
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name }
+      }
+    })()`)
+    if (!sourcesResult.ok) fail(`captureScreenSources failed: ${sourcesResult.error}`)
+    log('MIGRATED-SCREEN-CAPTURE', `SUCCESS — status=${sourcesResult.result.status}, sources=${sourcesResult.result.sources.length}`)
+
+    // If sources were found, capture the first one
+    if (sourcesResult.result.status === 'ok' && sourcesResult.result.sources.length > 0) {
+      const firstSource = sourcesResult.result.sources[0]
+      log('MIGRATED-SCREEN-CAPTURE', `capturing source: id=${firstSource.id}, name=${firstSource.name}, kind=${firstSource.kind}...`)
+      const captureResult = await evaluate(ws, `(async () => {
+        try {
+          const result = await window.desktopApi.captureScreenSource({ id: ${JSON.stringify(firstSource.id)} })
+          return { ok: true, result }
+        } catch (e) {
+          return { ok: false, error: e.message }
+        }
+      })()`)
+      if (!captureResult.ok) fail(`captureScreenSource failed: ${captureResult.error}`)
+      if (captureResult.result === null) {
+        log('MIGRATED-SCREEN-CAPTURE', 'note: captureScreenSource returned null (source may have disappeared)')
+      } else {
+        // Verify capture data
+        if (captureResult.result.mediaType !== 'image/png') fail(`capture mediaType invalid: ${captureResult.result.mediaType}`)
+        if (captureResult.result.base64.length === 0) fail('capture base64 is empty')
+        if (captureResult.result.width <= 0 || captureResult.result.height <= 0) fail(`capture dimensions invalid: ${captureResult.result.width}x${captureResult.result.height}`)
+        log('MIGRATED-SCREEN-CAPTURE', `capture SUCCESS — ${captureResult.result.width}x${captureResult.result.height}, base64=${captureResult.result.base64.length} chars`)
+      }
+    } else {
+      log('MIGRATED-SCREEN-CAPTURE', 'note: no sources available for capture (status denied or empty)')
+    }
+
     // ═══ REAL INVALID-SESSION PATH (after save) ═══
     log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')
     await evaluate(ws, `(async () => {

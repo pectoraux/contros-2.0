@@ -32,6 +32,7 @@
 import {
   ElectronXlsxSidecarEngine,
   ElectronSpreadsheetPdfRenderer,
+  ElectronScreenCapture,
   type ElectronXlsxSidecarEngineConfig,
   type SidecarProtocolLike,
 } from '@genoffice/platform-electron'
@@ -44,12 +45,14 @@ import type {
   WorkbookMetadata,
   SpreadsheetPdfRenderer,
 } from '@genoffice/runtime-contracts'
+import type { ScreenCapture } from '@genoffice/platform'
 
 export interface SheetsRuntimeBundle {
   readonly engine: ElectronXlsxSidecarEngine
   readonly service: SpreadsheetServiceImpl
   readonly coordinator: SheetsShellCoordinator
   readonly pdfRenderer: SpreadsheetPdfRenderer
+  readonly screenCapture: ScreenCapture
 }
 
 /**
@@ -79,9 +82,15 @@ export function initSheetsRuntime(config: ElectronXlsxSidecarEngineConfig): Shee
   // context (hidden window, HTML load, printToPDF, cleanup).
   const pdfRenderer = new ElectronSpreadsheetPdfRenderer()
 
+  // INCREMENT 8: construct the ScreenCapture capability (ADR-005).
+  // The capability owns desktopCapturer + screen.getAllDisplays + permission
+  // checks. The handler delegates to it directly (no coordinator involvement
+  // — screen capture has no session/lifecycle concerns).
+  const screenCapture = new ElectronScreenCapture()
+
   const coordinator = new SheetsShellCoordinator({ service, pdfRenderer })
 
-  return { engine, service, coordinator, pdfRenderer }
+  return { engine, service, coordinator, pdfRenderer, screenCapture }
 }
 
 // ── Legacy session adoption ──────────────────────────────────────────

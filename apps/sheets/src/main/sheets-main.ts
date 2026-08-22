@@ -1437,8 +1437,8 @@ export async function createSheetsWindow(
   })
   mainWindow = window
   registerSheetsIpc()
-  const { coordinator } = getMigratedRuntime()
-  registerMigratedSheetsIpc(coordinator)
+  const bundle = getMigratedRuntime()
+  registerMigratedSheetsIpc(bundle.coordinator, bundle.screenCapture)
   if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
   if (options.includeAiHandlers ?? true) registerProjectIpc()
   registerSheetsSession(window.webContents, client)
@@ -1486,8 +1486,8 @@ export function createSheetsView(options: { includeAiHandlers?: boolean } = {}):
     },
   })
   registerSheetsIpc()
-  const { coordinator } = getMigratedRuntime()
-  registerMigratedSheetsIpc(coordinator)
+  const bundle = getMigratedRuntime()
+  registerMigratedSheetsIpc(bundle.coordinator, bundle.screenCapture)
   if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
   registerSheetsSession(view.webContents, client)
   view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
