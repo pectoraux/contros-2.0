@@ -2,7 +2,7 @@
 
 ## Status
 
-PROPOSED (revised — pending Principal Architect approval)
+PROPOSED (revised 2 — pending Principal Architect approval)
 
 ## Context
 
@@ -30,7 +30,7 @@ execution-engine port**.
 ```text
 runtime-contracts
     SpreadsheetEngine (interface)
-    EngineSessionHandle (opaque type)
+    EngineSessionHandle (opaque token type)
           ↓
 services-sheets
     SpreadsheetService (uses SpreadsheetEngine + EngineSessionHandle)
@@ -41,22 +41,34 @@ platform-electron
 Rust xlsx-sidecar binary
 ```
 
-### Engine session handle
+### Engine session handle — genuinely opaque
 
-The engine returns an **opaque handle** — `EngineSessionHandle` — from
-`open()`. The domain service passes this handle to subsequent engine
+The engine returns an **opaque token** — `EngineSessionHandle` — from
+`open()`. The domain service passes this token to subsequent engine
 operations. The domain service and runtime contracts do NOT know what
-is inside the handle.
+is inside the token, and MUST NOT inspect it.
 
 ```text
-EngineSessionHandle = { readonly engineSessionId: string }
+EngineSessionHandle = opaque token
 ```
 
-The handle is a branded type: the `engineSessionId` field is an opaque
-string whose meaning is known only to the engine implementation. The
-Electron adapter translates `EngineSessionHandle ↔ Rust sidecar UUID`
-internally. A WASM adapter would translate it to an in-memory table
-key. A Cloud adapter would translate it to a server session token.
+The type is defined in `runtime-contracts` as an opaque branded type.
+Its internal representation is NOT part of the runtime-independent
+contract. The type exposes NO fields — it is a bare token that can only
+be passed back to the engine that created it.
+
+The Electron adapter owns the internal mapping:
+
+```text
+EngineSessionHandle (opaque token)
+    ↔
+Rust sidecar UUID (internal to ElectronXlsxSidecarEngine)
+```
+
+A future WASM adapter maps the same opaque token to an in-memory session
+table key. A Cloud adapter maps it to a server session token. The domain
+service never inspects `engineSessionId`, `sidecar UUID`, or any other
+engine-specific identifier.
 
 ### Interface ownership
 
@@ -65,9 +77,13 @@ It defines domain-level operations using `EngineSessionHandle`:
 
 ```text
 SpreadsheetEngine {
+    // Opens a workbook file. Returns an opaque handle + workbook metadata.
+    // The handle is created by the engine — it does not exist before this call.
     open(path: string, locale: string): Promise<{ handle: EngineSessionHandle; metadata: WorkbookMetadata }>
-    readRange(handle: EngineSessionHandle, sheetId: string, range: string): Promise<RangeResult>
-    readFormulaCells(handle: EngineSessionHandle, sheetId: string): Promise<FormulaCellsResult>
+
+    // All subsequent operations receive the opaque handle from open().
+    readRange(handle: EngineSessionHandle, sheetName: string, range: string): Promise<RangeResult>
+    readFormulaCells(handle: EngineSessionHandle, sheetName: string): Promise<FormulaCellsResult>
     recalculate(handle: EngineSessionHandle, edits: RecalcEdit[], reads: RecalcRead[]): Promise<RecalcResult>
     readMedia(handle: EngineSessionHandle, visualId: string): Promise<MediaResult>
     saveArchive(handle: EngineSessionHandle, patches: ArchivePatch[]): Promise<Uint8Array>
@@ -76,6 +92,9 @@ SpreadsheetEngine {
     stop(): Promise<void>
 }
 ```
+
+Note: `open()` does NOT receive a handle — it CREATES one. All other
+methods receive the handle returned by `open()`.
 
 ### FORBIDDEN in runtime-independent contracts
 
@@ -96,30 +115,26 @@ Electron
 node:fs
 node:path
 node:child_process
+engineSessionId
 ```
 
-The Electron adapter may translate:
-
-```text
-EngineSessionHandle.engineSessionId
-    ↔
-Rust sidecar UUID (internal to ElectronXlsxSidecarEngine)
-```
+The Electron adapter may translate the opaque `EngineSessionHandle`
+token to its internal Rust sidecar UUID. This translation is private
+to the adapter.
 
 ### Engine independence
 
 The `SpreadsheetEngine` interface MUST NOT define sidecar-specific
 concepts. The interface operates on:
 
-- `EngineSessionHandle` (opaque engine-owned identity)
+- `EngineSessionHandle` (opaque token — no inspectable fields)
 - Domain-level workbook metadata (sheets, styles, defined names)
 - Domain-level edit/recalc/read operations
 - Domain-level archive patch operations
 
 Allowed:
 ```text
-EngineSessionHandle
-engine session identity
+EngineSessionHandle (opaque token)
 engine workbook metadata
 engine calculation results
 ```
@@ -127,6 +142,7 @@ engine calculation results
 Forbidden:
 ```text
 sidecarSessionId
+engineSessionId
 Rust
 stdio
 child_process
@@ -142,13 +158,45 @@ Electron
 - **Spawn/stop**: owned by the Electron adapter (`ElectronXlsxSidecarEngine`).
   The domain service calls `engine.open(path)` — it does not know how the
   engine parses the file internally.
-- **Engine session handle**: returned by `engine.open()`, owned by the shell
+- **Engine session handle**: created by `engine.open()`, owned by the shell
   coordinator (stored in `ShellWorkbookSession.engineHandle`). The domain
   service receives the handle as a method parameter — it does not store it.
+  `SpreadsheetService.open()` calls `engine.open()` internally and receives
+  the handle; it does NOT receive a pre-existing handle.
 - **Snapshot management**: owned by the shell coordinator. The engine
   receives a path (which may be a snapshot); it does not create or manage
   snapshots itself. The `snapshotPath` field lives in `ShellWorkbookSession`,
   NOT in `WorkbookSession` (domain) or `EngineSessionHandle`.
+
+### Workbook-open lifecycle
+
+```text
+IPC workbook:select
+    ↓
+SHELL
+    resolve caller (wcId, callerWindow)
+    resolve original path (dialog or queued)
+    create snapshot (Files.copy(originalPath, snapshotPath))
+    ↓
+SpreadsheetService.open(snapshotPath)
+    ↓
+SpreadsheetEngine.open(snapshotPath)
+    ↓
+{ opaque EngineSessionHandle, WorkbookMetadata }
+    ↓
+SHELL creates ShellWorkbookSession (includes engineHandle + snapshotPath)
+SHELL creates WorkbookSession (domain — path, hash, sheetNames)
+    ↓
+renderer receives WorkbookOpenResult
+```
+
+Key: `SpreadsheetService.open()` does NOT receive an `EngineSessionHandle`.
+The handle is created BY `engine.open()` inside the service. The service
+returns the handle to the shell coordinator, which stores it.
+
+Subsequent operations (readRange, recalc, save, etc.) receive both
+`WorkbookSession` (domain) and `EngineSessionHandle` (opaque token) as
+parameters.
 
 ### Error model
 
@@ -164,10 +212,11 @@ The engine interface uses typed errors:
 
 The interface is designed to allow:
 - `ElectronXlsxSidecarEngine` — current Rust sidecar via `child_process`
+  (the opaque token maps to a sidecar UUID internally)
 - `WasmSpreadsheetEngine` — IronCalc compiled to WASM, running in-process
-  (the handle would be an in-memory table key, not a sidecar UUID)
+  (the opaque token maps to an in-memory table key)
 - `CloudSpreadsheetEngine` — server-side workbook computation
-  (the handle would be a server session token)
+  (the opaque token maps to a server session token)
 
 The interface must not assume a process boundary. A WASM engine would
 return results synchronously (or via async in-process calls); the
@@ -194,7 +243,9 @@ implementation is at Layer 4a.
 - `platform-electron` gains a new adapter: `ElectronXlsxSidecarEngine`.
 - The Rust sidecar binary and its JSON-over-stdio protocol remain
   unchanged — only the TS wrapper moves.
-- The engine handle is opaque: switching from sidecar to WASM to Cloud
-  does not change `SpreadsheetService` or `WorkbookSession`.
+- The engine handle is genuinely opaque: switching from sidecar to WASM
+  to Cloud does not change `SpreadsheetService` or `WorkbookSession`.
+- `SpreadsheetService.open()` creates the handle via `engine.open()`;
+  it does not receive a pre-existing handle.
 - Future Web/WASM runtimes can implement `SpreadsheetEngine` without
   spawning a child process.

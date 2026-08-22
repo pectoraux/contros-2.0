@@ -2,16 +2,16 @@
 
 ## Status
 
-PROPOSED (revised — pending Principal Architect approval)
+PROPOSED (revised 2 — pending Principal Architect approval)
 
 ## Baseline
 
-`9c733fe14e0d2be044f91d2356541f0f414d8efb`
+`b5bfa96bf80b9cc9c30b1c2c823aa40ef9fcf794`
 
 ## Related ADRs
 
-- ADR-004: Spreadsheet Engine Port (revised — opaque `EngineSessionHandle`)
-- ADR-005: Screen Capture Capability (revised — `requestCapture()` for browser portability)
+- ADR-004: Spreadsheet Engine Port (revised 2 — genuinely opaque handle, corrected open lifecycle)
+- ADR-005: Screen Capture Capability (revised 2 — deterministic browser semantics)
 - ADR-006: Sheets PDF Rendering Port (approved, unchanged)
 
 ---
@@ -33,13 +33,17 @@ ShellWorkbookSession (shell — Electron-specific)
     workbookPath: string
     snapshotPath: string            // temp copy the engine reads/writes
     diskFingerprint: string         // sha256 of the snapshot at open time
-    engineHandle: EngineSessionHandle  // opaque engine identity
+    engineHandle: EngineSessionHandle  // opaque engine token
     suggestSaveAs?: string          // converted import: suggested save path
     restoreTarget?: string          // recovery restore: original file path
     restoreTargetSha?: string       // recovery restore: original file sha256
 
-EngineSessionHandle (engine — opaque)
-    engineSessionId: string         // opaque string, meaning known only to engine impl
+EngineSessionHandle (engine — genuinely opaque)
+    // NO inspectable fields. The type is an opaque token.
+    // The Electron adapter maps it to a sidecar UUID internally.
+    // A WASM adapter maps it to an in-memory table key.
+    // A Cloud adapter maps it to a server session token.
+    // The domain service and runtime contracts NEVER inspect it.
 ```
 
 ### Why three layers?
@@ -52,23 +56,54 @@ the engine implementation (WASM/Cloud) without changing the domain service.
 The revised model:
 - `WorkbookSession` is what the domain service needs to perform domain
   operations (read, recalc, save). It contains the file path, content hash,
-  and sheet-name mapping. No filesystem paths, no engine handles.
+  and sheet-name mapping. No filesystem paths, no engine tokens.
 - `ShellWorkbookSession` is what the shell coordinator owns. It contains
   the snapshot path, disk fingerprint, engine handle, and recovery metadata.
-- `EngineSessionHandle` is opaque — the domain service passes it to the
-  engine without knowing what's inside.
+- `EngineSessionHandle` is genuinely opaque — no inspectable fields. The
+  domain service passes it to the engine without knowing what's inside.
+
+### Workbook-open lifecycle
+
+```text
+IPC workbook:select
+    ↓
+SHELL
+    resolve caller (wcId, callerWindow)
+    resolve original path (dialog or queued)
+    create snapshot (Files.copy(originalPath, snapshotPath))
+    ↓
+SpreadsheetService.open(snapshotPath)
+    ↓ (internally calls)
+SpreadsheetEngine.open(snapshotPath)
+    ↓
+{ opaque EngineSessionHandle, WorkbookMetadata }
+    ↓
+SHELL creates ShellWorkbookSession (includes engineHandle + snapshotPath + diskFingerprint)
+SHELL creates WorkbookSession (domain — path, hash, sheetNames)
+    ↓
+renderer receives WorkbookOpenResult
+```
+
+Key: `SpreadsheetService.open()` does NOT receive a pre-existing
+`EngineSessionHandle`. The handle is created BY `engine.open()` inside
+the service. The service returns the handle to the shell coordinator.
+
+Subsequent operations (readRange, recalc, save, etc.) receive both
+`WorkbookSession` (domain) and `EngineSessionHandle` (opaque token).
 
 ### Session creation
 
 1. Shell coordinator resolves caller context (wcId, callerWindow).
 2. Shell coordinator calls `Files.pickOpen` (or consumes a queued path).
 3. Shell coordinator creates a snapshot: `Files.copy(originalPath, snapshotPath)`.
-4. Shell coordinator calls `SpreadsheetEngine.open(snapshotPath)`.
-5. Engine returns `EngineSessionHandle` + workbook metadata.
-6. Shell coordinator creates `ShellWorkbookSession` (includes the handle).
-7. Shell coordinator creates `WorkbookSession` (domain-level — path, hash,
+4. Shell coordinator calls `SpreadsheetService.open(snapshotPath)`.
+5. Service internally calls `SpreadsheetEngine.open(snapshotPath)`.
+6. Engine returns opaque `EngineSessionHandle` + workbook metadata.
+7. Service returns `{ handle, metadata }` to the shell coordinator.
+8. Shell coordinator creates `ShellWorkbookSession` (includes the handle).
+9. Shell coordinator creates `WorkbookSession` (domain — path, hash,
    sheetNames) from the metadata.
-8. Shell coordinator stores both in the session registry.
+10. Shell coordinator stores both in the session registry.
 
 ### Session lookup
 
@@ -86,25 +121,7 @@ SheetsTabSession {
 
 The coordinator resolves `wcId → sessionId → { domain, shell }`. It passes
 the `WorkbookSession` (domain) to `SpreadsheetService` methods and the
-`ShellWorkbookSession.engineHandle` (opaque) to `SpreadsheetEngine` methods.
-
-### Domain method invocation pattern
-
-```text
-// Shell coordinator receives an IPC request:
-const { domain, shell } = sessionFor(wcId, sessionId)
-
-// Domain service receives domain-level session + engine handle:
-await spreadsheetService.readRange(domain, shell.engineHandle, sheetId, range)
-
-// Inside SpreadsheetService:
-async readRange(session: WorkbookSession, handle: EngineSessionHandle, sheetId: string, range: string) {
-    // Resolve domain sheetId → engine sheet name using session.sheetNames
-    const engineSheetName = session.sheetNames.get(sheetId)
-    // Delegate to engine with opaque handle
-    return this.engine.readRange(handle, engineSheetName, range)
-}
-```
+`ShellWorkbookSession.engineHandle` (opaque token) to `SpreadsheetEngine` methods.
 
 ### Session teardown
 
@@ -124,9 +141,9 @@ The sessions are independent.
 
 Multiple renderers CAN open the same file — each gets its own snapshot,
 engine session, and `ShellWorkbookSession`. They are fully independent.
-A disk-change guard (sha256 comparison) prevents silent overwrites.
+A disk-change guard prevents silent overwrites.
 
-### Sidecar lifecycle
+### Engine lifecycle
 
 - The engine is spawned/managed by the Electron adapter
   (`ElectronXlsxSidecarEngine`), NOT by the shell coordinator or domain service.
@@ -134,7 +151,7 @@ A disk-change guard (sha256 comparison) prevents silent overwrites.
 - The shell coordinator calls `SpreadsheetEngine.stop()` on
   `app.on('before-quit')`.
 - The engine maintains its own session registry (keyed by the opaque
-  handle's internal value).
+  token's internal value — private to the adapter).
 
 ### Renderer teardown
 
@@ -161,15 +178,16 @@ They are removed on:
 ```text
 SpreadsheetService {
     // ── Workbook lifecycle ──
-    // Shell passes the file path + engine handle. Service creates a
-    // WorkbookSession (domain) from the engine metadata.
-    open(path: string, handle: EngineSessionHandle): Promise<{ session: WorkbookSession; result: WorkbookOpenResult } | null>
+    // Opens a workbook file. Internally calls engine.open() which creates
+    // the opaque EngineSessionHandle. Returns the handle + metadata.
+    // Does NOT receive a pre-existing handle.
+    open(path: string): Promise<{ handle: EngineSessionHandle; session: WorkbookSession; result: WorkbookOpenResult } | null>
     close(handle: EngineSessionHandle): Promise<{ ok: boolean }>
     recentFiles(): Promise<string[]>
 
     // ── Workbook operations ──
-    // Service receives the domain session + engine handle.
-    // It resolves domain sheet ids → engine sheet names internally.
+    // Receive domain session + opaque engine handle.
+    // Service resolves domain sheet ids → engine sheet names internally.
     readRange(session: WorkbookSession, handle: EngineSessionHandle, sheetId: string, range: string): Promise<RangeResult>
     readFormulaCells(session: WorkbookSession, handle: EngineSessionHandle, sheetId: string): Promise<FormulaCellsResult>
     recalculate(session: WorkbookSession, handle: EngineSessionHandle, edits: RecalcEdit[], reads: RecalcRead[]): Promise<RecalcResult>
@@ -177,10 +195,11 @@ SpreadsheetService {
     readPivotDefinition(path: string, cachePath: string): Promise<PivotDefinition>
 
     // ── Save ──
-    // Service receives the domain session + engine handle + already-resolved save path.
-    // It performs the save-plan semantics, disk-change policy, and engine saveArchive.
-    // It does NOT resolve the save path (that's the shell's job).
-    save(session: WorkbookSession, handle: EngineSessionHandle, request: SaveRequest, targetPath: string): Promise<SaveResult>
+    // Service receives domain session + handle + already-resolved save path
+    // + external change status (supplied by shell).
+    // Service performs save-plan semantics, engine saveArchive.
+    // Service does NOT resolve the save path or compute the disk fingerprint.
+    save(session: WorkbookSession, handle: EngineSessionHandle, request: SaveRequest, targetPath: string, externalChange: ExternalChangeStatus): Promise<SaveResult>
     writeRecovery(session: WorkbookSession, handle: EngineSessionHandle, request: SaveRequest, recoveryPath: string): Promise<{ ok: boolean }>
     autoRename(session: WorkbookSession, name: string): Promise<{ ok: boolean }>
 
@@ -195,6 +214,22 @@ SpreadsheetService {
 }
 ```
 
+### ExternalChangeStatus
+
+A runtime-neutral fact supplied by the shell:
+
+```text
+ExternalChangeStatus = 'unchanged' | 'changed' | 'unknown'
+```
+
+- `'unchanged'` — the shell verified the file on disk matches the
+  stored fingerprint (sha256). In-place save is safe.
+- `'changed'` — the file on disk differs from the stored fingerprint.
+  The domain service must refuse an in-place save (return `reason: 'external-modified'`).
+- `'unknown'` — the shell could not determine the status (stat failed,
+  permission denied, etc.). The domain service may proceed with caution
+  or refuse, depending on policy.
+
 ### What the domain service MUST NOT do
 
 - File dialogs (shell owns `Files.pickOpen` / `Files.pickSave`)
@@ -202,17 +237,22 @@ SpreadsheetService {
 - `WebContents` calls (shell/coordinator owns renderer communication)
 - `wcId` lookup (shell coordinator owns the session registry)
 - Renderer event routing (shell coordinator owns `wc.send`)
-- `child_process` spawning (engine adapter owns sidecar lifecycle)
+- `child_process` spawning (engine adapter owns engine lifecycle)
 - Recovery UI dialogs (shell coordinator owns Restore/Discard prompts)
 - `node:fs` direct writes (uses `Storage` or `Files` capability)
 - Snapshot management (shell owns snapshot paths)
-- Disk fingerprint management (shell owns the fingerprint)
+- Disk fingerprint management (shell owns the fingerprint; supplies
+  `ExternalChangeStatus` to the domain service)
+- Engine handle inspection (the handle is opaque; the domain service
+  passes it through to the engine)
 
 ### What the domain service receives
 
 - `WorkbookSession` — domain-level session identity (path, hash, sheetNames)
-- `EngineSessionHandle` — opaque engine identity (passed through to engine)
+- `EngineSessionHandle` — opaque engine token (passed through to engine)
 - Already-resolved paths (save target, recovery path — resolved by shell)
+- `ExternalChangeStatus` — runtime-neutral fact about disk state
+  (supplied by shell, computed via `Files.stat` + hash comparison)
 - Save request (computed by renderer, validated by service)
 
 ### Dependencies (constructor-injected)
@@ -236,7 +276,8 @@ SpreadsheetServiceDeps {
 
 - Workbook save semantics (what constitutes a valid save plan)
 - Save plan application (resolve sheet ids → file names, delegate to engine)
-- Disk-change policy (compare content hash; refuse if mismatch for in-place save)
+- External-modification POLICY (given an `ExternalChangeStatus` fact,
+  decide whether an in-place save is permitted)
 - Recovery path derivation (sha1 of original path → recovery file name —
   this is a pure computation, no filesystem access)
 
@@ -248,36 +289,41 @@ SpreadsheetServiceDeps {
 - Session lifecycle (close old session, open new session over saved file)
 - Snapshot management (copy original → snapshot before engine open;
   remove snapshot on close/save/teardown)
-- Disk fingerprint management (compute sha256 of snapshot at open time;
-  recompute on save to detect external modification)
+- Disk fingerprint OBSERVATION (compute sha256 of file at open time,
+  recompute on save, compare — supply the fact as `ExternalChangeStatus`)
 - Recovery filesystem state (write/delete recovery copies via `Files.write`/`Files.unlink`)
 
-### STORAGE CAPABILITY
+### CAPABILITY
 
-- Raw bytes persistence (`Storage.writeBlob` / `Storage.readBlob`)
-- File I/O (`Files.read` / `Files.write` / `Files.stat` / `Files.copy`)
-- Recovery persistence (recovery files stored via `Files.write` to
-  `userData/sheets-autosave/`, NOT direct `writeFileSync`)
+- Provides file/hash observation (`Files.stat` returns mtime/size;
+  `Files.read` returns bytes for hashing)
+- Provides raw bytes persistence (`Storage.writeBlob` / `Storage.readBlob`)
+- Provides file I/O (`Files.read` / `Files.write` / `Files.stat` / `Files.copy`)
+- Provides recovery persistence (recovery files stored via `Files.write`)
 
-### Disk-change check
+### Disk-change check — resolved ownership
 
-The domain service needs to verify that the file on disk hasn't changed
-since open. But the domain service must NOT receive `snapshotPath` or
-`diskFingerprint` directly — those are shell infrastructure.
-
-Instead, the shell coordinator computes the fingerprint check and passes
-the result to the domain service:
+The shell OWNS the filesystem state and OBSERVES it. The domain OWNS
+the POLICY (what the observation means for save permissibility).
 
 ```text
-SHELL: recompute sha256 of the file at session.originalPath
+SHELL: recompute sha256 of file at session.originalPath (via Files.read)
 SHELL: compare with session.diskFingerprint (stored in ShellWorkbookSession)
-SHELL: if mismatch → return { ok: false, reason: 'external-modified' }
-SHELL: if match → call SpreadsheetService.save(session, handle, request, targetPath)
+SHELL: supply ExternalChangeStatus fact to domain service
+    ↓
+DOMAIN: SpreadsheetService.save(session, handle, request, targetPath, externalChange)
+DOMAIN: if externalChange === 'changed' → return { ok: false, reason: 'external-modified' }
+DOMAIN: if externalChange === 'unchanged' → proceed with save
+DOMAIN: if externalChange === 'unknown' → proceed with caution (or refuse, per policy)
+DOMAIN: resolve sheet ids → engine sheet names
+DOMAIN: engine.saveArchive(handle, patches) → bytes
+DOMAIN: Files.write(targetPath, bytes)
+DOMAIN: clear recovery (Files.unlink recoveryPath)
 ```
 
-The domain service trusts the shell's assertion that the disk is unchanged
-and proceeds with the save. The disk-change policy is a shell concern
-(it owns the filesystem state); the save-plan semantics are a domain concern.
+The domain service does NOT directly manipulate filesystem state to
+perform the disk-change check. It receives the fact from the shell and
+applies the policy.
 
 ### Flow
 
@@ -287,18 +333,19 @@ IPC: workbook:save
 SHELL: resolve caller (wcId, callerWindow)
 SHELL: look up session (wcId → sessionId → { domain, shell })
 SHELL: if Save As → Files.pickSave(callerWindow) → selectedPath
-SHELL: disk-change check: recompute sha256(originalPath) vs shell.diskFingerprint
-SHELL: if mismatch → return { ok: false, reason: 'external-modified' }
+SHELL: observe disk state: recompute sha256(originalPath) vs shell.diskFingerprint
+SHELL: supply ExternalChangeStatus to domain service
     ↓
-DOMAIN: SpreadsheetService.save(domain.session, shell.engineHandle, request, selectedPath ?? domain.session.workbookPath)
-DOMAIN:   resolve sheet ids → file names (domain.session.sheetNames)
-DOMAIN:   engine.saveArchive(shell.engineHandle, patches) → bytes
-DOMAIN:   Files.write(targetPath, bytes)
-DOMAIN:   clear recovery (Files.unlink recoveryPath — path derived from originalPath)
+DOMAIN: SpreadsheetService.save(domain.session, shell.engineHandle, request, targetPath, externalChange)
+DOMAIN: if 'changed' → return { ok: false, reason: 'external-modified' }
+DOMAIN: resolve sheet ids → file names (domain.session.sheetNames)
+DOMAIN: engine.saveArchive(shell.engineHandle, patches) → bytes
+DOMAIN: Files.write(targetPath, bytes)
+DOMAIN: clear recovery (Files.unlink recoveryPath)
     ↓
 SHELL: close old engine session
 SHELL: create new snapshot over saved file
-SHELL: open new engine session
+SHELL: open new engine session (via SpreadsheetService.open)
 SHELL: update ShellWorkbookSession (new snapshotPath, diskFingerprint, engineHandle)
 SHELL: send push events to renderer
 ```
@@ -342,8 +389,8 @@ The **sheet-id translation** (domain ↔ engine) is owned by the domain
 service, NOT the shell coordinator. The engine adapter must not expose
 its internal naming model to the renderer or the shell.
 
-The engine receives the opaque `EngineSessionHandle` — it does NOT receive
-`snapshotPath` or `wcId`.
+The engine receives the opaque `EngineSessionHandle` token — it does NOT
+receive `snapshotPath` or `wcId`.
 
 ---
 
@@ -354,7 +401,7 @@ The engine receives the opaque `EngineSessionHandle` — it does NOT receive
 | Layer | Responsibility |
 |---|---|
 | SHELL | File dialog, caller context, recovery policy, session creation, snapshot creation |
-| DOMAIN | Workbook preparation (convert .xls/.csv → .xlsx), workbook semantics |
+| DOMAIN | Workbook preparation (convert .xls/.csv → .xlsx), workbook semantics, engine.open() |
 | ENGINE | Sidecar `open` command (via `SpreadsheetEngine.open`) |
 | STORAGE | Snapshot copy (`Files.copy`), recovery check (`Files.stat`) |
 
@@ -362,8 +409,8 @@ The engine receives the opaque `EngineSessionHandle` — it does NOT receive
 
 | Layer | Responsibility |
 |---|---|
-| SHELL | Caller/session lookup, Save As dialog, disk-change check (sha256), session lifecycle (close+reopen), snapshot management |
-| DOMAIN | Save plan validation, sheet-id resolution, engine saveArchive |
+| SHELL | Caller/session lookup, Save As dialog, disk-state observation (sha256 → ExternalChangeStatus), session lifecycle (close+reopen), snapshot management |
+| DOMAIN | External-modification policy (given ExternalChangeStatus), save plan validation, sheet-id resolution, engine saveArchive |
 | ENGINE | Sidecar `save_archive` command |
 | STORAGE | `Files.write` (target path), recovery cleanup (`Files.unlink`) |
 
@@ -410,13 +457,14 @@ The engine receives the opaque `EngineSessionHandle` — it does NOT receive
 Each step is independently testable and committed.
 
 ```text
- 1. runtime-contracts: SpreadsheetEngine + EngineSessionHandle interfaces
-    + architecture test (zero Electron/node/sidecar imports)
+ 1. runtime-contracts: SpreadsheetEngine + EngineSessionHandle (opaque) interfaces
+    + ExternalChangeStatus type
+    + architecture test (zero Electron/node/sidecar imports, zero inspectable handle fields)
     + committed
 
  2. platform-electron: ElectronXlsxSidecarEngine
     (wraps existing XlsxSidecarClient, implements SpreadsheetEngine,
-     translates EngineSessionHandle ↔ sidecar UUID internally)
+     translates opaque EngineSessionHandle ↔ sidecar UUID internally)
     + test (delegates to sidecar, returns typed results)
     + committed
 
@@ -441,7 +489,7 @@ Each step is independently testable and committed.
     + SpreadsheetServiceImpl (delegates to engine + capabilities)
     + WorkbookSession type (domain — path, hash, sheetNames only)
     + architecture tests (zero Electron/node imports, zero dialog/window refs,
-      zero snapshotPath/sidecarSessionId references)
+      zero snapshotPath/sidecarSessionId/engineSessionId references)
     + committed
 
  7. SheetsShellCoordinator
@@ -450,9 +498,9 @@ Each step is independently testable and committed.
     + ShellWorkbookSession (includes snapshotPath, diskFingerprint, engineHandle)
     + caller-specific dialog parent
     + close-guard flow
+    + disk-state observation (sha256 via Files.read → ExternalChangeStatus)
     + recovery path management (via Files capability, not node:fs)
     + snapshot management (via Files.copy, not node:fs)
-    + disk fingerprint management (sha256 via Files.read)
     + committed
 
  8. typed Sheets IPC contract
@@ -498,13 +546,13 @@ Each step is independently testable and committed.
 ## Final Status
 
 ```text
-ADR-004 SPREADSHEET ENGINE PORT: COMPLETE (revised — opaque EngineSessionHandle)
-ADR-005 SCREEN CAPTURE: COMPLETE (revised — requestCapture for browser portability)
+ADR-004 SPREADSHEET ENGINE PORT: COMPLETE (revised 2 — genuinely opaque handle, corrected open lifecycle)
+ADR-005 SCREEN CAPTURE: COMPLETE (revised 2 — deterministic browser semantics)
 ADR-006 SHEETS PDF RENDERING: COMPLETE (approved, unchanged)
 
-SHEETS SESSION MODEL: FROZEN (three-layer: WorkbookSession / ShellWorkbookSession / EngineSessionHandle)
-DOMAIN BOUNDARY: FROZEN (domain receives WorkbookSession + EngineSessionHandle, not shell infrastructure)
-SAVE/RECOVERY BOUNDARY: FROZEN (shell owns disk fingerprint check; domain owns save-plan semantics)
+SHEETS SESSION MODEL: FROZEN (three-layer: WorkbookSession / ShellWorkbookSession / opaque EngineSessionHandle)
+DOMAIN BOUNDARY: FROZEN (domain receives WorkbookSession + opaque handle + ExternalChangeStatus)
+SAVE/RECOVERY BOUNDARY: FROZEN (shell observes disk state → ExternalChangeStatus; domain owns policy)
 RECALCULATION BOUNDARY: FROZEN (domain owns sheet-id translation; engine receives opaque handle)
 
 CODE CHANGES: NONE

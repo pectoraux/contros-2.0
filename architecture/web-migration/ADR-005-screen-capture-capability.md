@@ -40,21 +40,21 @@ desktopCapturer + screen.getAllDisplays()
 ```text
 ScreenCapture {
     // Enumerate available capture sources (displays and windows).
-    // Returns an empty array if the runtime does not support programmatic
-    // enumeration (e.g., browsers require user-mediated source selection).
+    // Deterministic contract:
+    //   Electron → returns actual source list (desktopCapturer.getSources)
+    //   Browser  → returns empty array (browsers cannot enumerate system windows)
     enumerateSources(): Promise<ScreenSource[]>
 
-    // Request a capture of a specific source by ID (from enumerateSources).
-    // In browser runtimes that do not support enumerateSources, the caller
-    // should use requestCapture() instead.
+    // Capture a specific source by ID (from enumerateSources).
+    // Only meaningful when enumerateSources() returned a non-empty list.
+    // In browsers, this method is not callable (no source IDs exist).
     captureSource(sourceId: string): Promise<ScreenCaptureResult>
 
     // Request a capture with user-mediated source selection.
-    // In Electron, this delegates to enumerateSources + captureSource.
-    // In browsers, this uses navigator.mediaDevices.getDisplayMedia() which
-    // prompts the user to pick a source at capture time — no programmatic
-    // enumeration is possible.
-    // Returns the capture result directly (the user chose the source).
+    // Deterministic contract:
+    //   Electron → implementation-selected capture (delegate to enumerateSources + captureSource)
+    //   Browser  → navigator.mediaDevices.getDisplayMedia() (user picks source at capture time)
+    // Returns null if the user cancels.
     requestCapture(): Promise<ScreenCaptureResult | null>
 
     // Check the OS-level permission status for screen recording.
@@ -87,13 +87,12 @@ ScreenCapturePermission = 'granted' | 'denied' | 'prompt' | 'unknown'
 `enumerateSources()` returns all available capture sources (displays and
 application windows). The caller filters which sources to present.
 
-**Portability**: In Electron, `enumerateSources()` uses
+**Deterministic contract**: In Electron, `enumerateSources()` uses
 `desktopCapturer.getSources()` and returns all sources. In a browser
 runtime, `enumerateSources()` returns an empty array — browsers do not
 allow programmatic enumeration of system windows for privacy reasons.
-The caller must check the return value: if empty, fall back to
-`requestCapture()` which triggers the browser's native source-selection
-prompt.
+Browser source enumeration must NOT sometimes mean "previously selected
+source". If the list is empty, the caller must use `requestCapture()`.
 
 ### Capture request (by source ID)
 
