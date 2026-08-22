@@ -142,9 +142,28 @@ all sources; the caller filters.
 
 A future `BrowserScreenCapture` would use `navigator.mediaDevices.getDisplayMedia()`
 + canvas capture. The permission model differs (user picks a source at
-prompt time, not programmatically). The capability interface must accommodate
-this — `enumerateSources()` may return a single "user-selected" source
-after a permission prompt in browser mode.
+prompt time, not programmatically). The deterministic contract is:
+
+```text
+BrowserScreenCapture:
+
+    enumerateSources()
+        → []  (browsers cannot enumerate system windows)
+
+    captureSource(sourceId)
+        → unsupported / throws capability error
+           (no source IDs exist from enumerateSources)
+
+    requestCapture()
+        → navigator.mediaDevices.getDisplayMedia()
+           (user picks a source at capture time)
+        → returns ScreenCaptureResult or null (user cancelled)
+```
+
+A browser source chosen by the user exists only inside the `requestCapture()`
+operation. It must NOT become a synthetic value in `enumerateSources()`.
+The same call must not have two different meanings depending on whether
+a user previously selected a source.
 
 ### Formal amendment to the capability list
 

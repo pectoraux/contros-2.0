@@ -227,8 +227,10 @@ ExternalChangeStatus = 'unchanged' | 'changed' | 'unknown'
 - `'changed'` — the file on disk differs from the stored fingerprint.
   The domain service must refuse an in-place save (return `reason: 'external-modified'`).
 - `'unknown'` — the shell could not determine the status (stat failed,
-  permission denied, etc.). The domain service may proceed with caution
-  or refuse, depending on policy.
+  permission denied, etc.). The domain service MUST refuse an in-place
+  save. An office application must not silently overwrite a file when
+  it cannot establish its current disk state. Save-As remains available
+  because it targets a user-selected path.
 
 ### What the domain service MUST NOT do
 
@@ -276,8 +278,14 @@ SpreadsheetServiceDeps {
 
 - Workbook save semantics (what constitutes a valid save plan)
 - Save plan application (resolve sheet ids → file names, delegate to engine)
-- External-modification POLICY (given an `ExternalChangeStatus` fact,
-  decide whether an in-place save is permitted)
+- External-modification POLICY (deterministic):
+  - `'unchanged'` → save permitted
+  - `'changed'` → in-place save refused
+  - `'unknown'` → in-place save refused (safe default: an office
+    application must not silently overwrite a file when it cannot
+    establish its current disk state)
+  - Save-As is always available (targets a user-selected path, not
+    the original file — no disk-change check needed)
 - Recovery path derivation (sha1 of original path → recovery file name —
   this is a pure computation, no filesystem access)
 
@@ -313,8 +321,8 @@ SHELL: supply ExternalChangeStatus fact to domain service
     ↓
 DOMAIN: SpreadsheetService.save(session, handle, request, targetPath, externalChange)
 DOMAIN: if externalChange === 'changed' → return { ok: false, reason: 'external-modified' }
+DOMAIN: if externalChange === 'unknown' → return { ok: false, reason: 'external-modified' }
 DOMAIN: if externalChange === 'unchanged' → proceed with save
-DOMAIN: if externalChange === 'unknown' → proceed with caution (or refuse, per policy)
 DOMAIN: resolve sheet ids → engine sheet names
 DOMAIN: engine.saveArchive(handle, patches) → bytes
 DOMAIN: Files.write(targetPath, bytes)
