@@ -1,0 +1,133 @@
+/**
+ * Architecture-boundary test for @genoffice/services-sheets.
+ *
+ * Enforces:
+ *   - ZERO imports of electron
+ *   - ZERO imports of node:* (no node:fs, node:crypto, node:path, node:buffer)
+ *   - ZERO references to BrowserWindow / webContents / wcId
+ *   - ZERO references to child_process / Rust / stdio
+ *   - ZERO references to snapshotPath / sidecarSessionId / engineSessionId
+ *   - Does NOT import platform-electron
+ *   - DOES import runtime-contracts (dependency direction)
+ */
+import { describe, test, expect } from 'vitest'
+import { join } from 'node:path'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+
+const SRC = join(__dirname, '..', 'src')
+
+function listSourceFiles(rootDir: string): string[] {
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      const st = statSync(full)
+      if (st.isDirectory()) {
+        if (name === 'node_modules' || name === 'dist' || name === '.git') continue
+        walk(full)
+      } else if (st.isFile() && (full.endsWith('.ts') || full.endsWith('.tsx'))) {
+        out.push(full)
+      }
+    }
+  }
+  walk(rootDir)
+  return out
+}
+
+function scanForImports(
+  rootDir: string,
+  forbidden: Array<string | RegExp>,
+): Array<{ file: string; line: number; text: string }> {
+  const hits: Array<{ file: string; line: number; text: string }> = []
+  const importPattern = /(?:from\s+|require\s*\(\s*)['"]([^'"]+)['"]/g
+  for (const file of listSourceFiles(rootDir)) {
+    const text = readFileSync(file, 'utf8')
+    let m: RegExpExecArray | null
+    while ((m = importPattern.exec(text)) !== null) {
+      const mod = m[1]
+      const lineNum = text.slice(0, m.index).split('\n').length
+      for (const f of forbidden) {
+        const isHit = typeof f === 'string' ? mod === f || mod.startsWith(f + '/') : f.test(mod)
+        if (isHit) {
+          hits.push({ file, line: lineNum, text: `import ... from '${mod}'` })
+        }
+      }
+    }
+  }
+  return hits
+}
+
+function scanForTokens(rootDir: string, forbidden: string[]): Array<{ file: string; line: number; text: string }> {
+  const hits: Array<{ file: string; line: number; text: string }> = []
+  for (const file of listSourceFiles(rootDir)) {
+    const lines = readFileSync(file, 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      for (const token of forbidden) {
+        if (line.includes(token)) {
+          hits.push({ file, line: i + 1, text: line.trim() })
+        }
+      }
+    })
+  }
+  return hits
+}
+
+describe('@genoffice/services-sheets architecture boundary', () => {
+  test('ZERO imports of electron', () => {
+    const hits = scanForImports(SRC, ['electron'])
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO imports of node:*', () => {
+    const hits = scanForImports(SRC, [/^node:/])
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to BrowserWindow / webContents / wcId', () => {
+    const hits = scanForTokens(SRC, [
+      'BrowserWindow',
+      'webContents',
+      'wcId',
+      'WebContentsView',
+    ]).filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to child_process / Rust / stdio', () => {
+    const hits = scanForTokens(SRC, [
+      'child_process',
+      'Rust',
+      'stdio',
+    ]).filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to snapshotPath / sidecarSessionId / engineSessionId', () => {
+    const hits = scanForTokens(SRC, [
+      'snapshotPath',
+      'sidecarSessionId',
+      'engineSessionId',
+    ]).filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('does NOT import platform-electron', () => {
+    const hits = scanForImports(SRC, ['@genoffice/platform-electron'])
+    expect(hits).toEqual([])
+  })
+
+  test('does NOT import from apps/sheets', () => {
+    const hits = scanForImports(SRC, [/apps\/sheets/])
+    expect(hits).toEqual([])
+  })
+
+  test('does NOT import XlsxSidecarClient', () => {
+    const hits = scanForTokens(SRC, ['XlsxSidecarClient'])
+    expect(hits).toEqual([])
+  })
+
+  test('imports runtime-contracts (dependency direction)', () => {
+    const hits = scanForImports(SRC, ['@genoffice/runtime-contracts'])
+    expect(hits.length).toBeGreaterThan(0)
+  })
+})
