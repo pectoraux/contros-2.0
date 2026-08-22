@@ -120,6 +120,7 @@ import { exportPdf } from './pdf-export'
 import { XlsxSidecarClient } from './xlsx-sidecar-client'
 import { initSheetsRuntime, adoptLegacySessionIntoCoordinator, type SheetsRuntimeBundle, type LegacySessionAdoption } from './sheets-runtime'
 import { registerMigratedSheetsIpc } from './sheets-migrated-handlers'
+import { registerMigratedSheetsAiIpc, abortStreamsForRenderer } from './sheets-ai-handlers'
 import type { WorkbookMetadata, WorksheetMetadata } from '@genoffice/runtime-contracts'
 
 /**
@@ -1191,6 +1192,8 @@ function registerSheetsSession(webContents: WebContents, client: XlsxSidecarClie
     sheetsTabs.delete(webContents.id)
     if (entry) void closeAllSessions(entry)
     if (activeSheetsWebContents === webContents) activeSheetsWebContents = null
+    // INCREMENT 10: abort all AI streams for this renderer
+    abortStreamsForRenderer(webContents.id)
     // INCREMENT 5A — tear down the coordinator's sessions for this renderer.
     // This is idempotent (safe to call even if registerRenderer failed).
     // The coordinator's teardown acquires per-session locks and waits for
@@ -1439,7 +1442,7 @@ export async function createSheetsWindow(
   registerSheetsIpc()
   const bundle = getMigratedRuntime()
   registerMigratedSheetsIpc(bundle.coordinator, bundle.screenCapture)
-  if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
+  if (options.includeAiHandlers ?? true) registerMigratedSheetsAiIpc()
   if (options.includeAiHandlers ?? true) registerProjectIpc()
   registerSheetsSession(window.webContents, client)
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -1488,7 +1491,7 @@ export function createSheetsView(options: { includeAiHandlers?: boolean } = {}):
   registerSheetsIpc()
   const bundle = getMigratedRuntime()
   registerMigratedSheetsIpc(bundle.coordinator, bundle.screenCapture)
-  if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
+  if (options.includeAiHandlers ?? true) registerMigratedSheetsAiIpc()
   registerSheetsSession(view.webContents, client)
   view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   view.webContents.on('will-navigate', (event) => event.preventDefault())

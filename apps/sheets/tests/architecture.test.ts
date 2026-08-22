@@ -371,4 +371,68 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
     expect(stripped).not.toMatch(/^(let|var|const)\s+(activeAttachment|currentPicker|currentPath|activeFile)\b/m)
   })
+
+  // ═══ INCREMENT 10 — AI migration architecture guards ═══
+
+  test('migrated AI handlers are in a separate module (sheets-ai-handlers.ts)', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    expect(src).toMatch(/registerMigratedSheetsAiIpc/)
+    expect(src).toMatch(/abortStreamsForRenderer/)
+  })
+
+  test('migrated AI handlers replace legacy handlers via removeHandler', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    const channels = ['aiGetSettings', 'aiSetSettings', 'aiGskStatus', 'aiGskLogin', 'aiChat', 'aiStream', 'aiStreamCancel', 'aiGenerateImage']
+    for (const ch of channels) {
+      expect(src).toMatch(new RegExp(`removeHandler\\(IPC_CHANNELS\\.${ch}\\)`))
+    }
+    // Web search, image search, fetch image use raw channel strings
+    expect(src).toMatch(/removeHandler\('ai:web-search'\)/)
+    expect(src).toMatch(/removeHandler\('ai:image-search'\)/)
+    expect(src).toMatch(/removeHandler\('ai:fetch-image'\)/)
+  })
+
+  test('migrated AI handlers have ZERO getFocusedWindow calls', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    expect(src).not.toMatch(/getFocusedWindow\s*\(/)
+  })
+
+  test('migrated AI stream tracking is renderer-scoped (Map<wcId, Map>)', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    // Must use event.sender.id for renderer scoping
+    expect(src).toMatch(/event\.sender\.id/)
+    // Must track streams per-renderer
+    expect(src).toMatch(/streamState\s*=\s*new\s+Map<number,\s*Map<string,\s*AbortController>>/)
+  })
+
+  test('migrated AI handlers have ZERO global stream state (no activeStream/currentStream)', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/^(let|var|const)\s+(activeStream|currentStream|currentRenderer|activeRequestId|currentChatId)\b/m)
+  })
+
+  test('migrated AI stream push routes to event.sender only', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    // Stream chunks are sent via event.sender.send, not via broadcast
+    expect(src).toMatch(/sender\.send\(IPC_CHANNELS\.aiStreamChunk/)
+    expect(src).toMatch(/sender\.isDestroyed\(\)/)
+  })
+
+  test('migrated AI handlers have ZERO BrowserWindow construction', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-ai-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/new\s+BrowserWindow\b/)
+  })
+
+  test('migrated main handlers import registerMigratedSheetsAiIpc', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-main.ts'), 'utf8')
+    expect(src).toMatch(/from\s+['"]\.\/sheets-ai-handlers['"]/)
+    expect(src).toMatch(/registerMigratedSheetsAiIpc/)
+    expect(src).toMatch(/abortStreamsForRenderer/)
+  })
+
+  test('renderer teardown calls abortStreamsForRenderer', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-main.ts'), 'utf8')
+    expect(src).toMatch(/abortStreamsForRenderer\(webContents\.id\)/)
+  })
 })
