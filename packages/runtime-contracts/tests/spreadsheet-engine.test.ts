@@ -201,6 +201,20 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
     expect(text).toContain('class InvalidInputError')
   })
 
+  test('WorksheetMetadata exposes BOTH id (stable XLSX sheetId) AND name (mutable)', () => {
+    const text = readFile(ENGINE_FILE)
+    // WorksheetMetadata must have an `id` field (stable XLSX sheetId attribute)
+    // AND a `name` field (visible tab name, mutable via rename). The `id`
+    // is the correct key for the sheetId → sheetName mapping.
+    const metadataMatch = text.match(/interface WorksheetMetadata \{([\s\S]*?)\}/)
+    expect(metadataMatch).not.toBeNull()
+    const body = metadataMatch![1]
+    expect(body).toMatch(/^\s*id:\s*string/m)
+    expect(body).toMatch(/^\s*name:\s*string/m)
+    // The id field must be documented as stable/immutable
+    expect(body).toMatch(/stable/i)
+  })
+
   test('SpreadsheetEngine interface defines all 9 operations from ADR-004', () => {
     const text = readFile(ENGINE_FILE)
     const required = ['open', 'readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'saveArchive', 'convertWorkbook', 'close', 'stop']

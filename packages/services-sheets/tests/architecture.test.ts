@@ -174,4 +174,44 @@ describe('@genoffice/services-sheets architecture boundary', () => {
       .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
     expect(hits).toEqual([])
   })
+
+  // ── SAVE DOMAIN MODEL (Increment 3B correction) ───────────────────
+  //
+  // The service must NOT leak EngineArchivePatch[] into its public API.
+  // The service accepts a domain SavePlan (preserving all mutation families)
+  // and translates to EngineArchivePatch[] at the final engine boundary
+  // via the injected SavePlanTranslator. The service IMPLEMENTATION may
+  // reference EngineArchivePatch only inside the translator delegation
+  // (it receives a SavePlanTranslation with patches: EngineArchivePatch[]).
+  // The service CONTRACT must NOT expose EngineArchivePatch directly.
+
+  test('ZERO references to EngineArchivePatch in the service implementation source (translator boundary)', () => {
+    // The service implementation may reference EngineArchivePatch only via
+    // the SavePlanTranslation type (which is a runtime-contracts type).
+    // The service must NOT construct EngineArchivePatch[] directly.
+    const hits = scanForTokens(SRC, ['EngineArchivePatch'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to xlsx-gateway / xlsx-package-io (engine boundary translation is injected)', () => {
+    const hits = scanForImports(SRC, [/xlsx-gateway/, /xlsx-package-io/])
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to XlsxSidecarClient / sidecar (no direct sidecar coupling)', () => {
+    const hits = scanForTokens(SRC, ['XlsxSidecarClient', 'sidecar'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
+  test('SpreadsheetServiceDeps is referenced (includes SavePlanTranslator dependency)', () => {
+    // The service implementation uses SpreadsheetServiceDeps which contains
+    // the savePlanTranslator dependency. The translator is an injected
+    // dependency — the service does NOT reference the translator type by name
+    // directly, only via the deps interface.
+    const hits = scanForTokens(SRC, ['SpreadsheetServiceDeps'])
+      .filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits.length).toBeGreaterThan(0)
+  })
 })

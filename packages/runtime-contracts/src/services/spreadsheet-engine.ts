@@ -110,7 +110,21 @@ export type ExternalChangeStatus = 'unchanged' | 'changed' | 'unknown'
 
 /** Worksheet metadata returned by engine.open(). */
 export interface WorksheetMetadata {
-  /** The sheet name as it appears in the xlsx file. */
+  /**
+   * The stable XLSX sheet identifier — the `<sheet sheetId="...">`
+   * attribute from the workbook.xml. This id is IMMUTABLE across renames
+   * (a rename changes `name`, not `id`), so it is the correct key for the
+   * domain sheetId → file sheet name mapping maintained by
+   * SpreadsheetService.
+   *
+   * The renderer's Univer sheet id is mapped to this stable id at the
+   * shell/compatibility boundary; the engine contract exposes it directly
+   * so the service can build `sheetNames: Map<sheetId, sheetName>` from
+   * `[sheet.id, sheet.name]` (mirroring the legacy runtime at
+   * apps/sheets/src/main/sheets-main.ts:2805).
+   */
+  id: string
+  /** The sheet name as it appears in the xlsx file (mutable via rename). */
   name: string
   /** Zero-based sheet index in the workbook. */
   index: number

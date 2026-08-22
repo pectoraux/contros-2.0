@@ -78,7 +78,13 @@ export function validateOpenResult(raw: unknown): ValidatedOpenResult {
   const sheets: WorksheetMetadata[] = sheetsRaw.map((s, i) => {
     if (!isRecord(s)) throw new EngineError(`Invalid open response: sheets[${i}] not a record`, 'PROTOCOL_ERROR')
     if (!isString(s.name)) throw new EngineError(`Invalid open response: sheets[${i}].name`, 'PROTOCOL_ERROR')
+    // Extract the stable XLSX sheetId attribute (Increment 3B: WorksheetMetadata.id).
+    // The sidecar returns this as `sheets[].id` (mirrors the legacy worksheetMetadataSchema
+    // at apps/sheets/src/shared/desktop-api.ts:25). Fall back to the sheet name if absent
+    // (stale sidecar binary) so the validator stays forward-compatible.
+    const sheetId = isString(s.id) ? s.id : s.name
     return {
+      id: sheetId,
       name: s.name,
       index: i,
       hidden: opt(s.hidden, isBoolean) ?? false,

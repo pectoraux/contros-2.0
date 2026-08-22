@@ -211,4 +211,94 @@ describe('SpreadsheetService contract — Increment 3A architecture boundary', (
     const text = readFile(SHEETS_FILE)
     expect(text).toMatch(/SpreadsheetEngine/)
   })
+
+  // ── 7. SavePlan preserves all mutation families (Increment 3B) ─────
+
+  test('SaveRequest is a domain SavePlan (NOT EngineArchivePatch[])', () => {
+    const text = readFile(SHEETS_FILE)
+    // SaveRequest must reference SavePlan, NOT EngineArchivePatch[]
+    const saveReqMatch = text.match(/interface SaveRequest \{([\s\S]*?)\}/)
+    expect(saveReqMatch).not.toBeNull()
+    const body = saveReqMatch![1]
+    expect(body).toMatch(/plan:\s*SavePlan/)
+    expect(body).not.toMatch(/patches:\s*EngineArchivePatch/)
+  })
+
+  test('SavePlan preserves all mutation families from legacy WorkbookSaveRequest', () => {
+    const text = readFile(SHEETS_FILE)
+    const planMatch = text.match(/interface SavePlan \{([\s\S]*?)\}/)
+    expect(planMatch).not.toBeNull()
+    const body = planMatch![1]
+    // Cell-level mutations
+    expect(body).toMatch(/\bedits:\s*SheetCellEdit/)
+    expect(body).toMatch(/\bstructuralOps:\s*SheetStructuralOp/)
+    expect(body).toMatch(/\bformulaValues:\s*SheetFormulaValue/)
+    // Sheet-level mutations
+    expect(body).toMatch(/\bsheetOps:\s*SheetOp/)
+    expect(body).toMatch(/\bsheetOrder:\s*string/)
+    // Per-sheet state
+    expect(body).toMatch(/\bfilterStates:\s*SheetFilterState/)
+    expect(body).toMatch(/\bhyperlinkEdits:\s*SheetHyperlinkEdit/)
+    expect(body).toMatch(/\bcfStates:\s*SheetCfState/)
+    expect(body).toMatch(/\bdvStates:\s*SheetDvState/)
+    expect(body).toMatch(/\bpageSetupStates:\s*SheetPageSetupState/)
+    expect(body).toMatch(/\bnoteStates:\s*SheetNoteState/)
+    expect(body).toMatch(/\bsheetProtections:\s*SheetProtectionState/)
+    expect(body).toMatch(/\bprotectedRangeStates:\s*SheetProtectedRangesState/)
+    // Additions
+    expect(body).toMatch(/\bvisualAdditions:\s*SheetVisualAddition/)
+    expect(body).toMatch(/\btableAdditions:\s*SheetTableAddition/)
+    expect(body).toMatch(/\bpivotAdditions:\s*SheetPivotAddition/)
+    expect(body).toMatch(/\bsparklineAdditions:\s*SheetSparklineAddition/)
+    // Workbook-level mutations
+    expect(body).toMatch(/\bchartEdits:\s*WorkbookChartEdit/)
+    expect(body).toMatch(/\bvisualEdits:\s*WorkbookVisualEdit/)
+    expect(body).toMatch(/\bpivotCacheRefreshPaths:\s*string/)
+    expect(body).toMatch(/\bpivotRefreshUpdates:\s*PivotRefreshUpdate/)
+    expect(body).toMatch(/\bdefinedNamesState:\s*DefinedNamesState/)
+    expect(body).toMatch(/\bthemeState:\s*WorkbookThemeState/)
+    expect(body).toMatch(/\bworkbookProtectionState:\s*WorkbookProtectionState/)
+  })
+
+  test('SavePlanTranslator interface is defined (translates at engine boundary)', () => {
+    const text = readFile(SHEETS_FILE)
+    expect(text).toMatch(/interface SavePlanTranslator/)
+    // The translator takes (handle, plan, sheetNames) and returns SavePlanTranslation
+    const translatorMatch = text.match(/interface SavePlanTranslator \{([\s\S]*?)\}/)
+    expect(translatorMatch).not.toBeNull()
+    const body = translatorMatch![1]
+    expect(body).toMatch(/handle:\s*EngineSessionHandle/)
+    expect(body).toMatch(/plan:\s*SavePlan/)
+    expect(body).toMatch(/sheetNames:\s*ReadonlyMap/)
+    expect(body).toMatch(/Promise<SavePlanTranslation>/)
+  })
+
+  test('SpreadsheetServiceDeps includes SavePlanTranslator (injected dependency)', () => {
+    const text = readFile(SHEETS_FILE)
+    const depsMatch = text.match(/interface SpreadsheetServiceDeps \{([\s\S]*?)\}/)
+    expect(depsMatch).not.toBeNull()
+    const body = depsMatch![1]
+    expect(body).toMatch(/engine:\s*SpreadsheetEngine/)
+    expect(body).toMatch(/savePlanTranslator:\s*SavePlanTranslator/)
+  })
+
+  // ── 8. SheetId mapping uses stable id (Increment 3B) ──────────────
+
+  test('WorkbookSession.sheetNames documented as sheetId → sheetName from [sheet.id, sheet.name]', () => {
+    const text = readFile(SHEETS_FILE)
+    const sessionMatch = text.match(/interface WorkbookSession \{([\s\S]*?)\}/)
+    expect(sessionMatch).not.toBeNull()
+    const sessionBody = sessionMatch![1]
+    // The sheetNames field must be documented as built from [sheet.id, sheet.name]
+    expect(sessionBody).toMatch(/sheet\.id/)
+    expect(sessionBody).toMatch(/sheet\.name/)
+  })
+
+  test('SaveResult includes touchedEntries (for shell recovery/recent-files tracking)', () => {
+    const text = readFile(SHEETS_FILE)
+    const saveMatch = text.match(/interface SaveResult \{([\s\S]*?)\}/)
+    expect(saveMatch).not.toBeNull()
+    const body = saveMatch![1]
+    expect(body).toMatch(/touchedEntries\?:\s*string/)
+  })
 })
