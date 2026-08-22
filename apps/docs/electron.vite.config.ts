@@ -16,6 +16,7 @@ const localAlias = {
 // DesktopApi). This alias resolves the deep import at build time.
 const rendererBridgeSrc = resolve(__dirname, '../../packages/renderer-bridge/src')
 const rendererBridgeAlias = [
+  { find: /^@genoffice\/renderer-bridge\/docs$/, replacement: resolve(rendererBridgeSrc, 'docs-entry.ts') },
   { find: /^@genoffice\/renderer-bridge\/(.+)$/, replacement: resolve(rendererBridgeSrc, '$1') },
   { find: /^@genoffice\/renderer-bridge$/, replacement: resolve(rendererBridgeSrc, 'index.ts') },
 ]

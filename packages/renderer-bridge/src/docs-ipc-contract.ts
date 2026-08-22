@@ -1,13 +1,16 @@
 /**
  * DocsIpcContract — the typed IPC channel map for the Docs application.
  *
- * This is the authoritative typed encoding of the IPC contract between the
- * Docs renderer (via the preload bridge) and the Docs main process.
+ * CONTRACT HARDENING (Increment 3D):
+ *   All return types, argument tuples, and event payloads are DERIVED from
+ *   the frozen DesktopApi interface (apps/docs/src/shared/ipc.ts) using
+ *   TypeScript's `Parameters` and `ReturnType` utility types. This
+ *   eliminates the drift hazard of manually duplicating SaveResult,
+ *   SaveAsResult, ExportPdfResult, etc.
  *
- * The channel names and payload shapes are sourced from the frozen preload
- * (apps/docs/src/preload/index.ts) and the frozen shared contract
- * (apps/docs/src/shared/ipc.ts). This file does NOT modify either — it
- * only types them for compile-time safety in the renderer-bridge package.
+ *   The channel names and argument order are still manually specified
+ *   (they encode the IPC protocol), but the types they reference are
+ *   structurally linked to the authoritative DesktopApi.
  *
  * Architecture:
  *
@@ -20,49 +23,30 @@
  *   [Electron: ipcRenderer.invoke('docs:open')]
  *       ↓
  *   ipcMain handler
- *
- * Each channel maps to:
- *   - Args: the argument tuple (what the renderer passes to invoke/send)
- *   - Return: the return type (for invoke) or the event payload (for on)
- *
- * The transport methods are generic over the channel name, so TypeScript
- * infers the exact args tuple and return type — NO casts needed.
  */
 
 // ── Type helpers ────────────────────────────────────────────────────────
 
-/**
- * A request channel: invoke(channel, ...args) → Promise<Return>.
- * `Args` is the argument tuple; `Return` is the resolved value.
- */
 export interface IpcRequestChannel {
   Args: unknown[]
   Return: unknown
 }
 
-/**
- * A send channel: send(channel, ...args) → void. Fire-and-forget.
- * `Args` is the argument tuple.
- */
 export interface IpcSendChannel {
   Args: unknown[]
 }
 
-/**
- * A push-event channel: on(channel, listener) — the listener receives
- * the event payload. `Payload` is the payload tuple (what the main
- * process sends via wc.send(channel, ...payload)).
- */
 export interface IpcEventChannel {
   Payload: unknown[]
 }
 
-// ── Docs IPC channel map ────────────────────────────────────────────────
+// ── Derive types from the authoritative DesktopApi ──────────────────────
 //
-// Each channel is typed to match the frozen preload's
-// ipcRenderer.invoke/send/on call. The bridge uses these to compile-check
-// every IPC call — NO `as never` / `as any` / `as unknown as` casts.
+// Instead of manually declaring SaveResult, SaveAsResult, etc., we extract
+// them from DesktopApi's method signatures. If DesktopApi changes, these
+// types update automatically — no drift.
 
+import type { DesktopApi } from '@genoffice/docs-shared'
 import type {
   OpenFileResult,
   PickImageResult,
@@ -83,179 +67,111 @@ import type {
 } from '@genoffice/ai-provider'
 import type { FaceVerticalMetrics } from '@genoffice/font-metrics'
 
-// Re-export the language type for convenience (the DesktopApi uses a literal
-// union that's duplicated in the shared contract).
-type UiLanguage = 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'
+// Extract return types from DesktopApi methods (unwrapped from Promise)
+type Awaited<T> = T extends Promise<infer U> ? U : T
+type ReturnOf<M extends keyof DesktopApi> = Awaited<ReturnType<DesktopApi[M]>>
 
-/** Save result shape (from DesktopApi.saveDocx). */
-interface SaveResult {
-  ok: boolean
-  error?: string
-  reason?: 'external-modified'
-}
-/** Save-as / save-new result shape (from DesktopApi.saveDocxAs/saveDocxNew). */
-interface SaveAsResult {
-  ok: boolean
-  path?: string
-  error?: string
-}
-/** Print result shape (from DesktopApi.print). */
-interface PrintResult {
-  ok: boolean
-  error?: string
-}
-/** Export-PDF result shape (from DesktopApi.exportPdf). */
-interface ExportPdfResult {
-  ok: boolean
-  path?: string
-  error?: string
-}
-/** Print-to-buffer result shape (from DesktopApi.printPdfBuffer). */
-interface PrintPdfBufferResult {
-  ok: boolean
-  base64?: string
-  error?: string
-}
-/** Web-search result shape (from DesktopApi.webSearch). */
-interface WebSearchResult {
-  results: Array<{ title: string; url: string; snippet: string }>
-  answer?: string
-  method: string
-  error?: string
-}
-/** Image-search result shape (from DesktopApi.imageSearch). */
-interface ImageSearchResult {
-  images: Array<{
-    title: string
-    imageUrl: string
-    sourceUrl: string
-    source: string
-    width?: number
-    height?: number
-  }>
-  method: string
-  error?: string
-}
-/** Fetch-image result shape (from DesktopApi.fetchImage). */
-interface FetchImageResult {
-  base64: string
-  mime: string
-}
+// Extract parameter tuples from DesktopApi methods
+type ParamsOf<M extends keyof DesktopApi> = Parameters<DesktopApi[M]>
 
-/**
- * The Docs IPC request channels (invoke → Promise<Return>).
- *
- * Each key is a channel name; the value encodes the argument tuple and
- * the return type, matching the frozen preload exactly.
- *
- * NOTE: this is a `type` alias (not an `interface`) so it satisfies the
- * `Record<string, ...>` constraint on TypedIpcTransport. Interfaces in
- * TypeScript don't have implicit index signatures, so they can't be used
- * as generic constraints for Record<string, ...>.
- */
+// The language type — derived from DesktopApi.getLanguage's return type
+type UiLanguage = ReturnOf<'getLanguage'>
+
+// ── Docs IPC channel map ────────────────────────────────────────────────
+
 export type DocsIpcRequestChannels = {
   // ── Settings ──
   'app:get-language': { Args: []; Return: UiLanguage }
   'app:get-theme': { Args: []; Return: UiTheme }
   // ── File lifecycle ──
-  'docs:open': { Args: []; Return: OpenFileResult | null }
-  'docs:open-path': { Args: [path: string]; Return: OpenFileResult | null }
-  'docs:consume-pending-open': { Args: []; Return: OpenFileResult | null }
-  'docs:consume-new-blank': { Args: []; Return: boolean }
+  'docs:open': { Args: []; Return: ReturnOf<'openDocx'> }
+  'docs:open-path': { Args: ParamsOf<'openDocxPath'>; Return: ReturnOf<'openDocxPath'> }
+  'docs:consume-pending-open': { Args: []; Return: ReturnOf<'consumePendingOpenDocx'> }
+  'docs:consume-new-blank': { Args: []; Return: ReturnOf<'consumeNewBlankDoc'> }
   // ── Save ──
   'docs:save': {
-    Args: [path: string, data: ArrayBuffer, auto: boolean]
-    Return: SaveResult
+    Args: ParamsOf<'saveDocx'>
+    Return: ReturnOf<'saveDocx'>
   }
   'docs:write-recovery': {
-    Args: [path: string, data: ArrayBuffer]
-    Return: { ok: boolean }
+    Args: ParamsOf<'writeRecoveryCopy'>
+    Return: ReturnOf<'writeRecoveryCopy'>
   }
   'docs:save-as': {
-    Args: [defaultName: string, data: ArrayBuffer]
-    Return: SaveAsResult
+    Args: ParamsOf<'saveDocxAs'>
+    Return: ReturnOf<'saveDocxAs'>
   }
   'docs:save-new': {
-    Args: [defaultName: string, data: ArrayBuffer]
-    Return: SaveAsResult
+    Args: ParamsOf<'saveDocxNew'>
+    Return: ReturnOf<'saveDocxNew'>
   }
   // ── Domain operations ──
-  'docs:recent': { Args: []; Return: string[] }
-  'docs:pick-image': { Args: []; Return: PickImageResult | null }
-  'docs:font-metrics': { Args: [family: string]; Return: FaceVerticalMetrics | null }
-  'docs:print': { Args: []; Return: PrintResult }
+  'docs:recent': { Args: []; Return: ReturnOf<'getRecentFiles'> }
+  'docs:pick-image': { Args: []; Return: ReturnOf<'pickImage'> }
+  'docs:font-metrics': { Args: ParamsOf<'fontMetrics'>; Return: ReturnOf<'fontMetrics'> }
+  'docs:print': { Args: []; Return: ReturnOf<'print'> }
   'docs:export-pdf': {
-    Args: [defaultName: string, pageWidthTwips: number, pageHeightTwips: number, outPath: string | undefined]
-    Return: ExportPdfResult
+    Args: ParamsOf<'exportPdf'>
+    Return: ReturnOf<'exportPdf'>
   }
   'docs:print-pdf-buffer': {
-    Args: [pageWidthTwips: number, pageHeightTwips: number]
-    Return: PrintPdfBufferResult
+    Args: ParamsOf<'printPdfBuffer'>
+    Return: ReturnOf<'printPdfBuffer'>
   }
   'docs:save-merged-pdf': {
-    Args: [defaultName: string, base64Parts: string[], outPath: string | undefined]
-    Return: ExportPdfResult
+    Args: ParamsOf<'saveMergedPdf'>
+    Return: ReturnOf<'saveMergedPdf'>
   }
   // ── Files ──
-  'files:pick': { Args: []; Return: AttachmentAddResult | null }
-  'files:add': { Args: [paths: string[]]; Return: AttachmentAddResult }
+  'files:pick': { Args: []; Return: ReturnOf<'pickAttachments'> }
+  'files:add': { Args: ParamsOf<'addAttachmentPaths'>; Return: ReturnOf<'addAttachmentPaths'> }
   'files:add-pasted-image': {
-    Args: [data: ArrayBuffer, ext: string]
-    Return: AttachmentAddResult
+    Args: ParamsOf<'addPastedImage'>
+    Return: ReturnOf<'addPastedImage'>
   }
   'files:read': {
-    Args: [path: string, offset: number, maxChars: number]
-    Return: AttachmentReadResult
+    Args: ParamsOf<'readAttachment'>
+    Return: ReturnOf<'readAttachment'>
   }
-  'files:read-image': { Args: [path: string]; Return: AttachmentImageResult }
+  'files:read-image': { Args: ParamsOf<'readAttachmentImage'>; Return: ReturnOf<'readAttachmentImage'> }
   // ── AI ──
-  'ai:get-settings': { Args: []; Return: AiSettings }
-  'ai:set-settings': { Args: [settings: AiSettings]; Return: void }
-  'ai:chat': { Args: [request: AiChatRequest]; Return: AiChatResponse }
-  'ai:stream': { Args: [request: AiStreamRequest]; Return: void }
-  'ai:stream-cancel': { Args: [requestId: string]; Return: void }
-  'ai:gsk-status': { Args: [withEmail: boolean | undefined]; Return: GenSparkAccountStatus }
-  'ai:gsk-login': { Args: []; Return: void }
+  'ai:get-settings': { Args: []; Return: ReturnOf<'getAiSettings'> }
+  'ai:set-settings': { Args: ParamsOf<'setAiSettings'>; Return: ReturnOf<'setAiSettings'> }
+  'ai:chat': { Args: ParamsOf<'aiChat'>; Return: ReturnOf<'aiChat'> }
+  'ai:stream': { Args: ParamsOf<'aiStream'>; Return: ReturnOf<'aiStream'> }
+  'ai:stream-cancel': { Args: ParamsOf<'aiStreamCancel'>; Return: ReturnOf<'aiStreamCancel'> }
+  'ai:gsk-status': { Args: ParamsOf<'aiGskStatus'>; Return: ReturnOf<'aiGskStatus'> }
+  'ai:gsk-login': { Args: []; Return: ReturnOf<'aiGskLogin'> }
   'ai:web-search': {
-    Args: [query: string, maxResults: number | undefined]
-    Return: WebSearchResult
+    Args: ParamsOf<'webSearch'>
+    Return: ReturnOf<'webSearch'>
   }
   'ai:image-search': {
-    Args: [query: string, maxResults: number | undefined]
-    Return: ImageSearchResult
+    Args: ParamsOf<'imageSearch'>
+    Return: ReturnOf<'imageSearch'>
   }
-  'ai:fetch-image': { Args: [url: string]; Return: FetchImageResult | null }
+  'ai:fetch-image': { Args: ParamsOf<'fetchImage'>; Return: ReturnOf<'fetchImage'> }
   // ── Tab management ──
-  'win:new': { Args: [openPath: string | null]; Return: void }
-  'win:list': { Args: []; Return: DocsTabInfo[] }
-  'win:focus': { Args: [id: string]; Return: void }
+  'win:new': { Args: ParamsOf<'openNewTab'>; Return: ReturnOf<'openNewTab'> }
+  'win:list': { Args: []; Return: ReturnOf<'listDocsTabs'> }
+  'win:focus': { Args: ParamsOf<'focusDocsTab'>; Return: ReturnOf<'focusDocsTab'> }
 }
 
-/**
- * The Docs IPC send channels (send → void). Fire-and-forget.
- */
 export type DocsIpcSendChannels = {
-  'docs:view-menu-state': { Args: [{ aiSidebar: boolean; darkCanvas: boolean }] }
-  'docs:close-check-result': {
-    Args: [{ dirty: boolean; autoSave: boolean; filePath: string | null }]
-  }
-  'docs:close-save-result': { Args: [ok: boolean] }
+  'docs:view-menu-state': { Args: [ParamsOf<'reportViewMenuState'>[0]] }
+  'docs:close-check-result': { Args: [ParamsOf<'reportCloseCheck'>[0]] }
+  'docs:close-save-result': { Args: [ParamsOf<'reportCloseSaveResult'>[0]] }
 }
 
-/**
- * The Docs IPC push-event channels (on → listener receives Payload).
- *
- * The payload tuple matches what the main process sends via wc.send(channel, ...payload).
- */
 export type DocsIpcEventChannels = {
-  'app:language-changed': { Payload: [lang: UiLanguage] }
-  'app:theme-changed': { Payload: [theme: UiTheme] }
+  'app:language-changed': { Payload: [Parameters<Parameters<DesktopApi['onLanguageChanged']>[0]>[0]] }
+  'app:theme-changed': { Payload: [Parameters<Parameters<DesktopApi['onThemeChanged']>[0]>[0]] }
   'app:chrome-pressed': { Payload: [] }
-  'docs:opened': { Payload: [result: OpenFileResult] }
-  'docs:renamed': { Payload: [paths: { oldPath: string; newPath: string }] }
+  'docs:opened': { Payload: [Parameters<Parameters<DesktopApi['onOpenDocx']>[0]>[0]] }
+  'docs:renamed': { Payload: [Parameters<Parameters<DesktopApi['onRenamedDocx']>[0]>[0]] }
   'docs:teardown': { Payload: [] }
-  'ai:stream-chunk': { Payload: [chunk: AiStreamChunk] }
-  'menu:command': { Payload: [command: MenuCommand, payload: string | undefined] }
+  'ai:stream-chunk': { Payload: [Parameters<Parameters<DesktopApi['onAiStream']>[0]>[0]] }
+  'menu:command': { Payload: [Parameters<Parameters<DesktopApi['onMenuCommand']>[0]>[0], Parameters<Parameters<DesktopApi['onMenuCommand']>[0]>[1]] }
   'docs:close-check': { Payload: [] }
   'docs:close-save-request': { Payload: [] }
 }

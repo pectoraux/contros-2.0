@@ -11,13 +11,16 @@ export default defineConfig({
   },
   resolve: {
     alias: [
-      // Deep imports from the preload (e.g. @genoffice/renderer-bridge/bridges/docs-bridge)
-      // are used to avoid pulling in the slides bridge, which imports
-      // @genoffice/slides-shared (whose `declare global { Window.desktop }`
-      // would conflict with the docs DesktopApi).
-      // The regex matches:
-      //   @genoffice/renderer-bridge           → src/index.ts (barrel)
-      //   @genoffice/renderer-bridge/foo/bar   → src/foo/bar.ts (deep)
+      // Deep imports from the preload (e.g. @genoffice/renderer-bridge/docs)
+      // resolve to the docs-specific entry point, avoiding the slides global
+      // declaration. The regex matches:
+      //   @genoffice/renderer-bridge/docs  → src/docs-entry.ts
+      //   @genoffice/renderer-bridge      → src/index.ts (barrel)
+      //   @genoffice/renderer-bridge/foo   → src/foo.ts (deep)
+      {
+        find: /^@genoffice\/renderer-bridge\/docs$/,
+        replacement: resolve(rendererBridgeSrc, 'docs-entry.ts'),
+      },
       {
         find: /^@genoffice\/renderer-bridge\/(.+)$/,
         replacement: resolve(rendererBridgeSrc, '$1'),

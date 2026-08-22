@@ -15,6 +15,7 @@
       "@genoffice/shell-tabs-shared": ["../../apps/shell/src/shared/tabs-api.ts"],
       "@genoffice/shell-update-shared": ["../../apps/shell/src/shared/update-api.ts"],
       "@genoffice/renderer-bridge": ["../../packages/renderer-bridge/src/index.ts"],
+      "@genoffice/renderer-bridge/docs": ["../../packages/renderer-bridge/src/docs-entry.ts"],
       "@genoffice/renderer-bridge/*": ["../../packages/renderer-bridge/src/*"]
     }
   },

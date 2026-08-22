@@ -28,14 +28,14 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
-// Import directly from the docs-bridge module (NOT the barrel) to avoid pulling
+// Import from the docs-specific entry point (NOT the barrel) to avoid pulling
 // in the slides bridge, which imports @genoffice/slides-shared. The slides
 // shared contract has a `declare global { Window.desktop: DesktopFilesApi }`
 // that would conflict with the docs `Window.desktop: DesktopApi` declaration
-// in env.d.ts. Importing directly from docs-bridge.js avoids this type
-// pollution — the docs preload only needs the docs bridge + the typed transport.
-import { createDocsDesktopBridge } from '@genoffice/renderer-bridge/bridges/docs-bridge'
-import type { DocsIpcTransport } from '@genoffice/renderer-bridge/ipc-transport'
+// in env.d.ts. The docs-entry.ts exports ONLY the docs bridge + typed
+// transport + IPC contract — no slides/sheets/pdf/markdown bridges.
+import { createDocsDesktopBridge } from '@genoffice/renderer-bridge/docs'
+import type { DocsIpcTransport } from '@genoffice/renderer-bridge/docs'
 import type { ProjectApi } from '@genoffice/project-store'
 
 // ── Electron IPC transport ─────────────────────────────────────────────
