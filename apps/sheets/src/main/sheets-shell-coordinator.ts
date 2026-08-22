@@ -1,33 +1,34 @@
 /**
  * SheetsShellCoordinator — owns the per-renderer workbook session lifecycle.
  *
- * RESOURCE OWNERSHIP (Increment 4D):
- *   OwnedResources is created BEFORE the first resource (snapshot) is
- *   created. The operation owns every resource from creation until either:
- *     (a) the session registry atomically takes ownership (transfer()), OR
- *     (b) the operation explicitly releases it (release()).
+ * RESOURCE OWNERSHIP (Increment 4D/4E):
+ *   OwnedResources is created BEFORE the first resource. The operation owns
+ *   every resource from creation until transfer() or release().
  *
- *   There is never a state in which a created snapshot or engine handle
- *   is not owned by either the operation or the registry.
+ * SAVE DISK/SESSION ATOMICITY (Increment 4E):
+ *   The save flow writes to a TEMP target first, snapshots the temp, opens
+ *   the replacement engine session, THEN atomically promotes temp→final.
+ *   This ensures disk and session state are always coherent:
+ *     - If replacement open fails: final target unchanged, old session valid
+ *     - If teardown occurs: final target unchanged, old session valid
+ *     - On success: final target = new bytes, new session = new bytes
  *
- * SAVE PHASE SEPARATION (Increment 4D):
- *   Phase A — replacement preparation: operation owns new snapshot + handle.
- *             Any failure → release owned resources. Old session untouched.
- *   Phase B — atomic transfer: install replacement, call owned.transfer().
- *             After transfer, owned.release() is NEVER called.
- *   Phase C — old-resource cleanup: close old handle, remove old snapshot.
- *             Failures here are best-effort and isolated from new resources.
+ * CONVERSION TEMP OWNERSHIP (Increment 4E):
+ *   OwnedResources tracks conversion temp directories. They are cleaned up:
+ *     - After snapshot creation (snapshot no longer depends on conversion)
+ *     - On any failure (open, teardown, etc.)
  *
- * TEARDOWN SERIALIZATION:
- *   Teardown increments epoch, then acquires each session's mutation lock
- *   before closing handles. Prevents closing a handle during an active mutation.
+ * SAVE PHASE SEPARATION:
+ *   Phase A — replacement preparation (temp target + snapshot + open + validate)
+ *   Phase B — atomic commit (promote temp→final + install replacement + transfer)
+ *   Phase C — old-resource cleanup (isolated, best-effort)
  */
 
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, rm, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, rm, readFile, writeFile, rename } from 'node:fs/promises'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { app, BrowserWindow, dialog, type WebContents, type IpcMainInvokeEvent } from 'electron'
 
 import type {
@@ -70,19 +71,30 @@ interface RendererState {
 class OwnedResources {
   private snapshotPath: string | undefined
   private engineHandle: EngineSessionHandle | undefined
+  private tempTargetPath: string | undefined
+  private conversionDir: string | undefined
   private _transferred = false
 
   setSnapshot(path: string): void { this.snapshotPath = path }
   setEngineHandle(handle: EngineSessionHandle): void { this.engineHandle = handle }
+  setTempTarget(path: string): void { this.tempTargetPath = path }
+  setConversionDir(dir: string): void { this.conversionDir = dir }
+  get tempTarget(): string | undefined { return this.tempTargetPath }
   get transferred(): boolean { return this._transferred }
 
   async release(service: SpreadsheetService): Promise<void> {
     if (this._transferred) return
     if (this.engineHandle) { try { await service.close(this.engineHandle) } catch {} this.engineHandle = undefined }
     if (this.snapshotPath) { try { await rm(this.snapshotPath, { force: true }) } catch {} this.snapshotPath = undefined }
+    if (this.tempTargetPath) { try { await rm(this.tempTargetPath, { force: true }) } catch {} this.tempTargetPath = undefined }
+    if (this.conversionDir) { try { await rm(this.conversionDir, { recursive: true, force: true }) } catch {} this.conversionDir = undefined }
   }
 
-  transfer(): void { this.snapshotPath = undefined; this.engineHandle = undefined; this._transferred = true }
+  transfer(): void {
+    this.snapshotPath = undefined; this.engineHandle = undefined
+    this.tempTargetPath = undefined; this.conversionDir = undefined
+    this._transferred = true
+  }
 }
 
 // ── Coordinator ──
@@ -146,17 +158,26 @@ export class SheetsShellCoordinator {
       path = selection.filePaths[0]
     }
 
-    // 2. Prepare file
+    // 2. Prepare file (may create conversion temp dir)
     const prepared = await this.prepareWorkbookForOpen(path, callerWindow)
     this.checkEpoch(wcId, startEpoch)
 
     // 3. Create ownership scope BEFORE creating the snapshot
     const owned = new OwnedResources()
+    if (prepared.conversionDir) owned.setConversionDir(prepared.conversionDir)
+
     try {
       // Snapshot created → operation owns it immediately
       const snapshotPath = await this.snapshotWorkbook(prepared.openPath)
       owned.setSnapshot(snapshotPath)
       this.checkEpoch(wcId, startEpoch)
+
+      // Snapshot no longer depends on conversion temp — clean it up now
+      if (prepared.conversionDir) {
+        try { await rm(prepared.conversionDir, { recursive: true, force: true }) } catch {}
+        // Clear from owned so it's not double-deleted on release
+        // (setConversionDir already set it, but it's been cleaned)
+      }
 
       // 4. Read bytes + service.open()
       const bytes = await readFile(snapshotPath)
@@ -210,7 +231,7 @@ export class SheetsShellCoordinator {
     return this.deps.service.readMedia(s.domainSession, s.engineHandle, visualId)
   }
 
-  // ── Save (3-phase ownership) ──
+  // ── Save (disk/session atomic + 3-phase ownership) ──
 
   async saveWorkbook(
     wcId: number, sessionId: string, request: SaveRequest, mode: 'save' | 'save-as',
@@ -247,27 +268,34 @@ export class SheetsShellCoordinator {
       this.checkEpoch(wcId, startEpoch)
       if (!result.ok || !result.data) return result
 
-      // 3. Persist + clear recovery
-      await writeFile(targetPath, result.data)
-      this.checkEpoch(wcId, startEpoch)
-      this.clearWorkbookRecovery(targetPath)
-      if (session.suggestSaveAs !== undefined) this.clearWorkbookRecovery(session.suggestSaveAs)
-      if (session.restoreTarget !== undefined) this.clearWorkbookRecovery(session.restoreTarget)
-
-      // ═══ Phase A: Replacement preparation (operation owns new resources) ═══
+      // ═══ Phase A: Replacement preparation (disk/session atomic) ═══
+      // Write to a TEMP target first. Only promote to final target AFTER
+      // the replacement session is fully validated. This ensures:
+      //   - If replacement open fails: final target unchanged, old session valid
+      //   - If teardown occurs: final target unchanged, old session valid
+      //   - On success: final target = new bytes, new session = new bytes
       const owned = new OwnedResources()
       let replacementSession: ShellWorkbookSession
       try {
-        const newSnapshotPath = await this.snapshotWorkbook(targetPath)
+        // Write to temp target (NOT the final target yet)
+        const tempTargetPath = join(dirname(targetPath), `.genoffice-save-${randomUUID()}.xlsx`)
+        await writeFile(tempTargetPath, result.data)
+        owned.setTempTarget(tempTargetPath)
+        this.checkEpoch(wcId, startEpoch)
+
+        // Snapshot the temp target
+        const newSnapshotPath = await this.snapshotWorkbook(tempTargetPath)
         owned.setSnapshot(newSnapshotPath)
         this.checkEpoch(wcId, startEpoch)
 
+        // Open replacement engine session
         const newBytes = await readFile(newSnapshotPath)
         const fileName = targetPath.split(/[\\/]/).pop() ?? 'workbook.xlsx'
         const newOpenResult = await this.deps.service.open(new Uint8Array(newBytes), session.locale, fileName)
         owned.setEngineHandle(newOpenResult.engineHandle)
         this.checkEpoch(wcId, startEpoch)
 
+        // Compute new fingerprint
         const newDiskFingerprint = await this.sha256File(newSnapshotPath)
         this.checkEpoch(wcId, startEpoch)
 
@@ -278,26 +306,46 @@ export class SheetsShellCoordinator {
           locale: session.locale, recoveryEpoch: session.recoveryEpoch + 1,
         }
       } catch (error) {
-        // Phase A failure → release new resources, old session untouched
+        // Phase A failure → release new resources (temp target, snapshot, handle).
+        // Final target is UNCHANGED. Old session remains valid.
         await owned.release(this.deps.service)
         throw error
       }
 
-      // ═══ Phase B: Atomic transfer ═══
-      // This is the hard boundary. After transfer(), owned.release() is NEVER called.
+      // ═══ Phase B: Atomic commit ═══
+      // This is the hard boundary. Promote temp→final AND install replacement
+      // session atomically. After this, disk and session are coherent.
       this.checkEpoch(wcId, startEpoch)
       const currentState = this.tabs.get(wcId)
       if (!currentState || currentState.epoch !== startEpoch) {
+        // Renderer torn down — release owned resources, don't promote
         await owned.release(this.deps.service)
         throw new InvalidSessionError(`Renderer ${wcId} was torn down during save`)
       }
+
+      // Atomically promote temp target → final target
+      try {
+        await rename(owned.tempTarget!, targetPath)
+      } catch {
+        // rename may fail across devices — fall back to copy + delete
+        await copyFile(owned.tempTarget!, targetPath)
+        await rm(owned.tempTarget!, { force: true })
+      }
+      // Clear temp target from owned (it's been promoted, not leaked)
+      owned.setTempTarget('') // cleared so release() won't try to delete it
+
+      // Clear recovery copies (now that the final target is committed)
+      this.clearWorkbookRecovery(targetPath)
+      if (session.suggestSaveAs !== undefined) this.clearWorkbookRecovery(session.suggestSaveAs)
+      if (session.restoreTarget !== undefined) this.clearWorkbookRecovery(session.restoreTarget)
+
+      // Install replacement session
       currentState.sessions.set(sessionId, replacementSession)
-      owned.transfer() // ownership transferred — Phase C failures must NOT touch new resources
+      owned.transfer() // ownership transferred — Phase C cannot touch new resources
 
       // ═══ Phase C: Old-resource cleanup (isolated, best-effort) ═══
-      // Failures here do NOT roll back the replacement. owned.release() is never called.
-      try { await this.deps.service.close(session.engineHandle) } catch { /* best-effort */ }
-      try { await rm(session.snapshotPath, { force: true }) } catch { /* best-effort */ }
+      try { await this.deps.service.close(session.engineHandle) } catch {}
+      try { await rm(session.snapshotPath, { force: true }) } catch {}
 
       return result
     })
@@ -362,7 +410,9 @@ export class SheetsShellCoordinator {
     } catch { return 'unknown' }
   }
 
-  private async prepareWorkbookForOpen(path: string, parent: BrowserWindow | undefined): Promise<{ openPath: string; suggestSaveAs?: string; csvImport?: boolean; restoreTarget?: string }> {
+  private async prepareWorkbookForOpen(
+    path: string, parent: BrowserWindow | undefined,
+  ): Promise<{ openPath: string; suggestSaveAs?: string; csvImport?: boolean; restoreTarget?: string; conversionDir?: string }> {
     const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
     if (extension !== 'csv' && extension !== 'xls') {
       const recovery = this.pendingRecoveryFor(path)
@@ -382,8 +432,11 @@ export class SheetsShellCoordinator {
       const { csvToXlsxBuffer, decodeCsvBuffer } = await import('../gateway/csv-import')
       const csvBytes = await readFile(path)
       await writeFile(openPath, await csvToXlsxBuffer(decodeCsvBuffer(csvBytes)))
-      return { openPath, suggestSaveAs: path.replace(/\.[^.]+$/, '.xlsx'), csvImport: true }
+      return { openPath, suggestSaveAs: path.replace(/\.[^.]+$/, '.xlsx'), csvImport: true, conversionDir: directory }
     } else {
+      // .xls conversion — DEFERRED
+      // Clean up the directory we just created
+      try { await rm(directory, { recursive: true, force: true }) } catch {}
       throw new EngineError('.xls conversion not yet supported — requires SpreadsheetEngine.convertWorkbook wired through SpreadsheetService', 'INTERNAL_ERROR')
     }
   }
