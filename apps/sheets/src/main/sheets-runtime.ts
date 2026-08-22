@@ -31,6 +31,7 @@
 
 import {
   ElectronXlsxSidecarEngine,
+  ElectronSpreadsheetPdfRenderer,
   type ElectronXlsxSidecarEngineConfig,
   type SidecarProtocolLike,
 } from '@genoffice/platform-electron'
@@ -41,12 +42,14 @@ import type {
   EngineSessionHandle,
   WorkbookSession,
   WorkbookMetadata,
+  SpreadsheetPdfRenderer,
 } from '@genoffice/runtime-contracts'
 
 export interface SheetsRuntimeBundle {
   readonly engine: ElectronXlsxSidecarEngine
   readonly service: SpreadsheetServiceImpl
   readonly coordinator: SheetsShellCoordinator
+  readonly pdfRenderer: SpreadsheetPdfRenderer
 }
 
 /**
@@ -54,7 +57,7 @@ export interface SheetsRuntimeBundle {
  *
  * @param config — sidecar binary path + optional temp dir + optional
  *                 `sidecarClient` (legacy `XlsxSidecarClient` to share).
- * @returns the runtime bundle (engine + service + coordinator)
+ * @returns the runtime bundle (engine + service + coordinator + pdfRenderer)
  */
 export function initSheetsRuntime(config: ElectronXlsxSidecarEngineConfig): SheetsRuntimeBundle {
   // If a legacy `sidecarClient` is injected, the engine uses it INSTEAD of
@@ -70,9 +73,15 @@ export function initSheetsRuntime(config: ElectronXlsxSidecarEngineConfig): Shee
 
   const service = new SpreadsheetServiceImpl({ engine })
 
-  const coordinator = new SheetsShellCoordinator({ service })
+  // INCREMENT 7: construct the PDF renderer (hidden BrowserWindow + printToPDF).
+  // The renderer is a Sheets-specific runtime port (ADR-006). The coordinator
+  // owns the callerWindow + save dialog; the renderer owns only the rendering
+  // context (hidden window, HTML load, printToPDF, cleanup).
+  const pdfRenderer = new ElectronSpreadsheetPdfRenderer()
 
-  return { engine, service, coordinator }
+  const coordinator = new SheetsShellCoordinator({ service, pdfRenderer })
+
+  return { engine, service, coordinator, pdfRenderer }
 }
 
 // ── Legacy session adoption ──────────────────────────────────────────

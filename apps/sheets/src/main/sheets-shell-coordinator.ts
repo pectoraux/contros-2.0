@@ -39,6 +39,7 @@ import type {
   SpreadsheetService, WorkbookSession, WorkbookOpenResult, EngineSessionHandle,
   ExternalChangeStatus, SaveRequest, SaveResult, EngineRangeResult, EngineFormulaCellsResult,
   EngineRecalcEdit, EngineRecalcRead, EngineRecalcResult, EngineMediaResult,
+  SpreadsheetPdfRenderer, SpreadsheetPdfOptions,
 } from '@genoffice/runtime-contracts'
 import { EngineError, InvalidInputError, InvalidSessionError } from '@genoffice/runtime-contracts'
 
@@ -75,6 +76,16 @@ export interface SheetsShellCoordinatorDeps {
    * In production, this is undefined.
    */
   readonly onMarkerWritten?: (markerPath: string, sessionId: string) => Promise<void>
+  /**
+   * INCREMENT 7: Sheets PDF renderer (ADR-006). The coordinator owns
+   * callerWindow + save dialog + output authorization; the renderer owns
+   * only the hidden BrowserWindow + printToPDF + cleanup.
+   *
+   * Optional to preserve test compatibility — existing coordinator tests
+   * don't exercise PDF export. The migrated export-pdf handler checks
+   * for its presence and throws a typed error if missing.
+   */
+  readonly pdfRenderer?: SpreadsheetPdfRenderer
 }
 
 // ── Session commit lifecycle ──
@@ -604,6 +615,76 @@ export class SheetsShellCoordinator {
 
   async closeWorkbook(wcId: number, sessionId: string): Promise<void> {
     await this.withSessionLock(wcId, sessionId, async () => { await this.closeSession(wcId, sessionId) })
+  }
+
+  // ── PDF export (INCREMENT 7 / ADR-006) ──
+
+  /**
+   * Export the workbook to PDF.
+   *
+   * The coordinator owns:
+   *   - callerWindow (for save-dialog parenting)
+   *   - save-dialog (user chooses output path)
+   *   - output-path authorization (the user-selected path is authorized)
+   *   - writing the PDF bytes to the authorized path
+   *
+   * The PDF renderer (SpreadsheetPdfRenderer) owns only the rendering
+   * context (hidden BrowserWindow + printToPDF + cleanup).
+   *
+   * SECURITY ORDERING (output authorization):
+   *   1. Show save dialog → user selects path (or cancels)
+   *   2. If canceled → return { canceled: true }
+   *   3. Render HTML → PDF bytes (via the renderer port)
+   *   4. If render fails → return typed error (no file written)
+   *   5. Write PDF bytes to the authorized path
+   *
+   * The renderer NEVER writes before authorization — the save dialog
+   * runs first, and the render happens AFTER the path is authorized
+   * (so a render failure doesn't leave a partial output file).
+   */
+  async exportPdf(
+    wcId: number,
+    callerWindow: BrowserWindow | undefined,
+    request: {
+      fileName: string
+      html: string
+      landscape: boolean
+      pageSize: SpreadsheetPdfOptions['pageSize']
+      margins: SpreadsheetPdfOptions['margins']
+      scale: number
+    },
+  ): Promise<{ canceled: true } | { canceled: false; path: string } | { ok: false; error: string }> {
+    const pdfRenderer = this.deps.pdfRenderer
+    if (!pdfRenderer) {
+      return { ok: false, error: 'PDF renderer not available' }
+    }
+
+    // 1. Save dialog (caller-window-owned) → authorize output path
+    const dialogOptions = {
+      defaultPath: request.fileName,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    }
+    const selection = callerWindow
+      ? await dialog.showSaveDialog(callerWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+    if (selection.canceled || !selection.filePath) return { canceled: true }
+
+    // 2. Render HTML → PDF bytes (renderer owns hidden BrowserWindow)
+    const renderResult = await pdfRenderer.renderToPdf(request.html, {
+      landscape: request.landscape,
+      pageSize: request.pageSize,
+      margins: request.margins,
+      scale: request.scale,
+    })
+
+    // 3. If render failed → return typed error (NO file written)
+    if (!renderResult.ok) {
+      return { ok: false, error: renderResult.message }
+    }
+
+    // 4. Write PDF bytes to the authorized path
+    await writeFile(selection.filePath, renderResult.data)
+    return { canceled: false, path: selection.filePath }
   }
 
   async teardown(wcId: number): Promise<void> {

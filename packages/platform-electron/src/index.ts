@@ -19,6 +19,7 @@ export { ElectronNotifications } from './capabilities/electron-notifications.js'
 export { ElectronWindowing } from './capabilities/electron-windowing.js'
 export { ElectronFontRegistry } from './capabilities/electron-font-registry.js'
 export { ElectronXlsxSidecarEngine, type ElectronXlsxSidecarEngineConfig, type AdoptExternalSessionOptions } from './capabilities/electron-xlsx-sidecar-engine.js'
+export { ElectronSpreadsheetPdfRenderer, type ElectronSpreadsheetPdfRendererConfig } from './capabilities/electron-spreadsheet-pdf-renderer.js'
 export { SidecarProtocolClient, type SidecarProtocolLike, type OnProcessExitCallback } from './capabilities/sidecar-protocol-client.js'
 export {
   createElectronCapabilities,

@@ -42,6 +42,7 @@ import {
   workbookMediaRequestSchema,
   workbookMediaResultSchema,
   workbookSaveRequestSchema,
+  workbookExportPdfRequestSchema,
 } from '../shared/desktop-api'
 import type { SheetsShellCoordinator } from './sheets-shell-coordinator'
 import type { EngineRecalcEdit, EngineRecalcRead } from '@genoffice/runtime-contracts'
@@ -339,6 +340,51 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
     const saveRequest = translateSaveRequest(request)
     const result = await coordinator.writeRecovery(wcId, request.sessionId, saveRequest)
     return result
+  })
+
+  // ── workbook:export-pdf (INCREMENT 7 / ADR-006) ──
+  // Migrated from sheets-main.ts:exportPdf(). The handler is a THIN ADAPTER:
+  //   1. Validates input via workbookExportPdfRequestSchema (frozen IPC shape)
+  //   2. Resolves callerWindow from event.sender
+  //   3. Calls coordinator.exportPdf(wcId, callerWindow, request)
+  //   4. Maps the result → frozen WorkbookExportPdfResult
+  //
+  // The coordinator owns callerWindow + save dialog + output authorization +
+  // writing the PDF bytes. The PDF renderer (SpreadsheetPdfRenderer, injected
+  // into the coordinator) owns the hidden BrowserWindow + printToPDF + cleanup.
+  //
+  // This handler does NOT:
+  //   - create BrowserWindow
+  //   - call printToPDF
+  //   - write PDF files directly
+  //   - call getFocusedWindow
+  //   - call child_process or node:fs
+  ipcMain.removeHandler(IPC_CHANNELS.exportPdf)
+  ipcMain.handle(IPC_CHANNELS.exportPdf, async (event, input: unknown) => {
+    const wcId = wcIdFromEvent(event)
+    const request = workbookExportPdfRequestSchema.parse(input)
+    const callerWindow = BrowserWindow.fromWebContents(event.sender) ?? undefined
+
+    const result = await coordinator.exportPdf(wcId, callerWindow, {
+      fileName: request.fileName,
+      html: request.html,
+      landscape: request.landscape,
+      pageSize: request.pageSize,
+      margins: request.margins,
+      scale: request.scale,
+    })
+
+    // Map the coordinator result → frozen WorkbookExportPdfResult
+    if ('canceled' in result && result.canceled) {
+      return { canceled: true }
+    }
+    if ('ok' in result && !result.ok) {
+      // Render failure — throw so the renderer's catch path sees the error
+      throw new Error(result.error)
+    }
+    // Success — return the output path
+    const path = 'path' in result ? result.path : ''
+    return { canceled: false as const, path }
   })
 }
 

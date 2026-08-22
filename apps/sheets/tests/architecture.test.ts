@@ -225,4 +225,48 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     expect(src).toMatch(/translateSaveRequest/)
     expect(src).toMatch(/buildWorkbookFile/)
   })
+
+  // ═══ INCREMENT 7 — PDF export migration architecture guards ═══
+
+  test('migrated export-pdf handler has ZERO BrowserWindow construction', () => {
+    // The handler must NOT create BrowserWindow — the PDF renderer
+    // (ElectronSpreadsheetPdfRenderer) owns the hidden window.
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '')
+    expect(stripped).not.toMatch(/new\s+BrowserWindow\b/)
+  })
+
+  test('migrated export-pdf handler has ZERO printToPDF calls', () => {
+    // The handler must NOT call printToPDF — that's the renderer's job.
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    // Strip JSDoc/block comments AND line comments
+    const stripped = src
+      .replace(/\/\*\*?[\s\S]*?\*\//g, '') // block comments
+      .replace(/^\s*\/\/.*$/gm, '')          // line comments
+    expect(stripped).not.toMatch(/printToPDF/)
+  })
+
+  test('migrated export-pdf handler has ZERO direct filesystem PDF writes', () => {
+    // The handler must NOT write PDF files directly — the coordinator
+    // owns output-path authorization + writing.
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '')
+    expect(stripped).not.toMatch(/writeFile.*pdf/i)
+    expect(stripped).not.toMatch(/^import.*node:fs/m)
+  })
+
+  test('migrated export-pdf handler has ZERO getFocusedWindow calls', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).not.toMatch(/getFocusedWindow\s*\(/)
+  })
+
+  test('migrated export-pdf handler delegates to coordinator.exportPdf', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/coordinator\.exportPdf\b/)
+  })
+
+  test('migrated export-pdf handler replaces the legacy handler', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.exportPdf\)/)
+  })
 })
