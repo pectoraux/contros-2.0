@@ -105,6 +105,8 @@ import {
   defaultSaveDir,
   uniquePathIn,
 } from '../../../docs/src/main/docs-main'
+import { initDocsRuntime, runtimeBundle } from '../../../docs/src/main/docs-runtime'
+import { registerMigratedDocsIpc } from '../../../docs/src/main/docs-migrated-handlers'
 import { blankXlsxBuffer } from '../../../sheets/src/gateway/csv-import'
 import {
   configureSheetsRuntime,
@@ -2789,6 +2791,16 @@ registerProjectIpc()
 registerDocsIpc()
 registerHomeIpc()
 registerTabsIpc()
+
+// Increment 3: initialize the docs runtime (constructs capabilities +
+// DocumentService + coordinator, publishes runtime once) and register the
+// migrated IPC handlers (overrides the legacy docs:* handlers with the
+// runtime-backed implementations that use DocsShellCoordinatorImpl with
+// per-wcId session ownership and caller-specific dialog parenting).
+initDocsRuntime()
+if (runtimeBundle) {
+  registerMigratedDocsIpc(runtimeBundle)
+}
 
 // sheets' project:resolveChat goes through the handler registered by docs-main; the sessionId reverse lookup hooks in here
 setSessionPathResolver(resolveSheetsSessionPath)
