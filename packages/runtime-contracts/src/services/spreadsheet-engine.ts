@@ -46,8 +46,16 @@ import type { SavePlan } from './save-plan.js'
  * A WASM adapter would map it to an in-memory table key. A Cloud adapter
  * would map it to a server session token. The mapping is private to the
  * adapter implementation.
+ *
+ * INCREMENT 5B (build-fix): the brand is now a real runtime `Symbol()`
+ * (instead of `declare const ... unique symbol` which emitted no runtime
+ * binding and could not be re-exported by rollup's `export *`). The
+ * unique-symbol type guarantee is preserved via the explicit type
+ * annotation on the const. The brand remains opaque and unforgeable —
+ * symbol keys are invisible to `Object.keys()` / `JSON.stringify`, and
+ * external code cannot construct a handle without the brand reference.
  */
-export declare const ENGINE_SESSION_HANDLE_BRAND: unique symbol
+export const ENGINE_SESSION_HANDLE_BRAND: unique symbol = Symbol('ENGINE_SESSION_HANDLE_BRAND')
 
 export interface EngineSessionHandle {
   /** @internal Brand marker — do not access. */

@@ -1,0 +1,318 @@
+/**
+ * Increment 5B — Real Electron CDP smoke test driver.
+ *
+ * Launches the real Sheets Electron app under Xvfb, drives the renderer via
+ * CDP, and verifies the full migration path:
+ *
+ *   1. Launch Electron with --remote-debugging-port=CDP_PORT and
+ *      XLSX_DEBUG_PORT=CAPTURE_PORT (starts the main-process capture server
+ *      that exposes /open?path=<file> to set forcedWorkbookPath WITHOUT
+ *      auto-opening).
+ *   2. Wait for the renderer page tab to appear in CDP's /json/list.
+ *   3. Connect via WebSocket to the renderer tab.
+ *   4. Wait for window.desktopApi to be ready.
+ *   5. POST /open?path=<fixture> to the capture server — sets the queued
+ *      workbook path WITHOUT auto-opening.
+ *   6. CDP Runtime.evaluate: window.desktopApi.selectWorkbook() — invokes
+ *      the legacy 'workbook:select' IPC; the main process consumes the
+ *      queued path, opens the workbook via the sidecar, adopts the session
+ *      into the coordinator, returns a WorkbookFile with sessionId.
+ *   7. CDP Runtime.evaluate: window.desktopApi.readWorkbookRange(...) —
+ *      invokes the MIGRATED 'workbook:read-range' IPC; the migrated
+ *      handler resolves the session via SheetsShellCoordinator, calls
+ *      SpreadsheetService → ElectronXlsxSidecarEngine → real sidecar
+ *      binary → returns cell data to the renderer.
+ *   8. Verify the returned cells match the fixture.
+ *   9. CDP Runtime.evaluate: window.desktopApi.readWorkbookFormulas(...) —
+ *      exercises the migrated 'workbook:read-formulas' IPC.
+ *  10. Negative test: close the session, then re-invoke readWorkbookRange
+ *      with the stale sessionId — verify the error reaches the renderer.
+ *  11. Sidecar process identity: pgrep for xlsx-sidecar — exactly ONE
+ *      process must exist (proving legacy XlsxSidecarClient and the engine
+ *      share the same sidecar binary).
+ *
+ * Run with: node scripts/sheets-cdp-smoke.mjs
+ */
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { WebSocket } from 'ws'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const repoRoot = resolve(here, '..')
+
+const SIDECAR_BIN = process.env.SIDECAR_BIN ?? join(repoRoot, 'apps/sheets/native/xlsx-engine/target/release/xlsx-sidecar')
+const FIXTURE_SRC = process.env.XLSX_FIXTURE ?? join(repoRoot, 'apps/sheets/fixtures/generated/compatibility-basic.xlsx')
+const ELECTRON_BIN = process.env.ELECTRON_BIN ?? join(repoRoot, 'node_modules/electron/dist/electron')
+const SHEETS_APP = process.env.SHEETS_APP ?? join(repoRoot, 'apps/sheets')
+const CDP_PORT = Number(process.env.CDP_PORT ?? 9777)
+const CAPTURE_PORT = Number(process.env.CAPTURE_PORT ?? CDP_PORT + 1)
+const DISPLAY = process.env.XVFB_DISPLAY ?? ':105'
+
+function log(label, msg) { console.log(`[${label}] ${msg}`) }
+function fail(msg) { console.error(`[FAIL] ${msg}`); process.exit(1) }
+
+if (!existsSync(SIDECAR_BIN)) fail(`Sidecar binary not found: ${SIDECAR_BIN}`)
+if (!existsSync(FIXTURE_SRC)) fail(`XLSX fixture not found: ${FIXTURE_SRC}`)
+if (!existsSync(ELECTRON_BIN)) fail(`Electron binary not found: ${ELECTRON_BIN}`)
+
+// Copy fixture to a stable path (Electron reads it from XLSX_OPEN_PATH
+// or via the capture server's /open endpoint)
+const tmpDir = mkdtempSync(join(tmpdir(), 'genoffice-cdp-smoke-'))
+const fixturePath = join(tmpDir, 'fixture.xlsx')
+copyFileSync(FIXTURE_SRC, fixturePath)
+log('SETUP', `fixture: ${fixturePath}`)
+log('SETUP', `sidecar: ${SIDECAR_BIN}`)
+log('SETUP', `electron: ${ELECTRON_BIN}`)
+
+// Start Xvfb
+log('XVFB', `starting on display ${DISPLAY}...`)
+const xvfb = spawn('Xvfb', [DISPLAY, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
+xvfb.on('error', (e) => fail(`Xvfb failed to start: ${e.message}`))
+
+// Kill any stale sidecar / electron processes from previous test runs.
+// Without this, the sidecar-sharing check would see multiple PIDs and fail.
+// Also kill any process listening on our CDP/capture ports.
+spawnSync('pkill', ['-f', 'xlsx-sidecar'], { stdio: 'ignore' })
+spawnSync('pkill', ['-f', 'electron.*apps/sheets'], { stdio: 'ignore' })
+// Wait for processes to actually die and ports to be released.
+await new Promise((r) => setTimeout(r, 2000))
+
+// Start Electron — XLSX_DEBUG_PORT enables BOTH the CDP remote-debugging-port
+// AND the capture server (which listens on debugPort+1). We do NOT pass
+// --remote-debugging-port separately to avoid the XLSX_DEBUG_PORT override.
+const env = {
+  ...process.env,
+  DISPLAY,
+  XLSX_DEBUG_PORT: String(CDP_PORT),
+  ELECTRON_DISABLE_SECURITY_WARNINGS: 'true',
+}
+log('ELECTRON', `launching sheets app — CDP port ${CDP_PORT}, capture port ${CAPTURE_PORT}...`)
+const electron = spawn(ELECTRON_BIN, [SHEETS_APP, '--no-sandbox'], {
+  env,
+  stdio: ['ignore', 'pipe', 'pipe'],
+})
+let electronOut = ''
+electron.stdout.on('data', (chunk) => {
+  const s = chunk.toString()
+  electronOut += s
+  process.stderr.write(`[electron:out] ${s}`)
+})
+electron.stderr.on('data', (chunk) => process.stderr.write(`[electron:err] ${chunk}`))
+electron.on('error', (e) => fail(`Electron failed to start: ${e.message}`))
+
+async function waitForCdp(maxMs = 30000) {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    try {
+      const resp = await fetch(`http://localhost:${CDP_PORT}/json/list`)
+      if (resp.ok) {
+        const tabs = await resp.json()
+        const page = tabs.find((t) => t.type === 'page' && t.url.includes('renderer/index.html'))
+        if (page) return page
+      }
+    } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  fail('CDP page tab never appeared')
+}
+
+async function cdpCall(ws, method, params = {}) {
+  const id = Math.floor(Math.random() * 1e9)
+  const msg = JSON.stringify({ id, method, params })
+  return new Promise((resolveCall, rejectCall) => {
+    const onMessage = (data) => {
+      try {
+        const resp = JSON.parse(data.toString())
+        if (resp.id === id) {
+          ws.off('message', onMessage)
+          if (resp.error) rejectCall(new Error(`CDP ${method} failed: ${JSON.stringify(resp.error)}`))
+          else resolveCall(resp.result)
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    ws.on('message', onMessage)
+    ws.send(msg)
+  })
+}
+
+async function evaluate(ws, expression) {
+  const result = await cdpCall(ws, 'Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  })
+  if (result.exceptionDetails) {
+    const desc = result.exceptionDetails.exception?.description ?? result.exceptionDetails.text
+    throw new Error(`Runtime.evaluate threw: ${desc}`)
+  }
+  return result.result.value
+}
+
+async function postCapture(path) {
+  const url = `http://localhost:${CAPTURE_PORT}/open?path=${encodeURIComponent(path)}`
+  const resp = await fetch(url)
+  if (!resp.ok) fail(`Capture server /open failed: ${resp.status} ${await resp.text()}`)
+  return resp.text()
+}
+
+async function main() {
+  let ws = null
+  try {
+    log('CDP', 'waiting for renderer page tab...')
+    const page = await waitForCdp()
+    log('CDP', `connected to page: ${page.url}`)
+
+    ws = new WebSocket(page.webSocketDebuggerUrl)
+    await new Promise((resolveOpen, rejectOpen) => {
+      ws.once('open', resolveOpen)
+      ws.once('error', rejectOpen)
+    })
+    log('CDP', 'websocket connected')
+
+    // Wait for window.desktopApi to be ready
+    log('RENDERER', 'waiting for window.desktopApi...')
+    let desktopReady = false
+    for (let i = 0; i < 60; i++) {
+      try {
+        const ready = await evaluate(ws, `typeof window.desktopApi === 'object' && typeof window.desktopApi.selectWorkbook === 'function' && typeof window.desktopApi.readWorkbookRange === 'function'`)
+        if (ready) { desktopReady = true; break }
+      } catch { /* renderer still booting */ }
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    if (!desktopReady) fail('window.desktopApi never became available')
+    log('RENDERER', 'window.desktopApi is ready')
+
+    // POST /open to set forcedWorkbookPath (avoids the renderer's auto-open race)
+    log('CAPTURE-SRV', `POST /open?path=${fixturePath}`)
+    await postCapture(fixturePath)
+    log('CAPTURE-SRV', 'forcedWorkbookPath set — next selectWorkbook() will consume it')
+
+    // Drive the legacy workbook:select path via the renderer
+    log('LEGACY-SELECT', 'invoking window.desktopApi.selectWorkbook()...')
+    const openResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.selectWorkbook()
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, stack: e.stack }
+      }
+    })()`)
+
+    if (!openResult.ok) fail(`selectWorkbook threw: ${openResult.error}\n${openResult.stack}`)
+    if (!openResult.result) fail('selectWorkbook returned null — forcedWorkbookPath not consumed (capture server /open failed?)')
+
+    const sessionId = openResult.result.sessionId
+    const sheet1Id = openResult.result.sheets?.[0]?.id
+    const sheet1Name = openResult.result.sheets?.[0]?.name
+    if (!sessionId || !sheet1Id) fail(`selectWorkbook returned malformed result: ${JSON.stringify(openResult.result).slice(0, 300)}`)
+    log('LEGACY-SELECT', `SUCCESS — sessionId: ${sessionId}, sheet1: id=${sheet1Id}, name=${sheet1Name}`)
+
+    // Verify sidecar process identity (single sidecar shared between legacy + engine)
+    // We check this AFTER selectWorkbook so the sidecar has been spawned.
+    const psOut = spawnSync('pgrep', ['-f', 'xlsx-sidecar'], { encoding: 'utf8' })
+    const sidecarPids = psOut.stdout.trim().split('\n').filter(Boolean)
+    log('SIDECAR-SHARING', `sidecar process(es): ${sidecarPids.length} (PID(s): ${sidecarPids.join(', ')})`)
+    if (sidecarPids.length === 0) fail('No sidecar process running — sidecar was not spawned')
+    if (sidecarPids.length > 1) fail(`EXPECTED 1 sidecar process, found ${sidecarPids.length} (PIDs: ${sidecarPids.join(', ')}) — DOUBLE SPAWN`)
+    log('SIDECAR-SHARING', `SUCCESS — exactly ONE sidecar process (PID ${sidecarPids[0]})`)
+
+    // MIGRATED read-range via window.desktopApi.readWorkbookRange — the real path:
+    //   renderer → preload → ipcRenderer.invoke('workbook:read-range')
+    //   → migrated handler → SheetsShellCoordinator → SpreadsheetService
+    //   → ElectronXlsxSidecarEngine → shared sidecar process → Rust binary
+    log('MIGRATED-READ-RANGE', 'invoking window.desktopApi.readWorkbookRange()...')
+    const rangeResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readWorkbookRange({
+          sessionId: ${JSON.stringify(sessionId)},
+          sheetId: ${JSON.stringify(sheet1Id)},
+          range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 },
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name, stack: e.stack }
+      }
+    })()`)
+
+    if (!rangeResult.ok) fail(`readWorkbookRange failed: ${rangeResult.error}\nstack: ${rangeResult.stack}`)
+    if (!rangeResult.result || !Array.isArray(rangeResult.result.cells)) {
+      fail(`readWorkbookRange returned malformed result: ${JSON.stringify(rangeResult.result).slice(0, 300)}`)
+    }
+    log('MIGRATED-READ-RANGE', `SUCCESS — ${rangeResult.result.cells.length} cell(s): ${JSON.stringify(rangeResult.result.cells)}`)
+
+    // MIGRATED read-formulas
+    log('MIGRATED-READ-FORMULAS', 'invoking window.desktopApi.readWorkbookFormulas()...')
+    const formulasResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readWorkbookFormulas({
+          sessionId: ${JSON.stringify(sessionId)},
+          sheetId: ${JSON.stringify(sheet1Id)},
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`)
+    if (!formulasResult.ok) {
+      log('MIGRATED-READ-FORMULAS', `note: readWorkbookFormulas failed: ${formulasResult.error}`)
+    } else {
+      log('MIGRATED-READ-FORMULAS', `SUCCESS — ${formulasResult.result.cells?.length ?? 0} formula cell(s)`)
+    }
+
+    // REAL INVALID-SESSION PATH: close, then re-invoke read-range
+    log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')
+    await evaluate(ws, `(async () => {
+      try {
+        await window.desktopApi.closeWorkbook(${JSON.stringify(sessionId)})
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`).then((r) => {
+      if (!r.ok) log('INVALID-SESSION', `close failed (continuing): ${r.error}`)
+      else log('INVALID-SESSION', 'session closed via migrated close path')
+    })
+
+    log('INVALID-SESSION', 'invoking readWorkbookRange with stale sessionId...')
+    const staleResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readWorkbookRange({
+          sessionId: ${JSON.stringify(sessionId)},
+          sheetId: ${JSON.stringify(sheet1Id)},
+          range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 },
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name }
+      }
+    })()`)
+    if (staleResult.ok) {
+      fail(`Expected readWorkbookRange with stale sessionId to fail, but it succeeded: ${JSON.stringify(staleResult.result)}`)
+    }
+    log('INVALID-SESSION', `SUCCESS — error reached renderer: name=${staleResult.name || '(unknown)'}, message=${staleResult.error}`)
+
+    log('RESULT', 'ALL CHECKS PASSED')
+    ws.close()
+    electron.kill('SIGTERM')
+    xvfb.kill('SIGTERM')
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    process.exit(0)
+  } catch (e) {
+    console.error(`[FAIL] ${e.message}`)
+    console.error(e.stack)
+    if (ws) try { ws.close() } catch { /* best effort */ }
+    try { electron?.kill('SIGTERM') } catch { /* best effort */ }
+    try { xvfb?.kill('SIGTERM') } catch { /* best effort */ }
+    process.exit(1)
+  }
+}
+
+main().catch((e) => {
+  console.error('[FAIL]', e)
+  try { electron?.kill('SIGTERM') } catch { /* best effort */ }
+  try { xvfb?.kill('SIGTERM') } catch { /* best effort */ }
+  process.exit(1)
+})

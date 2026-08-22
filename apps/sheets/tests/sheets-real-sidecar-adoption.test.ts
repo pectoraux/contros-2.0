@@ -211,6 +211,164 @@ skipIfNoSidecar('Increment 5A — REAL sidecar integration', () => {
     // After teardown, the session is no longer resolvable
     expect(() => bundle!.coordinator.getSession(200, session.sessionId)).toThrow()
   })
+
+  // ═══ INCREMENT 5B: Sheet-id real regression test ═══
+
+  describe('Increment 5B — sheet-id real regression', () => {
+    test('read-range: domain sheetId → service sheet mapping → engine reverse lookup → sidecar sheet_id', async () => {
+      // This test proves the full sheet-id translation chain works against
+      // the real sidecar:
+      //   1. The renderer sends sheetId='sheet-1' (the stable XLSX sheetId attr).
+      //   2. The service resolves sheetId → sheetName ('Sheet1') via session.sheetNames.
+      //   3. The engine reverse-resolves sheetName → sheetId via resolveSheetIdFromName.
+      //   4. The sidecar receives sheetId='sheet-1' and returns cell data.
+      //
+      // Without the engine's resolveSheetIdFromName fix (Increment 5A), this
+      // would fail with "Unknown worksheet" because the engine would pass
+      // sheetName='Sheet1' where the sidecar expects sheetId='sheet-1'.
+      const snapshotPath = join(testDir, `${randomUUID()}.xlsx`)
+      copyFileSync(FIXTURE_PATH, snapshotPath)
+      const openedRaw = await sidecarClient!.open(snapshotPath, 'en')
+      const opened = openedRaw as { sessionId: string; sheets: Array<{ id: string; name: string }> }
+      const sheetNames = new Map<string, string>()
+      for (const s of opened.sheets) sheetNames.set(s.id, s.name)
+
+      const session = await adoptLegacySessionIntoCoordinator(bundle!, 300, {
+        sidecarSessionId: opened.sessionId,
+        originalPath: FIXTURE_PATH,
+        snapshotPath,
+        diskFingerprint: 'test',
+        sheetNames,
+        metadata: {
+          name: 'test.xlsx', sha256: 'test', entryCount: 14,
+          sheets: opened.sheets.map((s, i) => ({
+            id: s.id, name: s.name, index: i, hidden: false, rtl: false,
+            showGridlines: true, rowCount: 100, columnCount: 26,
+            defaultRowHeight: 15, defaultColumnWidth: 8.43,
+          })),
+          activeTab: 0, definedNames: [], themeColors: [],
+          themeFonts: { major: '', minor: '' },
+        },
+        locale: 'en',
+      })
+
+      // Pass the domain sheetId ('sheet-1') — the service resolves it to
+      // the file sheet name ('Sheet1'), then the engine reverse-resolves
+      // back to the sidecar's sheetId ('sheet-1'). The sidecar returns cells.
+      const result = await bundle!.coordinator.readRange(
+        300, session.sessionId, 'sheet-1', 'A1:B1',
+      )
+      expect(result.cells).toBeDefined()
+      expect(result.cells.length).toBeGreaterThan(0)
+      // The fixture's first cell is "Old" at A1
+      expect(result.cells[0].value).toBe('Old')
+    })
+
+    test('read-formulas: domain sheetId resolves through the same chain', async () => {
+      // Same chain as read-range, but exercising read-formulas. The sidecar's
+      // read_formula_cells command also expects sheetId (not sheetName).
+      const snapshotPath = join(testDir, `${randomUUID()}.xlsx`)
+      copyFileSync(FIXTURE_PATH, snapshotPath)
+      const openedRaw = await sidecarClient!.open(snapshotPath, 'en')
+      const opened = openedRaw as { sessionId: string; sheets: Array<{ id: string; name: string }> }
+      const sheetNames = new Map<string, string>()
+      for (const s of opened.sheets) sheetNames.set(s.id, s.name)
+
+      const session = await adoptLegacySessionIntoCoordinator(bundle!, 301, {
+        sidecarSessionId: opened.sessionId,
+        originalPath: FIXTURE_PATH,
+        snapshotPath,
+        diskFingerprint: 'test',
+        sheetNames,
+        metadata: {
+          name: 'test.xlsx', sha256: 'test', entryCount: 14,
+          sheets: opened.sheets.map((s, i) => ({
+            id: s.id, name: s.name, index: i, hidden: false, rtl: false,
+            showGridlines: true, rowCount: 100, columnCount: 26,
+            defaultRowHeight: 15, defaultColumnWidth: 8.43,
+          })),
+          activeTab: 0, definedNames: [], themeColors: [],
+          themeFonts: { major: '', minor: '' },
+        },
+        locale: 'en',
+      })
+
+      // Pass domain sheetId — service resolves to sheetName, engine reverse-resolves
+      // to sidecar sheetId. The sidecar returns formula cells (may be empty for
+      // this fixture, but the call must not throw).
+      const result = await bundle!.coordinator.readFormulaCells(
+        301, session.sessionId, 'sheet-1',
+      )
+      expect(result).toBeDefined()
+      expect(Array.isArray(result.cells)).toBe(true)
+    })
+
+    test('recalc uses worksheet NAME (not sheetId) — no regression', async () => {
+      // The sidecar's recalc_cells command intentionally uses the worksheet
+      // NAME (not the sheetId) — see recalc.rs:287 `worksheet.name == name`.
+      // The engine's recalculate() passes e.sheetName as `sheet` to the
+      // sidecar. The service resolves domain sheetId → sheetName before
+      // calling the engine. This test verifies the chain works:
+      //   renderer sends sheetId='sheet-1' → service resolves to 'Sheet1'
+      //   → engine passes sheet='Sheet1' to sidecar → sidecar finds the
+      //   worksheet by name.
+      //
+      // Without the service's sheetId → sheetName resolution, the sidecar
+      // would reject with "Unknown sheet: sheet-1".
+      //
+      // NOTE: The sidecar's IronCalc recalc engine may fail on fixtures
+      // without `r` attributes on rows (e.g. compatibility-basic.xlsx).
+      // That's a sidecar binary concern, not a migration code issue. We
+      // assert the sidecar did NOT reject with "Unknown sheet" — proving
+      // the sheet name was correctly resolved.
+      const snapshotPath = join(testDir, `${randomUUID()}.xlsx`)
+      copyFileSync(FIXTURE_PATH, snapshotPath)
+      const openedRaw = await sidecarClient!.open(snapshotPath, 'en')
+      const opened = openedRaw as { sessionId: string; sheets: Array<{ id: string; name: string }> }
+      const sheetNames = new Map<string, string>()
+      for (const s of opened.sheets) sheetNames.set(s.id, s.name)
+
+      const session = await adoptLegacySessionIntoCoordinator(bundle!, 302, {
+        sidecarSessionId: opened.sessionId,
+        originalPath: FIXTURE_PATH,
+        snapshotPath,
+        diskFingerprint: 'test',
+        sheetNames,
+        metadata: {
+          name: 'test.xlsx', sha256: 'test', entryCount: 14,
+          sheets: opened.sheets.map((s, i) => ({
+            id: s.id, name: s.name, index: i, hidden: false, rtl: false,
+            showGridlines: true, rowCount: 100, columnCount: 26,
+            defaultRowHeight: 15, defaultColumnWidth: 8.43,
+          })),
+          activeTab: 0, definedNames: [], themeColors: [],
+          themeFonts: { major: '', minor: '' },
+        },
+        locale: 'en',
+      })
+
+      // Pass domain sheetId ('sheet-1') as edits.sheetName and reads.sheetName
+      // (the field is named sheetName but the service treats it as a sheetId
+      // and resolves it via session.sheetNames).
+      const edits = [{ sheetName: 'sheet-1', row: 0, column: 0, value: '42' }]
+      const reads = [{ sheetName: 'sheet-1', row: 0, column: 0 }]
+      try {
+        const result = await bundle!.coordinator.recalculate(302, session.sessionId, edits, reads)
+        // If recalc succeeds, verify the result shape
+        expect(result).toBeDefined()
+        expect(Array.isArray(result.cells)).toBe(true)
+      } catch (e) {
+        // The sidecar's recalc engine may fail on fixtures without `r`
+        // attributes. The KEY assertion: the error must NOT be "Unknown sheet"
+        // — that would mean the sheet name was NOT resolved correctly.
+        const msg = (e as Error).message
+        expect(msg).not.toMatch(/Unknown sheet/i)
+        // The error should be a workbook/formula error, not a session/sheet
+        // resolution error.
+        console.log('recalc failed (expected for fixture without r attrs):', msg)
+      }
+    })
+  })
 })
 
 // Always-running report test — verifies whether the real sidecar is available

@@ -125,15 +125,35 @@ export function validateRangeResult(raw: unknown): EngineRangeResult {
   const rows = isArray(raw.rows) ? raw.rows.map(validateRowMetadata) : []
   const merges = isArray(raw.merges) ? raw.merges.map(validateCellArea) : []
   const columns = isArray(raw.columns) ? raw.columns.map(validateColumnMetadata) : []
+  // INCREMENT 5B (build-fix): The sidecar returns hyperlinks as
+  // { row, column, target } (not { cell, target }). The engine contract
+  // uses { cell, target }, so we convert row+column → A1 notation.
+  // Without this fix, every hyperlink would be rejected as malformed.
   const hyperlinks = isArray(raw.hyperlinks)
     ? raw.hyperlinks.map((h, i) => {
-        if (!isRecord(h) || !isString(h.cell) || !isString(h.target))
-          throw new EngineError(`Invalid range response: hyperlinks[${i}]`, 'PROTOCOL_ERROR')
-        return { cell: h.cell, target: h.target }
+        if (!isRecord(h)) throw new EngineError(`Invalid range response: hyperlinks[${i}]`, 'PROTOCOL_ERROR')
+        if (isString(h.cell) && isString(h.target)) {
+          return { cell: h.cell, target: h.target }
+        }
+        // Sidecar's native shape: { row, column, target }
+        if (isNumber(h.row) && isNumber(h.column) && isString(h.target)) {
+          return { cell: cellRefFromRowCol(h.row, h.column), target: h.target }
+        }
+        throw new EngineError(`Invalid range response: hyperlinks[${i}]`, 'PROTOCOL_ERROR')
       })
     : []
-  const conditionalFormatting = isArray(raw.conditionalFormatting) ? raw.conditionalFormatting : []
-  const dataValidation = isArray(raw.dataValidation) ? raw.dataValidation : []
+  // INCREMENT 5B (build-fix): The sidecar returns `conditionalRules` and
+  // `dataValidations` (plural), not `conditionalFormatting` and
+  // `dataValidation` (singular). Read the correct field names so the data
+  // is preserved (the engine contract stores them as `unknown[]` — the
+  // field name in the contract stays the same, only the source field
+  // changes).
+  const conditionalFormatting = isArray(raw.conditionalRules)
+    ? raw.conditionalRules
+    : (isArray(raw.conditionalFormatting) ? raw.conditionalFormatting : [])
+  const dataValidation = isArray(raw.dataValidations)
+    ? raw.dataValidations
+    : (isArray(raw.dataValidation) ? raw.dataValidation : [])
   const rowBreaks = isArray(raw.rowBreaks) ? raw.rowBreaks.filter(isNumber) : []
   const columnBreaks = isArray(raw.columnBreaks) ? raw.columnBreaks.filter(isNumber) : []
   const sheetProtection = opt(raw.sheetProtection, isBoolean) ?? false
@@ -148,15 +168,50 @@ export function validateRangeResult(raw: unknown): EngineRangeResult {
   return { cells, rows, merges, columns, hyperlinks, conditionalFormatting, dataValidation, autoFilter, rowBreaks, columnBreaks, sheetProtection }
 }
 
+/** Convert 0-indexed (row, column) to A1 notation (e.g. (0, 0) → "A1"). */
+function cellRefFromRowCol(row: number, column: number): string {
+  let col = ''
+  let n = column + 1
+  while (n > 0) {
+    const rem = (n - 1) % 26
+    col = String.fromCharCode(65 + rem) + col
+    n = Math.floor((n - 1) / 26)
+  }
+  return `${col}${row + 1}`
+}
+
 function validateCellRecord(raw: unknown): EngineCellRecord {
   if (!isRecord(raw)) throw new EngineError('Invalid range response: cell record', 'PROTOCOL_ERROR')
   if (!isNumber(raw.row)) throw new EngineError('Invalid range response: cell.row', 'PROTOCOL_ERROR')
   if (!isNumber(raw.column)) throw new EngineError('Invalid range response: cell.column', 'PROTOCOL_ERROR')
+  // INCREMENT 5B (build-fix): The sidecar returns `value` as a typed scalar
+  // (string | number | boolean | null). The engine contract has `value: string`
+  // AND `number?: number` — the validator converts the typed value to a
+  // string AND captures the raw numeric value in `number`. Without this fix,
+  // numeric cells (e.g. 10.0) were converted to empty string ('') because
+  // `opt(raw.value, isString)` returned undefined for non-string values.
+  const rawValue = raw.value
+  let value: string
+  let number: number | undefined
+  if (isString(rawValue)) {
+    value = rawValue
+    number = opt(raw.number, isNumber)
+  } else if (isNumber(rawValue)) {
+    value = String(rawValue)
+    number = rawValue
+  } else if (isBoolean(rawValue)) {
+    value = String(rawValue)
+    number = undefined
+  } else {
+    // null, undefined, or other — empty string
+    value = ''
+    number = undefined
+  }
   return {
     row: raw.row,
     column: raw.column,
-    value: opt(raw.value, isString) ?? '',
-    number: opt(raw.number, isNumber),
+    value,
+    number,
     isFormula: opt(raw.isFormula, isBoolean) ?? false,
     styleIndex: opt(raw.styleIndex, isNumber) ?? 0,
     hyperlink: opt(raw.hyperlink, isString),

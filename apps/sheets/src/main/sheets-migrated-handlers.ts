@@ -41,6 +41,46 @@ function wcIdFromEvent(event: IpcMainInvokeEvent): number {
   return event.sender.id
 }
 
+/**
+ * Convert a numeric {startRow,startColumn,endRow,endColumn} range (0-indexed)
+ * to Excel A1 notation (e.g. {0,0,0,1} → "A1:B1").
+ *
+ * INCREMENT 5B (build-fix): the migrated handler was producing
+ * "0:0-0:1" which the engine's parseRange rejects. The engine contract
+ * expects A1:B2 string notation. This helper mirrors the engine's
+ * private colToIdx inverse without depending on the engine internals.
+ */
+function rangeToA1(r: { startRow: number; startColumn: number; endRow: number; endColumn: number }): string {
+  return `${colIdxToLetter(r.startColumn)}${r.startRow + 1}:${colIdxToLetter(r.endColumn)}${r.endRow + 1}`
+}
+
+function colIdxToLetter(idx: number): string {
+  let s = ''
+  let n = idx + 1
+  while (n > 0) {
+    const rem = (n - 1) % 26
+    s = String.fromCharCode(65 + rem) + s
+    n = Math.floor((n - 1) / 26)
+  }
+  return s
+}
+
+/**
+ * Parse an A1 cell reference (e.g. "A1", "Z100", "AA1") to 0-indexed
+ * (row, column). Used to convert the engine's hyperlinks `{ cell: "A1" }`
+ * to the renderer's `{ row: 0, column: 0 }`.
+ */
+function parseCellRef(ref: string): { row: number; column: number } {
+  const match = ref.match(/^([A-Z]+)(\d+)$/)
+  if (!match) return { row: 0, column: 0 }
+  const colStr = match[1]
+  const rowStr = match[2]
+  if (colStr === undefined || rowStr === undefined) return { row: 0, column: 0 }
+  let col = 0
+  for (const ch of colStr) col = col * 26 + (ch.charCodeAt(0) - 64)
+  return { row: parseInt(rowStr, 10) - 1, column: col - 1 }
+}
+
 // ── Register migrated handlers ──
 
 let migratedIpcRegistered = false
@@ -66,10 +106,62 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
     const request = workbookRangeRequestSchema.parse(input)
     const result = await coordinator.readRange(
       wcId, request.sessionId, request.sheetId,
-      `${request.range.startRow}:${request.range.startColumn}-${request.range.endRow}:${request.range.endColumn}`,
+      rangeToA1(request.range),
     )
-    // Map EngineRangeResult → WorkbookRangeResult
-    return workbookRangeResultSchema.parse(result)
+    // INCREMENT 5B (build-fix): Translate EngineRangeResult → WorkbookRangeResult.
+    // The engine contract uses different field names than the renderer's frozen
+    // schema (conditionalFormatting vs conditionalRules, dataValidation vs
+    // dataValidations). The validator now reads the sidecar's actual field
+    // names (conditionalRules, dataValidations) and stores them in the engine
+    // contract's fields. The translator below renames them back to the
+    // renderer's expected names and adds defaults for fields the engine
+    // contract doesn't carry (indexedThroughRow, indexingComplete, protectedRanges).
+    // Extra engine-only fields (columns, rowBreaks, columnBreaks) are dropped.
+    return workbookRangeResultSchema.parse({
+      cells: result.cells.map(c => {
+        // Recover the typed value: if the engine has a number, use it;
+        // otherwise use the string value.
+        const value = c.number !== undefined ? c.number : c.value
+        const cell: Record<string, unknown> = {
+          row: c.row,
+          column: c.column,
+          value,
+        }
+        if (c.isFormula) cell.formula = c.value
+        if (c.styleIndex !== undefined && c.styleIndex !== 0) cell.styleIndex = c.styleIndex
+        return cell
+      }),
+      rows: result.rows.map(r => {
+        const row: Record<string, unknown> = { row: r.row, hidden: r.hidden ?? false }
+        if (r.height !== undefined) row.height = r.height
+        if (r.customHeight !== undefined) row.customHeight = r.customHeight
+        if (r.outlineLevel !== undefined) row.outlineLevel = r.outlineLevel
+        if (r.collapsed !== undefined) row.collapsed = r.collapsed
+        if (r.styleIndex !== undefined) row.styleIndex = r.styleIndex
+        return row
+      }),
+      merges: result.merges.map(m => ({
+        startRow: m.firstRow, startColumn: m.firstColumn,
+        endRow: m.lastRow, endColumn: m.lastColumn,
+      })),
+      hyperlinks: result.hyperlinks.map(h => {
+        // Engine returns { cell: "A1", target: "..." } — convert to
+        // { row, column, target } for the renderer.
+        const parsed = parseCellRef(h.cell)
+        return { row: parsed.row, column: parsed.column, target: h.target }
+      }),
+      conditionalRules: result.conditionalFormatting,
+      autoFilter: result.autoFilter ?? null,
+      dataValidations: result.dataValidation,
+      sheetProtection: result.sheetProtection
+        ? { protected: true, hasPassword: false }
+        : null,
+      protectedRanges: [],
+      rowBreaks: result.rowBreaks,
+      colBreaks: result.columnBreaks,
+      indexedThroughRow: null,
+      indexingComplete: true,
+    })
   })
 
   // ── workbook:read-formulas ──
@@ -80,13 +172,22 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
     const result = await coordinator.readFormulaCells(
       wcId, request.sessionId, request.sheetId,
     )
-    // Map EngineFormulaCellsResult → WorkbookFormulaCellsResult
+    // INCREMENT 5B (build-fix): Translate EngineFormulaCellsResult →
+    // WorkbookFormulaCellsResult. The engine contract doesn't carry
+    // indexingComplete or truncated (the sidecar does); the migrated
+    // handler defaults them to true/false (trusted-complete). The cell
+    // shape is mapped: engine's { formula, cachedValue? } → renderer's
+    // { value, formula }.
     return workbookFormulaCellsResultSchema.parse({
-      cells: result.cells.map(c => ({
-        row: c.row,
-        column: c.column,
-        value: c.formula,
-      })),
+      cells: result.cells.map(c => {
+        const cell: Record<string, unknown> = {
+          row: c.row,
+          column: c.column,
+          value: c.cachedValue ?? '',
+        }
+        if (c.formula) cell.formula = c.formula
+        return cell
+      }),
       indexingComplete: true,
       truncated: false,
     })

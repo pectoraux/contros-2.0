@@ -98,6 +98,12 @@ export interface AdoptExternalSessionOptions {
  * Creates an opaque EngineSessionHandle — a bare frozen object with NO
  * inspectable properties. The adapter uses a private WeakMap to look up
  * session state by object identity. There is no `id` field.
+ *
+ * The brand key is a real `Symbol()` (runtime-exported by
+ * @genoffice/runtime-contracts since Increment 5B) — symbol keys are
+ * invisible to `Object.keys()` / `JSON.stringify`, preserving the opacity
+ * invariant. External code cannot construct a handle without the brand
+ * reference (which is not exported beyond the engine's own imports).
  */
 function createHandle(): EngineSessionHandle {
   const obj = { [ENGINE_SESSION_HANDLE_BRAND]: ENGINE_SESSION_HANDLE_BRAND }
