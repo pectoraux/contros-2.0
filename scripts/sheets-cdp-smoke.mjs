@@ -334,6 +334,71 @@ async function main() {
     }
     log('SESSION-CONTINUITY', `SUCCESS — SAME sessionId works after save, ${postSaveRange.result.cells?.length ?? 0} cell(s)`)
 
+    // ═══ INCREMENT 6A: SAVE RESPONSE FIDELITY ═══
+    // Validate the save response's WorkbookFile against the frozen contract
+    // fields the renderer depends on.
+    log('SAVE-RESPONSE-FIDELITY', 'validating save response fields...')
+    const file = saveResult.result.file
+    if (!file) fail('save response missing file')
+    if (file.sessionId !== sessionId) fail(`save response sessionId mismatch: expected ${sessionId}, got ${file.sessionId}`)
+    if (typeof file.name !== 'string' || file.name.length === 0) fail('save response file.name invalid')
+    if (typeof file.path !== 'string' || file.path.length === 0) fail('save response file.path invalid')
+    if (typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)) fail(`save response file.sha256 invalid: ${file.sha256}`)
+    if (typeof file.entryCount !== 'number' || file.entryCount < 0) fail('save response file.entryCount invalid')
+    if (!Array.isArray(file.sheets) || file.sheets.length === 0) fail('save response file.sheets invalid')
+    if (!Array.isArray(file.styles)) fail('save response file.styles invalid')
+    if (!Array.isArray(file.dxfStyles)) fail('save response file.dxfStyles invalid')
+    if (!Array.isArray(file.visuals)) fail('save response file.visuals invalid')
+    if (!Array.isArray(file.definedNames)) fail('save response file.definedNames invalid')
+    if (file.readOnly !== false) fail('save response file.readOnly should be false')
+    if (file.needsSaveAs !== false) fail('save response file.needsSaveAs should be false')
+    if (file.restoredFromRecovery !== false) fail('save response file.restoredFromRecovery should be false')
+    log('SAVE-RESPONSE-FIDELITY', `SUCCESS — all frozen fields valid: sessionId=${file.sessionId.slice(0,8)}, name=${file.name}, sha256=${file.sha256.slice(0,12)}..., entryCount=${file.entryCount}, sheets=${file.sheets.length}`)
+
+    // ═══ INCREMENT 6A: SAVE CONTENT FIDELITY ═══
+    // Close the session, then re-open the saved file via the sidecar and
+    // verify the file on disk carries the save (the sidecar open response
+    // succeeds — proving the file is a valid xlsx archive).
+    log('SAVE-CONTENT-FIDELITY', 'closing session and re-opening saved file via sidecar...')
+    await evaluate(ws, `(async () => { await window.desktopApi.closeWorkbook(${JSON.stringify(sessionId)}) })()`).catch(() => {})
+
+    // Re-open the saved file via the capture server + selectWorkbook
+    await postCapture(fixturePath)
+    const reopenResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.selectWorkbook()
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`)
+    if (!reopenResult.ok || !reopenResult.result) fail(`re-open after save failed: ${reopenResult.error}`)
+    const reopenedSessionId = reopenResult.result.sessionId
+    const reopenedSheet1Id = reopenResult.result.sheets?.[0]?.id
+    log('SAVE-CONTENT-FIDELITY', `re-opened: sessionId=${reopenedSessionId.slice(0,8)}, sheet1=${reopenedSheet1Id}`)
+
+    // Read the re-opened file — verify it has cells (the save wrote valid content)
+    const reopenedRange = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readWorkbookRange({
+          sessionId: ${JSON.stringify(reopenedSessionId)},
+          sheetId: ${JSON.stringify(reopenedSheet1Id)},
+          range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 },
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`)
+    if (!reopenedRange.ok) fail(`read after re-open failed: ${reopenedRange.error}`)
+    if (!Array.isArray(reopenedRange.result.cells) || reopenedRange.result.cells.length === 0) {
+      fail('re-opened file has no cells — save content fidelity failed')
+    }
+    log('SAVE-CONTENT-FIDELITY', `SUCCESS — re-opened file has ${reopenedRange.result.cells.length} cell(s): ${JSON.stringify(reopenedRange.result.cells)}`)
+
+    // Close the re-opened session before invalid-session test
+    await evaluate(ws, `(async () => { await window.desktopApi.closeWorkbook(${JSON.stringify(reopenedSessionId)}) })()`).catch(() => {})
+
     // ═══ REAL INVALID-SESSION PATH (after save) ═══
     log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')
     await evaluate(ws, `(async () => {

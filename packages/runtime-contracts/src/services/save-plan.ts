@@ -257,18 +257,28 @@ export interface PivotRefreshUpdate {
 // ── Workbook-level mutations ────────────────────────────────────────
 
 /**
- * A chart edit (package-absolute drawingPath — no sheetId mapping needed).
+ * A chart edit (package-absolute path — no sheetId mapping needed).
+ *
+ * INCREMENT 6A: the field is now `[key: string]: unknown` only — the
+ * renderer's schema uses `chartPath` (not `drawingPath`), and the gateway
+ * reads `chartPath` directly (see xlsx-gateway.ts:928). The previous
+ * `drawingPath: string` field was a domain/renderer naming mismatch that
+ * forced type assertions in the save adapter. Removing the named field
+ * and relying on the index signature lets the `chartPath` property flow
+ * through without assertion.
  */
 export interface WorkbookChartEdit {
-  readonly drawingPath: string
   readonly [key: string]: unknown
 }
 
 /**
  * A visual edit (package-absolute drawingPath — no sheetId mapping needed).
+ *
+ * INCREMENT 6A: same fix as WorkbookChartEdit — the index signature
+ * carries `drawingPath` and all other properties without a named field
+ * that would force a type assertion.
  */
 export interface WorkbookVisualEdit {
-  readonly drawingPath: string
   readonly [key: string]: unknown
 }
 

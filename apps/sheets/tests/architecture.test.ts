@@ -157,4 +157,72 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     )
     expect(coordinatorSrc).not.toMatch(/^(let|var|const)\s+(currentWcId|activeSession|globalSession)\b/m)
   })
+
+  // ═══ INCREMENT 6A — Save adapter architecture guards ═══
+
+  test('sheets-migrated-handlers.ts has ZERO type assertions', () => {
+    // The save handler must not use `as unknown as`, `as any`, `as never`.
+    // The SavePlan translation and WorkbookFile building live in
+    // sheets-save-adapter.ts. (Note: the read-range/read-formulas translators
+    // use `Record<string, unknown>` for cell/row construction — those are
+    // already validated via workbookRangeResultSchema.parse() before return,
+    // so they're not unchecked. This test guards the SAVE path only.)
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    // Strip JSDoc comments (which may mention these patterns for documentation)
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '')
+    expect(stripped).not.toMatch(/\bas\s+unknown\s+as\b/)
+    expect(stripped).not.toMatch(/\bas\s+any\b/)
+    expect(stripped).not.toMatch(/\bas\s+never\b/)
+  })
+
+  test('sheets-save-adapter.ts has ZERO type assertions', () => {
+    // The save adapter must not use `as unknown as`, `as any`, `as never`.
+    // All conversions use explicit per-family typed mappers with fresh
+    // object literals (assignable to readonly interfaces).
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '')
+    expect(stripped).not.toMatch(/\bas\s+unknown\s+as\b/)
+    expect(stripped).not.toMatch(/\bas\s+any\b/)
+    expect(stripped).not.toMatch(/\bas\s+never\b/)
+  })
+
+  test('sheets-save-adapter.ts does NOT import XlsxSidecarClient or child_process', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    expect(src).not.toMatch(/from\s+['"]\.\/xlsx-sidecar-client['"]/)
+    expect(src).not.toMatch(/^import.*child_process/m)
+  })
+
+  test('sheets-save-adapter.ts does NOT import xlsx-gateway', () => {
+    // The adapter is a pure data conversion module — no gateway planning.
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    expect(src).not.toMatch(/from\s+['"]@genoffice\/xlsx-gateway['"]/)
+  })
+
+  test('sheets-save-adapter.ts does NOT call filesystem APIs', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    expect(src).not.toMatch(/^import.*node:fs/m)
+    expect(src).not.toMatch(/^import.*node:path/m)
+  })
+
+  test('sheets-save-adapter.ts uses workbookFileSchema.parse() for validation', () => {
+    // The buildWorkbookFile function must validate the candidate via the
+    // frozen Zod schema — no raw `unknown` return.
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    expect(src).toMatch(/workbookFileSchema\.parse\(/)
+  })
+
+  test('sheets-save-adapter.ts buildWorkbookFile returns WorkbookFile (not unknown)', () => {
+    // The return type must be the frozen WorkbookFile — not unknown or
+    // Record<string, unknown>.
+    const src = readFileSync(join(SRC, 'main', 'sheets-save-adapter.ts'), 'utf8')
+    expect(src).toMatch(/function buildWorkbookFile\([^)]*\):\s*WorkbookFile/)
+  })
+
+  test('sheets-migrated-handlers.ts imports translateSaveRequest + buildWorkbookFile from sheets-save-adapter', () => {
+    // The handler must delegate to the adapter — not contain the logic inline.
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/from\s+['"]\.\/sheets-save-adapter['"]/)
+    expect(src).toMatch(/translateSaveRequest/)
+    expect(src).toMatch(/buildWorkbookFile/)
+  })
 })

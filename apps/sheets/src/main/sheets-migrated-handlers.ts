@@ -15,14 +15,17 @@
  *   - ZERO filesystem save/open implementation
  *   - ZERO getFocusedWindow
  *   - ZERO global session state
+ *   - ZERO type assertions (as unknown as, as any, as never)
  *
- * INCREMENT 6 (save + recovery migration):
- *   workbook:save and workbook:write-recovery are now migrated here.
- *   They translate the renderer's WorkbookSaveRequest → domain SavePlan,
- *   delegate to coordinator.saveWorkbook()/writeRecovery(), and map the
- *   result back to the frozen response shape. All commit-journal / atomic
- *   promotion / teardown-safety logic lives in the coordinator — this
- *   handler does NOT touch the filesystem, commit markers, or snapshots.
+ * INCREMENT 6: workbook:save and workbook:write-recovery are migrated here.
+ *   They delegate to coordinator.saveWorkbook()/writeRecovery(). The
+ *   SavePlan translation and WorkbookFile building live in
+ *   sheets-save-adapter.ts (shell-owned conversion boundary).
+ *
+ * INCREMENT 6A: the save handler is now genuinely thin — the 23-field
+ *   SavePlan construction has moved to sheets-save-adapter.ts. The handler
+ *   only does: IPC validation → typed conversion → coordinator call →
+ *   response mapping.
  */
 
 import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
@@ -39,15 +42,10 @@ import {
   workbookMediaRequestSchema,
   workbookMediaResultSchema,
   workbookSaveRequestSchema,
-  type WorkbookSaveRequest,
 } from '../shared/desktop-api'
-import type { SheetsShellCoordinator, ShellWorkbookSession } from './sheets-shell-coordinator'
-import type {
-  EngineRecalcEdit,
-  EngineRecalcRead,
-  SaveRequest,
-  SavePlan,
-} from '@genoffice/runtime-contracts'
+import type { SheetsShellCoordinator } from './sheets-shell-coordinator'
+import type { EngineRecalcEdit, EngineRecalcRead } from '@genoffice/runtime-contracts'
+import { translateSaveRequest, buildWorkbookFile } from './sheets-save-adapter'
 
 // ── Session resolution ──
 
@@ -344,132 +342,10 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
   })
 }
 
-// ── SavePlan translator ──────────────────────────────────────────────
-
-/**
- * Translate the renderer's frozen WorkbookSaveRequest → domain SaveRequest.
- *
- * The SavePlan domain types mirror the WorkbookSaveRequest types (they were
- * designed to match — see save-plan.ts). The mapping is 1:1: every field
- * is passed through with its sheetId intact (the service resolves sheetId →
- * file sheet name internally via session.sheetNames, fail-closed on unknown).
- *
- * This translator does NOT:
- *   - resolve sheetIds to sheetNames (the service does this)
- *   - call xlsx-gateway planning functions (the engine does this internally)
- *   - perform any filesystem operations
- *
- * INCREMENT 6: this replaces the legacy writeWorkbookTo() function in
- * sheets-main.ts, which did extensive sheetId → sheetName resolution before
- * calling saveWorkbookViaSidecar(). The migrated path delegates that
- * resolution to the service layer (SpreadsheetServiceImpl.validateSavePlanSheetIds).
- */
-function translateSaveRequest(request: WorkbookSaveRequest): SaveRequest {
-  // The Zod-validated WorkbookSaveRequest fields are structurally compatible
-  // with the SavePlan domain types (they were designed to mirror each other
-  // — see save-plan.ts header comment). The only difference is `readonly`
-  // modifiers: the domain types use `readonly` on all fields, while Zod's
-  // inferred types are mutable. We bridge this with a double cast through
-  // `unknown` — safe because the Zod schema guarantees the input shape, and
-  // `readonly` is a compile-time-only concern (no runtime effect).
-  const plan = {
-    edits: request.edits,
-    structuralOps: request.structuralOps,
-    formulaValues: request.formulaValues,
-    sheetOps: request.sheetOps,
-    sheetOrder: request.sheetOrder,
-    filterStates: request.filterStates,
-    hyperlinkEdits: request.hyperlinkEdits,
-    cfStates: request.cfStates,
-    dvStates: request.dvStates,
-    pageSetupStates: request.pageSetupStates,
-    noteStates: request.noteStates,
-    sheetProtections: request.sheetProtections,
-    protectedRangeStates: request.protectedRangeStates,
-    visualAdditions: request.visualAdditions,
-    tableAdditions: request.tableAdditions,
-    pivotAdditions: request.pivotAdditions,
-    sparklineAdditions: request.sparklineAdditions,
-    chartEdits: request.chartEdits,
-    visualEdits: request.visualEdits,
-    pivotCacheRefreshPaths: request.pivotCacheRefreshPaths,
-    pivotRefreshUpdates: request.pivotRefreshUpdates,
-    definedNamesState: request.definedNamesState,
-    themeState: request.themeState,
-    workbookProtectionState: request.workbookProtectionState,
-  } as unknown as SavePlan
-  return { plan }
-}
-
-// ── WorkbookFile builder ────────────────────────────────────────────
-
-/**
- * Build the renderer's frozen WorkbookFile from the coordinator's
- * ShellWorkbookSession.
- *
- * After a successful save, the coordinator has replaced the old session with
- * a new one (same sessionId). The replacement session carries the full
- * WorkbookMetadata from engine.open() (which captures the sidecar's open
- * response including styles, dxfStyles, visuals, sheets with columnWidths/
- * tables/comments/pivotRanges, and definedNames with formula+sheetIndex).
- *
- * This function maps the contract metadata to the renderer's WorkbookFile
- * shape, including the fields the preload validates (sessionId, name, path,
- * sha256, entryCount, sheets with columnWidths/tables/comments/pivotRanges,
- * styles, dxfStyles, visuals, definedNames, readOnly, needsSaveAs,
- * restoredFromRecovery, themeColors, themeFonts).
- *
- * INCREMENT 6: after save, needsSaveAs is always false (the file has been
- * saved to its target — no longer needs Save As). restoredFromRecovery is
- * always false (the saved file is a regular file, not a recovery copy).
- */
-function buildWorkbookFile(session: ShellWorkbookSession): unknown {
-  const m = session.metadata
-  // Map contract WorksheetMetadata → renderer's sheet shape.
-  const sheets = m.sheets.map((s) => {
-    const sheet: Record<string, unknown> = {
-      id: s.id,
-      name: s.name,
-      rowCount: s.rowCount,
-      columnCount: s.columnCount,
-      columnWidths: s.columnWidths ?? [],
-      defaultRowHeight: s.defaultRowHeight,
-      defaultColumnWidth: s.defaultColumnWidth,
-      freeze: null,
-      hidden: s.hidden,
-      tabColor: s.tabColor ?? null,
-      showGridLines: s.showGridlines,
-      showFormulas: false,
-      showRowColHeaders: true,
-      tables: s.tables ?? [],
-      comments: s.comments ?? [],
-      pivotRanges: s.pivotRanges ?? [],
-    }
-    return sheet
-  })
-
-  const file: Record<string, unknown> = {
-    sessionId: session.sessionId,
-    name: m.name,
-    path: session.originalPath,
-    // INCREMENT 6: Use the coordinator's diskFingerprint (computed via
-    // sha256File(snapshot)) — NOT metadata.sha256, which comes from the
-    // sidecar's open response and is often empty (the sidecar doesn't
-    // compute sha256 for every open). The renderer's preload validates
-    // sha256 as /^[a-f0-9]{64}$/, so an empty string would fail.
-    sha256: session.diskFingerprint,
-    entryCount: m.entryCount,
-    sheets,
-    activeTab: m.activeTab,
-    styles: m.styles ?? [],
-    dxfStyles: m.dxfStyles ?? [],
-    visuals: m.visuals ?? [],
-    definedNames: m.definedNames,
-    readOnly: false,
-    needsSaveAs: false,
-    restoredFromRecovery: false,
-  }
-  if (m.themeColors.length > 0) file.themeColors = m.themeColors
-  if (m.themeFonts.major || m.themeFonts.minor) file.themeFonts = m.themeFonts
-  return file
-}
+// ── SavePlan translation + WorkbookFile building ────────────────────
+//
+// INCREMENT 6A: the 23-field SavePlan construction and WorkbookFile
+// building have moved to sheets-save-adapter.ts (shell-owned conversion
+// boundary). The handler imports translateSaveRequest() and
+// buildWorkbookFile() from there — this file contains ZERO domain/XLSX
+// translation logic and ZERO type assertions.
