@@ -168,8 +168,10 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     // already validated via workbookRangeResultSchema.parse() before return,
     // so they're not unchecked. This test guards the SAVE path only.)
     const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
-    // Strip JSDoc comments (which may mention these patterns for documentation)
-    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '')
+    // Strip JSDoc/block comments AND line comments
+    const stripped = src
+      .replace(/\/\*\*?[\s\S]*?\*\//g, '') // block comments
+      .replace(/^\s*\/\/.*$/gm, '')          // line comments
     expect(stripped).not.toMatch(/\bas\s+unknown\s+as\b/)
     expect(stripped).not.toMatch(/\bas\s+any\b/)
     expect(stripped).not.toMatch(/\bas\s+never\b/)

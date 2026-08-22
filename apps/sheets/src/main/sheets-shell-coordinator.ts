@@ -622,25 +622,30 @@ export class SheetsShellCoordinator {
   /**
    * Export the workbook to PDF.
    *
-   * The coordinator owns:
-   *   - callerWindow (for save-dialog parenting)
-   *   - save-dialog (user chooses output path)
-   *   - output-path authorization (the user-selected path is authorized)
-   *   - writing the PDF bytes to the authorized path
+   * Returns:
+   *   - { canceled: true } — user canceled the save dialog
+   *   - { canceled: false, path: string } — success, PDF written to path
    *
-   * The PDF renderer (SpreadsheetPdfRenderer) owns only the rendering
-   * context (hidden BrowserWindow + printToPDF + cleanup).
+   * Errors (render failure, filesystem failure) are THROWN — matching the
+   * legacy exportPdf behavior.
+   *
+   * The coordinator owns callerWindow + save dialog + output authorization +
+   * writing the PDF bytes. The PDF renderer (SpreadsheetPdfRenderer) owns
+   * only the rendering context (hidden BrowserWindow + printToPDF + cleanup).
    *
    * SECURITY ORDERING (output authorization):
    *   1. Show save dialog → user selects path (or cancels)
    *   2. If canceled → return { canceled: true }
    *   3. Render HTML → PDF bytes (via the renderer port)
-   *   4. If render fails → return typed error (no file written)
+   *   4. If render fails → throw Error (no file written)
    *   5. Write PDF bytes to the authorized path
    *
-   * The renderer NEVER writes before authorization — the save dialog
-   * runs first, and the render happens AFTER the path is authorized
-   * (so a render failure doesn't leave a partial output file).
+   * INCREMENT 7A: test-only output path override. When the environment
+   * variable `GENOFFICE_PDF_TEST_OUTPATH` is set, the save dialog is
+   * SKIPPED and the env var's value is used as the output path. This
+   * enables deterministic real Electron E2E testing without native
+   * dialog interaction. Production behavior is unchanged when the env
+   * var is absent.
    */
   async exportPdf(
     wcId: number,
@@ -653,21 +658,31 @@ export class SheetsShellCoordinator {
       margins: SpreadsheetPdfOptions['margins']
       scale: number
     },
-  ): Promise<{ canceled: true } | { canceled: false; path: string } | { ok: false; error: string }> {
+  ): Promise<{ canceled: true } | { canceled: false; path: string }> {
     const pdfRenderer = this.deps.pdfRenderer
     if (!pdfRenderer) {
-      return { ok: false, error: 'PDF renderer not available' }
+      throw new Error('PDF renderer not available')
     }
 
-    // 1. Save dialog (caller-window-owned) → authorize output path
-    const dialogOptions = {
-      defaultPath: request.fileName,
-      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    // 1. Authorize output path (save dialog or test override)
+    let outputPath: string
+    const testOutPath = process.env['GENOFFICE_PDF_TEST_OUTPATH']
+    if (testOutPath !== undefined && testOutPath.length > 0) {
+      // Test-only: skip the dialog, use the env var path directly.
+      // This is NOT a security bypass — the env var is set only in test
+      // environments. Production never sets it.
+      outputPath = testOutPath
+    } else {
+      const dialogOptions = {
+        defaultPath: request.fileName,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      }
+      const selection = callerWindow
+        ? await dialog.showSaveDialog(callerWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions)
+      if (selection.canceled || !selection.filePath) return { canceled: true }
+      outputPath = selection.filePath
     }
-    const selection = callerWindow
-      ? await dialog.showSaveDialog(callerWindow, dialogOptions)
-      : await dialog.showSaveDialog(dialogOptions)
-    if (selection.canceled || !selection.filePath) return { canceled: true }
 
     // 2. Render HTML → PDF bytes (renderer owns hidden BrowserWindow)
     const renderResult = await pdfRenderer.renderToPdf(request.html, {
@@ -677,14 +692,14 @@ export class SheetsShellCoordinator {
       scale: request.scale,
     })
 
-    // 3. If render failed → return typed error (NO file written)
+    // 3. If render failed → throw (NO file written)
     if (!renderResult.ok) {
-      return { ok: false, error: renderResult.message }
+      throw new Error(renderResult.message)
     }
 
     // 4. Write PDF bytes to the authorized path
-    await writeFile(selection.filePath, renderResult.data)
-    return { canceled: false, path: selection.filePath }
+    await writeFile(outputPath, renderResult.data)
+    return { canceled: false, path: outputPath }
   }
 
   async teardown(wcId: number): Promise<void> {

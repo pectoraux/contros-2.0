@@ -82,14 +82,21 @@ export class ElectronSpreadsheetPdfRenderer implements SpreadsheetPdfRenderer {
       await withTimeout(window.loadFile(htmlPath), PDF_RENDER_TIMEOUT_MS, 'HTML load timed out')
 
       // 4. printToPDF with the page options (with timeout)
+      // The exactOptionalPropertyTypes: true check requires that we don't
+      // pass `undefined` to optional fields. mapPageSize/mapMargins return
+      // values that are always defined, but TypeScript sees their return
+      // type as `T | undefined` because the Electron type signatures use
+      // optional fields. We construct the object and cast through the
+      // PrintToPDFOptions type — the values are always present at runtime.
+      const pdfOptions: Electron.PrintToPDFOptions = {
+        landscape: options.landscape,
+        pageSize: mapPageSize(options.pageSize) ?? 'A4',
+        margins: mapMargins(options.margins) ?? { marginType: 'default' },
+        scale: options.scale,
+        printBackground: true,
+      }
       const pdf = await withTimeout(
-        window.webContents.printToPDF({
-          landscape: options.landscape,
-          pageSize: mapPageSize(options.pageSize),
-          margins: mapMargins(options.margins),
-          scale: options.scale,
-          printBackground: true,
-        }),
+        window.webContents.printToPDF(pdfOptions),
         PDF_RENDER_TIMEOUT_MS,
         'printToPDF timed out',
       )
@@ -113,23 +120,31 @@ export class ElectronSpreadsheetPdfRenderer implements SpreadsheetPdfRenderer {
 /**
  * Map the contract's page size to Electron's printToPDF pageSize option.
  *
- * Named sizes pass through directly. Custom sizes map to
- * `{ width, height }` in microns (Electron's expectation for custom
- * page sizes — inches × 25400 = microns).
+ * INCREMENT 7A: the legacy exportPdf passes `request.pageSize` directly
+ * to printToPDF without any conversion. The frozen IPC schema defines
+ * custom sizes in inches, but Electron interprets custom sizes as microns.
+ * The legacy code does NOT convert — it passes inches where Electron
+ * expects microns, resulting in tiny pages. We PRESERVE this legacy
+ * behavior (pass through directly) to avoid changing the output
+ * dimensions. The contract's SpreadsheetPdfPageSize type carries the same
+ * union (named | { width, height }) so it flows through without mapping.
  */
 function mapPageSize(
   pageSize: SpreadsheetPdfOptions['pageSize'],
 ): Electron.PrintToPDFOptions['pageSize'] {
+  // Pass through directly — matches legacy behavior.
+  // Named sizes ('A4', 'Letter', etc.) are handled by Electron directly.
+  // Custom sizes { width, height } are passed through as-is — the legacy
+  // code does the same (no inches→microns conversion).
   if (typeof pageSize === 'string') {
     return pageSize
   }
-  // Custom size: inches → microns (1 inch = 25400 microns)
-  return { width: pageSize.width * 25400, height: pageSize.height * 25400 }
+  return { width: pageSize.width, height: pageSize.height }
 }
 
 /**
- * Map the contract's margins (inches) to Electron's printToPDF margins
- * (also in inches — direct match).
+ * Map the contract's margins to Electron's printToPDF margins.
+ * Both are in inches — direct pass-through.
  */
 function mapMargins(
   margins: SpreadsheetPdfMargins,

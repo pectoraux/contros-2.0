@@ -345,13 +345,18 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
   // ── workbook:export-pdf (INCREMENT 7 / ADR-006) ──
   // Migrated from sheets-main.ts:exportPdf(). The handler is a THIN ADAPTER:
   //   1. Validates input via workbookExportPdfRequestSchema (frozen IPC shape)
-  //   2. Resolves callerWindow from event.sender
+  //   2. Resolves callerWindow from event.sender (NOT getFocusedWindow)
   //   3. Calls coordinator.exportPdf(wcId, callerWindow, request)
-  //   4. Maps the result → frozen WorkbookExportPdfResult
+  //   4. Returns the coordinator's PdfExportResult directly (already the
+  //      frozen WorkbookExportPdfResult shape)
   //
   // The coordinator owns callerWindow + save dialog + output authorization +
   // writing the PDF bytes. The PDF renderer (SpreadsheetPdfRenderer, injected
   // into the coordinator) owns the hidden BrowserWindow + printToPDF + cleanup.
+  //
+  // ERROR SEMANTICS (matching legacy exportPdf):
+  //   - User cancellation → { canceled: true } (returned by coordinator)
+  //   - Render/filesystem failure → throws Error (propagates to renderer)
   //
   // This handler does NOT:
   //   - create BrowserWindow
@@ -359,13 +364,19 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
   //   - write PDF files directly
   //   - call getFocusedWindow
   //   - call child_process or node:fs
+  //   - use type assertions (as unknown as, as any, as never)
   ipcMain.removeHandler(IPC_CHANNELS.exportPdf)
   ipcMain.handle(IPC_CHANNELS.exportPdf, async (event, input: unknown) => {
     const wcId = wcIdFromEvent(event)
     const request = workbookExportPdfRequestSchema.parse(input)
     const callerWindow = BrowserWindow.fromWebContents(event.sender) ?? undefined
 
-    const result = await coordinator.exportPdf(wcId, callerWindow, {
+    // The coordinator returns PdfExportResult:
+    //   { canceled: true } | { canceled: false, path: string }
+    // This matches the frozen WorkbookExportPdfResult schema exactly.
+    // Errors (render failure, fs failure) are thrown — the IPC layer
+    // propagates them to the renderer as Error objects.
+    return coordinator.exportPdf(wcId, callerWindow, {
       fileName: request.fileName,
       html: request.html,
       landscape: request.landscape,
@@ -373,18 +384,6 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator): 
       margins: request.margins,
       scale: request.scale,
     })
-
-    // Map the coordinator result → frozen WorkbookExportPdfResult
-    if ('canceled' in result && result.canceled) {
-      return { canceled: true }
-    }
-    if ('ok' in result && !result.ok) {
-      // Render failure — throw so the renderer's catch path sees the error
-      throw new Error(result.error)
-    }
-    // Success — return the output path
-    const path = 'path' in result ? result.path : ''
-    return { canceled: false as const, path }
   })
 }
 

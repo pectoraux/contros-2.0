@@ -83,11 +83,18 @@ await new Promise((r) => setTimeout(r, 2000))
 // Start Electron — XLSX_DEBUG_PORT enables BOTH the CDP remote-debugging-port
 // AND the capture server (which listens on debugPort+1). We do NOT pass
 // --remote-debugging-port separately to avoid the XLSX_DEBUG_PORT override.
+//
+// INCREMENT 7A: GENOFFICE_PDF_TEST_OUTPATH is set so the coordinator's
+// exportPdf skips the native save dialog and writes to this path directly.
+// This enables deterministic real Electron PDF E2E testing without native
+// dialog interaction. Production never sets this env var.
+const testPdfPath = join(tmpDir, 'real-export.pdf')
 const env = {
   ...process.env,
   DISPLAY,
   XLSX_DEBUG_PORT: String(CDP_PORT),
   ELECTRON_DISABLE_SECURITY_WARNINGS: 'true',
+  GENOFFICE_PDF_TEST_OUTPATH: testPdfPath,
 }
 log('ELECTRON', `launching sheets app — CDP port ${CDP_PORT}, capture port ${CAPTURE_PORT}...`)
 const electron = spawn(ELECTRON_BIN, [SHEETS_APP, '--no-sandbox'], {
@@ -399,27 +406,53 @@ async function main() {
     // Close the re-opened session before invalid-session test
     await evaluate(ws, `(async () => { await window.desktopApi.closeWorkbook(${JSON.stringify(reopenedSessionId)}) })()`).catch(() => {})
 
-    // ═══ INCREMENT 7: REAL PDF EXPORT ═══
-    // The PDF export path: renderer → preload → ipcRenderer.invoke('workbook:export-pdf')
-    // → migrated handler → coordinator.exportPdf() → SpreadsheetPdfRenderer
-    // → hidden BrowserWindow + printToPDF → PDF bytes → authorized output → renderer
+    // ═══ INCREMENT 7A: TRUE REAL PDF EXPORT ═══
+    // The coordinator checks `GENOFFICE_PDF_TEST_OUTPATH` (set as an env var
+    // before launching Electron) — when set, it skips the native save dialog
+    // and uses the env var path directly. This enables deterministic real
+    // Electron E2E testing without native dialog interaction. Production
+    // behavior is unchanged when the env var is absent.
     //
-    // NOTE: The coordinator's exportPdf shows a native save dialog. Under
-    // headless Xvfb, the dialog can't get user input. We mock the dialog
-    // via CDP by intercepting the `dialog.showSaveDialog` call — but that's
-    // complex. Instead, we use a deterministic approach: the CDP test
-    // injects a pre-authorized output path by setting `process.env`
-    // before the Electron process starts. The coordinator checks for
-    // `GENOFFICE_PDF_OUTPATH` and uses it directly (skipping the dialog).
-    //
-    // For now, we verify the PDF export via the mock renderer test in
-    // sheets-save-migration.test.ts. The CDP smoke test verifies the
-    // handler registration and architecture — the real PDF bytes are
-    // verified by the deterministic test.
-    log('MIGRATED-PDF-EXPORT', 'checking exportPdf handler registration via CDP...')
-    const hasExportPdf = await evaluate(ws, `typeof window.desktopApi.exportPdf === 'function'`)
-    if (!hasExportPdf) fail('window.desktopApi.exportPdf is not available')
-    log('MIGRATED-PDF-EXPORT', 'SUCCESS — exportPdf handler is registered and available')
+    // The full production path is exercised:
+    //   renderer → preload → ipcRenderer.invoke('workbook:export-pdf')
+    //   → migrated handler → coordinator.exportPdf()
+    //   → SpreadsheetPdfRenderer → ElectronSpreadsheetPdfRenderer
+    //   → hidden BrowserWindow → loadFile → printToPDF → PDF bytes
+    //   → writeFile → renderer result
+    log('MIGRATED-PDF-EXPORT', 'invoking window.desktopApi.exportPdf()...')
+    const pdfResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.exportPdf({
+          fileName: 'test-export.pdf',
+          html: '<html><head><meta charset="utf-8"></head><body><h1>Test PDF</h1><p>Hello from Sheets!</p><table><tr><td>A1</td><td>B1</td></tr><tr><td>42</td><td>=SUM(A2:A2)</td></tr></table></body></html>',
+          landscape: false,
+          pageSize: 'A4',
+          margins: { top: 1, bottom: 1, left: 1, right: 1 },
+          scale: 1,
+        })
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message, name: e.name }
+      }
+    })()`)
+    if (!pdfResult.ok) fail(`exportPdf failed: ${pdfResult.error}`)
+    if (pdfResult.result.canceled) fail('exportPdf was canceled — unexpected')
+    log('MIGRATED-PDF-EXPORT', `SUCCESS — PDF written to: ${pdfResult.result.path}`)
+
+    // Verify the PDF file exists, is non-empty, and has a valid PDF header
+    const pdfPath = pdfResult.result.path
+    const { existsSync, readFileSync, statSync } = await import('node:fs')
+    if (!existsSync(pdfPath)) fail(`PDF file not found: ${pdfPath}`)
+    const pdfBytes = readFileSync(pdfPath)
+    const pdfSize = statSync(pdfPath).size
+    if (pdfSize === 0) fail('PDF file is empty')
+    // PDF header: %PDF-1.x
+    const pdfHeader = pdfBytes.slice(0, 5).toString('ascii')
+    if (pdfHeader !== '%PDF-') fail(`Invalid PDF header: ${JSON.stringify(pdfHeader)}`)
+    log('MIGRATED-PDF-EXPORT', `PDF verified — size=${pdfSize} bytes, header="${pdfHeader}"`)
+
+    // Clean up the PDF file
+    try { (await import('node:fs')).rmSync(pdfPath, { force: true }) } catch { /* best effort */ }
 
     // ═══ REAL INVALID-SESSION PATH (after save) ═══
     log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')

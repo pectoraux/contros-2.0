@@ -163,7 +163,7 @@ describe('Increment 7 — PDF export migration', () => {
       expect(mockRenderer.renderCalls).toBe(0)
     })
 
-    test('render failure returns typed error (no file written)', async () => {
+    test('render failure throws Error (no file written)', async () => {
       const mockRenderer = new MockPdfRenderer()
       mockRenderer.shouldFail = true
       const coordinator = new SheetsShellCoordinator({
@@ -173,19 +173,15 @@ describe('Increment 7 — PDF export migration', () => {
       const outputPath = join(testDir, 'failed.pdf')
       mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: outputPath })
 
-      const result = await coordinator.exportPdf(100, undefined, {
+      await expect(coordinator.exportPdf(100, undefined, {
         fileName: 'test.pdf',
         html: '<html><body>Test</body></html>',
         landscape: false,
         pageSize: 'A4',
         margins: { top: 1, bottom: 1, left: 1, right: 1 },
         scale: 1,
-      })
+      })).rejects.toThrow('Mock render failure')
 
-      expect('ok' in result && result.ok).toBe(false)
-      if ('ok' in result && !result.ok) {
-        expect(result.error).toBe('Mock render failure')
-      }
       // No file was written (render failed before write)
       expect(existsSync(outputPath)).toBe(false)
     })
@@ -227,11 +223,15 @@ describe('Increment 7 — PDF export migration', () => {
       expect(written[3]).toBe(0x46) // F
     })
 
-    test('missing pdfRenderer returns typed error', async () => {
+    test('authorization order: save dialog runs BEFORE render (no render on cancel)', async () => {
+      // Prove the ordering: save dialog → path selected → render → write
+      // If the dialog is canceled, renderToPdf must NEVER be called.
+      const mockRenderer = new MockPdfRenderer()
       const coordinator = new SheetsShellCoordinator({
         service: makeMockService(),
-        // pdfRenderer NOT provided
+        pdfRenderer: mockRenderer,
       })
+      mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: true, filePath: '' })
 
       const result = await coordinator.exportPdf(100, undefined, {
         fileName: 'test.pdf',
@@ -242,10 +242,86 @@ describe('Increment 7 — PDF export migration', () => {
         scale: 1,
       })
 
-      expect('ok' in result && result.ok).toBe(false)
-      if ('ok' in result && !result.ok) {
-        expect(result.error).toMatch(/PDF renderer not available/)
+      // Canceled
+      expect(result).toEqual({ canceled: true })
+      // Render was NEVER called (dialog was canceled before render)
+      expect(mockRenderer.renderCalls).toBe(0)
+    })
+
+    test('authorization order: render failure cannot create a final PDF', async () => {
+      // Prove that a render failure leaves NO partial output file.
+      // The save dialog runs first (authorizing the path), then render
+      // runs, then write. If render fails, write never happens.
+      const mockRenderer = new MockPdfRenderer()
+      mockRenderer.shouldFail = true
+      const coordinator = new SheetsShellCoordinator({
+        service: makeMockService(),
+        pdfRenderer: mockRenderer,
+      })
+      const outputPath = join(testDir, 'no-partial.pdf')
+      mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: outputPath })
+
+      await expect(coordinator.exportPdf(100, undefined, {
+        fileName: 'test.pdf',
+        html: '<html></html>',
+        landscape: false,
+        pageSize: 'A4',
+        margins: { top: 1, bottom: 1, left: 1, right: 1 },
+        scale: 1,
+      })).rejects.toThrow()
+
+      // Render WAS called (dialog succeeded, then render ran and failed)
+      expect(mockRenderer.renderCalls).toBe(1)
+      // But the output file was NEVER created (write never ran)
+      expect(existsSync(outputPath)).toBe(false)
+    })
+
+    test('test-only output path override skips dialog', async () => {
+      const mockRenderer = new MockPdfRenderer()
+      const coordinator = new SheetsShellCoordinator({
+        service: makeMockService(),
+        pdfRenderer: mockRenderer,
+      })
+      const testPath = join(testDir, 'test-override.pdf')
+      const prevEnv = process.env['GENOFFICE_PDF_TEST_OUTPATH']
+      process.env['GENOFFICE_PDF_TEST_OUTPATH'] = testPath
+
+      try {
+        const result = await coordinator.exportPdf(100, undefined, {
+          fileName: 'test.pdf',
+          html: '<html></html>',
+          landscape: false,
+          pageSize: 'A4',
+          margins: { top: 1, bottom: 1, left: 1, right: 1 },
+          scale: 1,
+        })
+
+        // Success — the env var path was used directly (no dialog)
+        expect(result).toEqual({ canceled: false, path: testPath })
+        // The dialog was NOT called
+        expect(mockDialog.showSaveDialog).not.toHaveBeenCalled()
+        // The PDF file exists
+        expect(existsSync(testPath)).toBe(true)
+      } finally {
+        if (prevEnv === undefined) delete process.env['GENOFFICE_PDF_TEST_OUTPATH']
+        else process.env['GENOFFICE_PDF_TEST_OUTPATH'] = prevEnv
       }
+    })
+
+    test('missing pdfRenderer throws Error', async () => {
+      const coordinator = new SheetsShellCoordinator({
+        service: makeMockService(),
+        // pdfRenderer NOT provided
+      })
+
+      await expect(coordinator.exportPdf(100, undefined, {
+        fileName: 'test.pdf',
+        html: '<html></html>',
+        landscape: false,
+        pageSize: 'A4',
+        margins: { top: 1, bottom: 1, left: 1, right: 1 },
+        scale: 1,
+      })).rejects.toThrow(/PDF renderer not available/)
     })
   })
 
