@@ -49,6 +49,13 @@ import type { SheetsShellCoordinator } from './sheets-shell-coordinator'
 import type { EngineRecalcEdit, EngineRecalcRead } from '@genoffice/runtime-contracts'
 import type { ScreenCapture } from '@genoffice/platform'
 import { translateSaveRequest, buildWorkbookFile } from './sheets-save-adapter'
+import {
+  collectAttachments,
+  readAttachmentText,
+  readAttachmentImage,
+  savePastedImage,
+  getAttachmentExtensions,
+} from './sheets-attachment-adapter'
 
 // ── Session resolution ──
 
@@ -428,6 +435,72 @@ export function registerMigratedSheetsIpc(coordinator: SheetsShellCoordinator, s
     if (!screenCapture) throw new Error('Screen capture not available')
     const request = screenCaptureRequestSchema.parse(input)
     return screenCapture.captureSource(request.id)
+  })
+
+  // ── sheets:files-pick (INCREMENT 9) ──
+  // Migrated from sheets-main.ts. Thin adapter:
+  //   1. Opens a file picker (caller-window-owned)
+  //   2. Calls collectAttachments() from sheets-attachment-adapter.ts
+  //   3. Returns frozen AttachmentAddResult | null
+  ipcMain.removeHandler(IPC_CHANNELS.filesPick)
+  ipcMain.handle(IPC_CHANNELS.filesPick, async (event) => {
+    const { dialog } = await import('electron')
+    const callerWindow = BrowserWindow.fromWebContents(event.sender) ?? undefined
+    const exts = getAttachmentExtensions()
+    const selection = callerWindow
+      ? await dialog.showOpenDialog(callerWindow, {
+          properties: ['openFile', 'multiSelections'],
+          filters: [
+            { name: 'Supported', extensions: exts },
+            { name: 'All', extensions: ['*'] },
+          ],
+        })
+      : await dialog.showOpenDialog({
+          properties: ['openFile', 'multiSelections'],
+          filters: [
+            { name: 'Supported', extensions: exts },
+            { name: 'All', extensions: ['*'] },
+          ],
+        })
+    if (selection.canceled || selection.filePaths.length === 0) return null
+    return collectAttachments(selection.filePaths)
+  })
+
+  // ── sheets:files-add (INCREMENT 9) ──
+  // Thin adapter: validates paths, calls collectAttachments()
+  ipcMain.removeHandler(IPC_CHANNELS.filesAdd)
+  ipcMain.handle(IPC_CHANNELS.filesAdd, (_event, paths: unknown) => {
+    const validatedPaths = z.array(z.string().min(1).max(1024)).max(50).parse(paths)
+    return collectAttachments(validatedPaths)
+  })
+
+  // ── sheets:files-read (INCREMENT 9) ──
+  // Thin adapter: validates path, calls readAttachmentText()
+  ipcMain.removeHandler(IPC_CHANNELS.filesRead)
+  ipcMain.handle(
+    IPC_CHANNELS.filesRead,
+    async (_event, filePath: unknown, offset: unknown, maxChars: unknown) => {
+      const validatedPath = z.string().min(1).max(1024).parse(filePath)
+      return readAttachmentText(validatedPath, Number(offset) || 0, Number(maxChars) || 1)
+    },
+  )
+
+  // ── sheets:files-read-image (INCREMENT 9) ──
+  // Thin adapter: validates path, calls readAttachmentImage()
+  ipcMain.removeHandler(IPC_CHANNELS.filesReadImage)
+  ipcMain.handle(IPC_CHANNELS.filesReadImage, (_event, filePath: unknown) => {
+    const validatedPath = z.string().min(1).max(1024).parse(filePath)
+    return readAttachmentImage(validatedPath)
+  })
+
+  // ── sheets:files-add-pasted-image (INCREMENT 9) ──
+  // Thin adapter: validates ext, calls savePastedImage() + collectAttachments()
+  ipcMain.removeHandler(IPC_CHANNELS.filesAddPastedImage)
+  ipcMain.handle(IPC_CHANNELS.filesAddPastedImage, (_event, data: unknown, ext: unknown) => {
+    const filePath = savePastedImage(data, ext)
+    return filePath
+      ? collectAttachments([filePath])
+      : { accepted: [], rejected: ['not an image'] }
   })
 }
 

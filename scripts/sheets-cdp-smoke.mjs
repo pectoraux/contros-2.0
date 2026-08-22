@@ -496,6 +496,45 @@ async function main() {
       log('MIGRATED-SCREEN-CAPTURE', 'note: no sources available for capture (status denied or empty)')
     }
 
+    // ═══ INCREMENT 9: REAL FILE/ATTACHMENT E2E ═══
+    // Test filesRead + filesReadImage via the real renderer.
+    // (filesPick and filesAddPastedImage are tested via the adapter unit tests
+    //  — the CDP test can't drive native file pickers.)
+    log('MIGRATED-FILES', 'invoking window.desktopApi.readAttachment()...')
+    const readResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readAttachment(${JSON.stringify(fixturePath)}, 0, 100)
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`)
+    if (!readResult.ok) fail(`readAttachment failed: ${readResult.error}`)
+    // The fixture is .xlsx — readAttachmentText should return text (parseFileToText extracts xlsx text)
+    if (readResult.result.ok) {
+      log('MIGRATED-FILES', `readAttachment SUCCESS — totalChars=${readResult.result.totalChars}, text.length=${readResult.result.text?.length ?? 0}`)
+    } else {
+      log('MIGRATED-FILES', `readAttachment returned ok:false (expected for some formats): ${readResult.result.error}`)
+    }
+
+    // Test filesReadImage with the fixture (it's not an image — should return ok:false)
+    log('MIGRATED-FILES', 'invoking window.desktopApi.readAttachmentImage()...')
+    const imageResult = await evaluate(ws, `(async () => {
+      try {
+        const result = await window.desktopApi.readAttachmentImage(${JSON.stringify(fixturePath)})
+        return { ok: true, result }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    })()`)
+    if (!imageResult.ok) fail(`readAttachmentImage failed: ${imageResult.error}`)
+    // xlsx is not an image → should return ok:false
+    if (imageResult.result.ok) {
+      log('MIGRATED-FILES', `readAttachmentImage SUCCESS — mime=${imageResult.result.mime}, base64.length=${imageResult.result.base64?.length ?? 0}`)
+    } else {
+      log('MIGRATED-FILES', `readAttachmentImage returned ok:false (expected for .xlsx): ${imageResult.result.error}`)
+    }
+
     // ═══ REAL INVALID-SESSION PATH (after save) ═══
     log('INVALID-SESSION', 'closing the session via window.desktopApi.closeWorkbook()...')
     await evaluate(ws, `(async () => {

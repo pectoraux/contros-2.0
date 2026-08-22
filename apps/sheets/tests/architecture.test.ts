@@ -327,4 +327,48 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-bas
     const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
     expect(stripped).not.toMatch(/^(let|var|const)\s+(activeSource|activeDisplay|currentCapture|activeRenderer|globalCaptureSource)\b/m)
   })
+
+  // ═══ INCREMENT 9 — Files/attachments migration architecture guards ═══
+
+  test('migrated file handlers have ZERO parseFileToText imports', () => {
+    // The parser is used by the attachment adapter, not the handler.
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/parseFileToText/)
+  })
+
+  test('migrated file handlers have ZERO node:fs imports', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/^import.*node:fs/m)
+  })
+
+  test('migrated file handlers delegate to sheets-attachment-adapter', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/from\s+['"]\.\/sheets-attachment-adapter['"]/)
+    expect(src).toMatch(/collectAttachments/)
+    expect(src).toMatch(/readAttachmentText/)
+    expect(src).toMatch(/readAttachmentImage/)
+    expect(src).toMatch(/savePastedImage/)
+  })
+
+  test('migrated file handlers replace legacy handlers', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.filesPick\)/)
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.filesAdd\)/)
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.filesRead\)/)
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.filesReadImage\)/)
+    expect(src).toMatch(/removeHandler\(IPC_CHANNELS\.filesAddPastedImage\)/)
+  })
+
+  test('migrated file handlers have ZERO getFocusedWindow calls', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    expect(src).not.toMatch(/getFocusedWindow\s*\(/)
+  })
+
+  test('migrated file handlers have ZERO global attachment state', () => {
+    const src = readFileSync(join(SRC, 'main', 'sheets-migrated-handlers.ts'), 'utf8')
+    const stripped = src.replace(/\/\*\*?[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(stripped).not.toMatch(/^(let|var|const)\s+(activeAttachment|currentPicker|currentPath|activeFile)\b/m)
+  })
 })
