@@ -5,10 +5,6 @@ import { dirname, join } from 'node:path'
 
 import { z } from 'zod'
 
-import type { WorkbookChartEdit, WorkbookVisualEdit } from '../types.js'
-import type { SheetFilterState } from './xlsx-filter'
-import type { DefinedNamesState } from './xlsx-defined-names'
-import type { SheetPageSetupState } from './xlsx-page-setup'
 import type {
   CellEdit,
   EntrySource,
@@ -16,6 +12,7 @@ import type {
   PivotRefreshUpdate,
   SheetCfState,
   SheetDvState,
+  SheetFilterState,
   SheetHyperlinkEdits,
   SheetNoteState,
   SheetProtectedRangesState,
@@ -26,10 +23,15 @@ import type {
   SheetTableAddition,
   SheetVisualAddition,
   SheetFormulaValues,
-} from './xlsx-gateway'
-import { planCellEditsToXlsx, syncFileBestEffort } from './xlsx-gateway'
-import type { WorkbookThemeState } from './xlsx-theme'
-import type { SheetEditPlan } from './xlsx-sheets'
+  SheetEditPlan,
+  DefinedNamesState,
+  SheetPageSetupState,
+  WorkbookThemeState,
+  WorkbookChartEdit,
+  WorkbookVisualEdit,
+} from '@genoffice/xlsx-gateway'
+import { planCellEditsToXlsx } from '@genoffice/xlsx-gateway'
+import { syncFileBestEffort } from './xlsx-file-ops.js'
 
 /// Mirrors the sidecar's per-entry extraction cap: only entries the gateway
 /// patches must fit in memory — the archive as a whole has no size limit.

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { syncFileBestEffort, writeXlsxAtomically } from '../src/gateway/xlsx-gateway'
+import { syncFileBestEffort, writeXlsxAtomically } from '../src/capabilities/xlsx-file-ops.js'
 
 describe('syncFileBestEffort', () => {
   let directory: string

@@ -1,14 +1,18 @@
 /**
- * Architecture-boundary test for @genoffice/xlsx-gateway.
+ * Architecture-boundary test for @genoffice/xlsx-gateway (Increment 3F).
  *
- * Enforces:
- *   - ZERO imports of electron
- *   - ZERO imports of node:* (except node:crypto, node:fs, node:os, node:path
- *     used by the pure file utilities — these are standard Node builtins,
- *     not Electron-specific)
- *   - ZERO imports of apps/sheets (no upward dependency on the application)
- *   - ZERO imports of @genoffice/platform-electron
- *   - DOES import jszip (the in-memory archive library)
+ * Recursively scans EVERY production source file under packages/xlsx-gateway/src/**
+ * and fails on actual production imports of:
+ *   - node:* (ANY Node builtin — the package must be pure)
+ *   - electron
+ *   - child_process
+ *   - BrowserWindow / WebContents / ipcMain / ipcRenderer
+ *
+ * The test file itself (THIS file) is the ONLY exception — it imports node:fs
+ * and node:path to perform the scan. Test files are NOT production source.
+ *
+ * This test was corrected in Increment 3F — the previous version falsely
+ * reported ZERO Node imports because it did not include a node:* check.
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -72,9 +76,25 @@ function scanForTokens(rootDir: string, forbidden: string[]): Array<{ file: stri
   return hits
 }
 
-describe('@genoffice/xlsx-gateway architecture boundary', () => {
+describe('@genoffice/xlsx-gateway architecture boundary (Increment 3F — pure package)', () => {
+  test('ZERO imports of node:* (the package must be pure — no Node builtins)', () => {
+    const hits = scanForImports(SRC, [/^node:/])
+    if (hits.length > 0) {
+      console.error('Found node:* imports in xlsx-gateway source:')
+      for (const h of hits) {
+        console.error(`  ${h.file}:${h.line}: ${h.text}`)
+      }
+    }
+    expect(hits).toEqual([])
+  })
+
   test('ZERO imports of electron', () => {
     const hits = scanForImports(SRC, ['electron'])
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO imports of child_process', () => {
+    const hits = scanForImports(SRC, ['child_process'])
     expect(hits).toEqual([])
   })
 
@@ -109,8 +129,24 @@ describe('@genoffice/xlsx-gateway architecture boundary', () => {
     expect(hits).toEqual([])
   })
 
+  test('ZERO references to sidecar / ArchiveClient / saveWorkbookViaSidecar (runtime I/O must not be here)', () => {
+    const hits = scanForTokens(SRC, [
+      'ArchiveClient',
+      'saveWorkbookViaSidecar',
+      'readArchiveEntryText',
+      'sidecar',
+    ]).filter((h) => !h.text.startsWith('*') && !h.text.startsWith('//') && !h.text.startsWith('/*'))
+    expect(hits).toEqual([])
+  })
+
   test('DOES import jszip (the in-memory archive library)', () => {
     const hits = scanForImports(SRC, ['jszip'])
     expect(hits.length).toBeGreaterThan(0)
+  })
+
+  test('DOES export planCellEditsToXlsx (the canonical planner)', () => {
+    const gatewayFile = join(SRC, 'gateway', 'xlsx-gateway.ts')
+    const text = readFileSync(gatewayFile, 'utf8')
+    expect(text).toContain('export async function planCellEditsToXlsx')
   })
 })

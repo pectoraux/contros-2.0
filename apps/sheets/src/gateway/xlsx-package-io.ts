@@ -1,1 +1,1 @@
-export * from '@genoffice/xlsx-gateway/src/gateway/xlsx-package-io.js'
+export * from '@genoffice/platform-electron/src/capabilities/xlsx-archive-io.js'

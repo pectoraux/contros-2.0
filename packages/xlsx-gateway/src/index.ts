@@ -1,5 +1,5 @@
 /**
- * @genoffice/xlsx-gateway — canonical XLSX planning implementation.
+ * @genoffice/xlsx-gateway — canonical PURE XLSX planning implementation.
  *
  * This package owns the pure SavePlan → archive-patch translation logic
  * used by both apps/sheets and packages/platform-electron.
@@ -9,11 +9,16 @@
  * produces a MutationPlan (replaced/added/addedBinary/removedEntries/
  * addedEntries/touchedEntries).
  *
- * ZERO Electron imports. ZERO node:* imports (except jszip for the
- * in-memory EntrySource). ZERO apps/sheets imports.
+ * PURITY (Increment 3F):
+ *   ZERO Electron imports. ZERO node:* imports. ZERO apps/sheets imports.
+ *   The package operates only on EntrySource (abstract archive reader),
+ *   Buffers (in-memory), and pure XML/XLSX helpers. Runtime filesystem
+ *   I/O (syncFileBestEffort, writeXlsxAtomically, mutateXlsxFile, sha256)
+ *   and sidecar archive interaction (saveWorkbookViaSidecar, ArchiveClient)
+ *   live in packages/platform-electron/src/capabilities/.
  */
 
-// ── Gateway planning ──
+// ── Gateway planning (pure) ──
 export {
   planCellEditsToXlsx,
   applyPlanToXlsx,
@@ -22,10 +27,6 @@ export {
   assembleWithJsZip,
   readBasicWorkbook,
   inventoryXlsx,
-  mutateXlsxFile,
-  writeXlsxAtomically,
-  syncFileBestEffort,
-  sha256,
   toA1Address,
   assertOnlyTouchedEntriesChanged,
   type CellEdit,
@@ -85,17 +86,6 @@ export type { SheetPageSetupState } from './gateway/xlsx-page-setup.js'
 // ── Theme ──
 export type { WorkbookThemeState } from './gateway/xlsx-theme.js'
 
-// ── Package I/O (sidecar streaming save) ──
-export {
-  saveWorkbookViaSidecar,
-  readArchiveEntryText,
-  assertManifestPreserved,
-  type ArchiveClient,
-  type ArchiveEntry,
-  type StreamingSaveRequest,
-  type StreamingSaveResult,
-} from './gateway/xlsx-package-io.js'
-
 // ── Domain types (used by the gateway) ──
 export type {
   CellScalar,
@@ -125,3 +115,6 @@ export {
 
 // ── Shape types ──
 export { ADDABLE_SHAPE_TYPES, type AddableShapeType } from './shared/shape-types.js'
+
+// ── Pure SHA-256 (for entry inventory hashing — no node:crypto) ──
+export { sha256Hex } from './sha256.js'

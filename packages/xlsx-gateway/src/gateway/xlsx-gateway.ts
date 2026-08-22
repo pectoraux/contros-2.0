@@ -1,8 +1,6 @@
-import { createHash } from 'node:crypto'
-import { open, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-
 import JSZip from 'jszip'
+
+import { sha256Hex } from '../sha256.js'
 
 import type {
   CellState,
@@ -425,7 +423,7 @@ export async function inventoryXlsx(buffer: Buffer): Promise<readonly PackageEnt
     if (totalSize > MAX_UNCOMPRESSED_BYTES) {
       throw new Error('Workbook exceeds the uncompressed size limit.')
     }
-    entries.push({ path, size: bytes.length, sha256: sha256(bytes) })
+    entries.push({ path, size: bytes.length, sha256: sha256Hex(bytes) })
   }
   return entries.sort((left, right) => left.path.localeCompare(right.path))
 }
@@ -1492,66 +1490,11 @@ export function toA1Address(row: number, column: number): string {
   return `${letters}${row + 1}`
 }
 
-/**
- * Flush a freshly written file before it is renamed into place. The handle
- * must be writable — Windows' FlushFileBuffers rejects read-only handles
- * with EPERM (#356) — and the flush is best-effort on top of that: inside
- * cloud-sync folders (OneDrive/Dropbox) or under AV locks, reopening or
- * syncing can still be refused with EPERM/EACCES/EBUSY. The bytes are
- * already written at this point, so a refused flush only weakens crash
- * durability and must not fail the save itself.
- */
-export async function syncFileBestEffort(path: string): Promise<void> {
-  const tolerated = (error: unknown) =>
-    ['EPERM', 'EACCES', 'EBUSY', 'EINVAL', 'ENOSYS'].includes(
-      (error as NodeJS.ErrnoException).code ?? '',
-    )
-  let handle
-  try {
-    handle = await open(path, 'r+')
-  } catch (error: unknown) {
-    if (tolerated(error)) return
-    throw error
-  }
-  try {
-    await handle.sync()
-  } catch (error: unknown) {
-    if (!tolerated(error)) throw error
-  } finally {
-    await handle.close()
-  }
-}
-
-export async function writeXlsxAtomically(path: string, buffer: Buffer): Promise<void> {
-  const temporaryPath = join(dirname(path), `.${crypto.randomUUID()}.tmp.xlsx`)
-  try {
-    await writeFile(temporaryPath, buffer, { flag: 'wx' })
-    await syncFileBestEffort(temporaryPath)
-    await rename(temporaryPath, path)
-  } catch (error: unknown) {
-    await rm(temporaryPath, { force: true })
-    throw error
-  }
-}
-
-export async function mutateXlsxFile(
-  path: string,
-  expectedSha256: string,
-  plan: ChangePlan,
-  sheetNamesById: Readonly<Record<string, string>>,
-): Promise<XlsxMutation> {
-  const source = await readFile(path)
-  if (sha256(source) !== expectedSha256) {
-    throw new Error('The workbook changed on disk after preview.')
-  }
-  const mutation = await applyPlanToXlsx(source, plan, sheetNamesById)
-  await writeXlsxAtomically(path, mutation.buffer)
-  return mutation
-}
-
-export function sha256(input: Buffer | string): string {
-  return createHash('sha256').update(input).digest('hex')
-}
+// NOTE (Increment 3F): The runtime filesystem functions (syncFileBestEffort,
+// writeXlsxAtomically, mutateXlsxFile, sha256) were moved to
+// packages/platform-electron/src/capabilities/xlsx-file-ops.ts because they
+// use node:crypto, node:fs/promises, node:path — the xlsx-gateway package
+// must be pure (ZERO node:* imports).
 
 async function loadSafeZip(buffer: Buffer): Promise<JSZip> {
   const zip = await JSZip.loadAsync(buffer, { checkCRC32: true })
