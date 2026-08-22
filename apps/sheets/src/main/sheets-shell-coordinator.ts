@@ -129,16 +129,23 @@ interface SaveCommitMarker {
   readonly sessionId: string
 }
 
-/** Validate a parsed JSON object as a SaveCommitMarker. Returns null if invalid. */
+/** Type guard: is the value a non-null, non-array object (a record)? */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Validate a parsed JSON value as a SaveCommitMarker.
+ * Uses only runtime type guards — no `as` type assertions.
+ * Returns null if the value is not a valid marker.
+ */
 function validateMarker(raw: unknown): SaveCommitMarker | null {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
-  // Runtime-safe property access — no unchecked type assertions
-  const obj = raw as { version?: unknown; finalTarget?: unknown; tempTarget?: unknown; sessionId?: unknown }
-  if (obj.version !== 1) return null
-  if (typeof obj.finalTarget !== 'string' || obj.finalTarget.length === 0) return null
-  if (typeof obj.tempTarget !== 'string' || obj.tempTarget.length === 0) return null
-  if (typeof obj.sessionId !== 'string' || obj.sessionId.length === 0) return null
-  return { version: 1, finalTarget: obj.finalTarget, tempTarget: obj.tempTarget, sessionId: obj.sessionId }
+  if (!isRecord(raw)) return null
+  if (raw.version !== 1) return null
+  if (typeof raw.finalTarget !== 'string' || raw.finalTarget.length === 0) return null
+  if (typeof raw.tempTarget !== 'string' || raw.tempTarget.length === 0) return null
+  if (typeof raw.sessionId !== 'string' || raw.sessionId.length === 0) return null
+  return { version: 1, finalTarget: raw.finalTarget, tempTarget: raw.tempTarget, sessionId: raw.sessionId }
 }
 
 // ── Coordinator ──
