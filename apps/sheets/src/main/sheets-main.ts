@@ -118,6 +118,8 @@ import { IPC_CHANNELS } from '../shared/ipc-channels'
 import { closeGuardDecision } from './close-guard'
 import { exportPdf } from './pdf-export'
 import { XlsxSidecarClient } from './xlsx-sidecar-client'
+import { initSheetsRuntime } from './sheets-runtime'
+import { registerMigratedSheetsIpc } from './sheets-migrated-handlers'
 
 /**
  * Sheets main-process logic as an embeddable module: no top-level lifecycle.
@@ -1067,6 +1069,22 @@ export function configureSheetsRuntime(config: SheetsRuntimeConfig): void {
 let mainWindow: BrowserWindow | null = null
 let sidecar: XlsxSidecarClient | null = null
 
+/**
+ * The migrated runtime bundle (coordinator-backed). Initialized lazily
+ * on the first createSheetsWindow/createSheetsView call. The migrated
+ * IPC handlers use this coordinator for read-range, read-formulas,
+ * recalc, read-media, and close operations.
+ */
+let migratedRuntime: ReturnType<typeof initSheetsRuntime> | null = null
+
+function getMigratedRuntime(): ReturnType<typeof initSheetsRuntime> {
+  if (!migratedRuntime) {
+    const sidecarPath = resolveSidecarPath()
+    migratedRuntime = initSheetsRuntime({ binaryPath: sidecarPath })
+  }
+  return migratedRuntime
+}
+
 /** the single real BrowserWindow hosting the tab strip, used as dialog parent in tab mode */
 let sheetsShellWindow: BrowserWindow | null = null
 export function setSheetsShellWindow(win: BrowserWindow | null): void {
@@ -1359,6 +1377,8 @@ export async function createSheetsWindow(
   })
   mainWindow = window
   registerSheetsIpc()
+  const { coordinator } = getMigratedRuntime()
+  registerMigratedSheetsIpc(coordinator)
   if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
   if (options.includeAiHandlers ?? true) registerProjectIpc()
   registerSheetsSession(window.webContents, client)
@@ -1406,6 +1426,8 @@ export function createSheetsView(options: { includeAiHandlers?: boolean } = {}):
     },
   })
   registerSheetsIpc()
+  const { coordinator } = getMigratedRuntime()
+  registerMigratedSheetsIpc(coordinator)
   if (options.includeAiHandlers ?? true) registerSheetsAiIpc()
   registerSheetsSession(view.webContents, client)
   view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))

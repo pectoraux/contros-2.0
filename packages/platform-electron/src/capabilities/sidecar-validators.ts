@@ -207,12 +207,14 @@ export function validateFormulaCellsResult(raw: unknown): EngineFormulaCellsResu
 function validateFormulaCell(raw: unknown): EngineFormulaCell {
   if (!isRecord(raw) || !isNumber(raw.row) || !isNumber(raw.column))
     throw new EngineError('Invalid formula cells response: cell', 'PROTOCOL_ERROR')
-  return {
+  const result: EngineFormulaCell = {
     row: raw.row,
     column: raw.column,
     formula: opt(raw.formula, isString) ?? '',
-    cachedValue: opt(raw.cachedValue, isString),
   }
+  const cv = opt(raw.cachedValue, isString)
+  if (cv !== undefined) result.cachedValue = cv
+  return result
 }
 
 // ── Recalc result ─────────────────────────────────────────────────────
@@ -225,14 +227,16 @@ export function validateRecalcResult(raw: unknown): EngineRecalcResult {
 
 function validateRecalcCell(raw: unknown): EngineRecalcCell {
   if (!isRecord(raw)) throw new EngineError('Invalid recalc response: cell', 'PROTOCOL_ERROR')
-  return {
+  const result: EngineRecalcCell = {
     sheetName: opt(raw.sheet, isString) ?? '',
     row: opt(raw.row, isNumber) ?? 0,
     column: opt(raw.column, isNumber) ?? 0,
     formatted: opt(raw.formatted, isString) ?? '',
-    number: opt(raw.number, isNumber),
     isFormula: opt(raw.isFormula, isBoolean) ?? false,
   }
+  const num = opt(raw.number, isNumber)
+  if (num !== undefined) result.number = num
+  return result
 }
 
 // ── Media result ──────────────────────────────────────────────────────

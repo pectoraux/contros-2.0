@@ -16,7 +16,12 @@
     // types go through a local shim (src/types/file-parse.d.ts) while the runtime bundle still uses the real source
     "paths": {
       "@genoffice/file-parse": ["./src/types/file-parse.d.ts"],
-      "@genoffice/docx-engine/math": ["./src/types/docx-engine-math.d.ts"]
+      "@genoffice/docx-engine/math": ["./src/types/docx-engine-math.d.ts"],
+      "@genoffice/services-sheets": ["../../packages/services-sheets/src/index.ts"],
+      "@genoffice/services-sheets/src/spreadsheet-service.js": ["../../packages/services-sheets/src/spreadsheet-service.ts"],
+      "@genoffice/platform-electron": ["../../packages/platform-electron/src/index.ts"],
+      "@genoffice/runtime-contracts": ["../../packages/runtime-contracts/src/index.ts"],
+      "@genoffice/xlsx-gateway": ["../../packages/xlsx-gateway/src/index.ts"]
     }
   },
   "include": [
