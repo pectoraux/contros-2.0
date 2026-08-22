@@ -23,12 +23,32 @@ const rendererBridgeAlias = [
 export default defineConfig({
   // Main and preload use only electron + node builtins; bundle everything so
   // the packaged app doesn't rely on node_modules at runtime.
-  // @genoffice/* deps ship as raw TS source with extensionless imports, so they
-  // must be bundled — externalizing them yields ERR_MODULE_NOT_FOUND under Node
-  // (same setup as apps/slides).
+  // @genoffice/* workspace packages ship TS source (no build step, no
+  // compiled entry point) — externalizing them makes Node's ESM loader try
+  // to resolve their relative imports at runtime and fail (ERR_MODULE_NOT_FOUND
+  // on extensionless .js imports like `./capabilities/electron-storage.js`).
+  // Bundle ALL @genoffice/* deps; externalize everything else (Electron, zod,
+  // node builtins, pdf-lib, etc.). This mirrors the pattern in apps/sheets.
   main: {
     plugins: [
-      externalizeDepsPlugin({ exclude: ['@genoffice/electron-utils', '@genoffice/font-metrics'] }),
+      externalizeDepsPlugin({
+        exclude: [
+          '@genoffice/electron-utils',
+          '@genoffice/font-metrics',
+          '@genoffice/platform-electron',
+          '@genoffice/runtime-contracts',
+          '@genoffice/services-docs',
+          '@genoffice/ai-provider',
+          '@genoffice/ai-search',
+          '@genoffice/agent-core',
+          '@genoffice/docx-engine',
+          '@genoffice/file-parse',
+          '@genoffice/i18n',
+          '@genoffice/project-store',
+          '@genoffice/pptx-render',
+          '@genoffice/ui',
+        ],
+      }),
     ],
     resolve: { alias: localAlias },
   },
