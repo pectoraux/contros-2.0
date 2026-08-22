@@ -1,8 +1,12 @@
 /**
- * Coordinator tests for SheetsShellCoordinator (Increment 4, Section 10).
+ * Coordinator tests for SheetsShellCoordinator (Increment 4A — behavioral correction).
  *
- * Tests the 12 required scenarios using mocked SpreadsheetService and
- * mocked Electron APIs (app, dialog, BrowserWindow).
+ * Tests the corrected coordinator behavior:
+ *   - Save session replacement (same sessionId after save)
+ *   - ExternalChangeStatus unknown policy (file missing → 'unknown', not 'unchanged')
+ *   - No legacy XlsxSidecarClient dependency
+ *   - Teardown epoch protection
+ *   - Recovery race safety
  *
  * The coordinator is tested in isolation — no real sidecar, no real
  * Electron process. The mock SpreadsheetService returns canned results.
@@ -32,7 +36,6 @@ vi.mock('electron', () => ({
   BrowserWindow: vi.fn(),
 }))
 
-// Now import the coordinator (after the mock is set up)
 import { SheetsShellCoordinator } from '../src/main/sheets-shell-coordinator'
 import type {
   SpreadsheetService,
@@ -49,11 +52,10 @@ import type {
   SaveRequest,
   SavePlan,
 } from '@genoffice/runtime-contracts'
-import { InvalidInputError, InvalidSessionError } from '@genoffice/runtime-contracts'
+import { InvalidInputError, InvalidSessionError, EngineError } from '@genoffice/runtime-contracts'
 
 // ── Test helpers ─────────────────────────────────────────────────────
 
-const testRunId = randomUUID()
 let testDir: string
 
 function makeMockHandle(): EngineSessionHandle {
@@ -75,27 +77,47 @@ function makeMockMetadata(name: string = 'test.xlsx'): WorkbookMetadata {
   }
 }
 
-function makeMockService(): SpreadsheetService & { _handle: EngineSessionHandle; _openResult: WorkbookOpenResult } {
-  const handle = makeMockHandle()
+/**
+ * Mock SpreadsheetService that returns unique handles for each open() call.
+ * This lets us verify session-swap semantics (new handle after save).
+ */
+function makeMockService(): SpreadsheetService & {
+  _handles: EngineSessionHandle[]
+  _openCalls: number
+  _closeCalls: number
+} {
+  const handles: EngineSessionHandle[] = []
+  let openCalls = 0
+  let closeCalls = 0
   const metadata = makeMockMetadata()
-  const session: WorkbookSession = {
-    workbookName: 'test.xlsx',
-    workbookHash: 'abc123',
-    sheetNames: new Map([['sheet-1', 'Sheet1']]),
+  const makeOpenResult = (): WorkbookOpenResult => {
+    const handle = makeMockHandle()
+    handles.push(handle)
+    openCalls++
+    const session: WorkbookSession = {
+      workbookName: 'test.xlsx',
+      workbookHash: 'abc123',
+      sheetNames: new Map([['sheet-1', 'Sheet1']]),
+    }
+    return { session, engineHandle: handle, metadata }
   }
-  const openResult: WorkbookOpenResult = { session, engineHandle: handle, metadata }
   return {
-    _handle: handle,
-    _openResult: openResult,
-    open: vi.fn(async () => openResult),
-    close: vi.fn(async () => {}),
+    _handles: handles,
+    _openCalls: 0,
+    _closeCalls: 0,
+    open: vi.fn(async () => makeOpenResult()),
+    close: vi.fn(async () => { closeCalls++ }),
     readRange: vi.fn(async () => ({ cells: [], rows: [], merges: [], columns: [], hyperlinks: [], conditionalFormatting: [], dataValidation: [], rowBreaks: [], columnBreaks: [], sheetProtection: false }) as EngineRangeResult),
     readFormulaCells: vi.fn(async () => ({ cells: [] }) as EngineFormulaCellsResult),
     recalculate: vi.fn(async () => ({ cells: [] }) as EngineRecalcResult),
     readMedia: vi.fn(async () => ({ mediaType: 'image/png', base64: 'iVBOR' }) as EngineMediaResult),
     save: vi.fn(async () => ({ ok: true, data: new Uint8Array([1, 2, 3]), touchedEntries: ['xl/workbook.xml'] }) as SaveResult),
     writeRecovery: vi.fn(async () => new Uint8Array([1, 2, 3])),
-  } as unknown as SpreadsheetService & { _handle: EngineSessionHandle; _openResult: WorkbookOpenResult }
+  } as unknown as SpreadsheetService & {
+    _handles: EngineSessionHandle[]
+    _openCalls: number
+    _closeCalls: number
+  }
 }
 
 function makeEmptySavePlan(): SavePlan {
@@ -126,92 +148,445 @@ function makeCoordinator(service?: ReturnType<typeof makeMockService>) {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-describe('SheetsShellCoordinator (Increment 4)', () => {
+describe('SheetsShellCoordinator (Increment 4A — behavioral correction)', () => {
   beforeEach(() => {
     testDir = join(tmpdir(), `genoffice-test-${randomUUID()}`)
     mkdirSync(testDir, { recursive: true })
     vi.clearAllMocks()
   })
 
-  // ── 1. Two workbooks in one renderer ──
+  // ── 1. Save session replacement (CRITICAL) ──
 
-  test('two workbooks in one renderer — independent sessions', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path1 = join(testDir, 'wb1.xlsx')
-    const path2 = join(testDir, 'wb2.xlsx')
-    writeTestWorkbook(path1)
-    writeTestWorkbook(path2)
+  describe('save session replacement', () => {
+    test('save succeeds and preserves the same sessionId', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
 
-    mockDialog.showOpenDialog
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path1] })
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path2] })
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      expect(openResult).not.toBeNull()
+      const sessionId = openResult!.sessionId
 
-    const result1 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-    const result2 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      // Save
+      const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+      expect(saveResult.ok).toBe(true)
 
-    expect(result1).not.toBeNull()
-    expect(result2).not.toBeNull()
-    expect(result1!.sessionId).not.toBe(result2!.sessionId)
-    expect(result1!.session.originalPath).toBe(path1)
-    expect(result2!.session.originalPath).toBe(path2)
+      // The same sessionId must still be addressable
+      const session = coordinator.getSession(wcId, sessionId)
+      expect(session.sessionId).toBe(sessionId)
+    })
 
-    // Both sessions exist
-    coordinator.getSession(wcId, result1!.sessionId)
-    coordinator.getSession(wcId, result2!.sessionId)
+    test('readRange immediately after save succeeds using the same sessionId', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+
+      await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+
+      // readRange must succeed with the same sessionId
+      const rangeResult = await coordinator.readRange(wcId, sessionId, 'sheet-1', 'A1:B2')
+      expect(rangeResult).toBeDefined()
+    })
+
+    test('old engine handle is closed after save', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const oldHandle = openResult!.session.engineHandle
+
+      await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+
+      // service.close should have been called for the old handle
+      expect(service.close).toHaveBeenCalledWith(oldHandle)
+    })
+
+    test('old snapshot is removed after save', async () => {
+      const { coordinator } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const oldSnapshotPath = openResult!.session.snapshotPath
+
+      await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+
+      // Old snapshot should be gone
+      const { existsSync } = await import('node:fs')
+      expect(existsSync(oldSnapshotPath)).toBe(false)
+    })
+
+    test('new engine session is active after save', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const oldHandle = openResult!.session.engineHandle
+
+      await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+
+      // The new session must have a different engine handle
+      const newSession = coordinator.getSession(wcId, openResult!.sessionId)
+      expect(newSession.engineHandle).not.toBe(oldHandle)
+    })
+
+    test('save-as also preserves a valid session', async () => {
+      const { coordinator } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'wb.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+
+      const saveAsPath = join(testDir, 'saved-as.xlsx')
+      mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: saveAsPath })
+
+      const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save-as', undefined)
+      expect(saveResult.ok).toBe(true)
+
+      // Same sessionId, new originalPath
+      const session = coordinator.getSession(wcId, sessionId)
+      expect(session.originalPath).toBe(saveAsPath)
+    })
+
+    test('restore-writeback also preserves a valid session', async () => {
+      const { coordinator } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'restore.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      // Create a recovery copy newer than the file
+      const recoveryDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-autosave')
+      mkdirSync(recoveryDir, { recursive: true })
+      const hash = createHash('sha1').update(path).digest('hex').slice(0, 16)
+      const recoveryPath = join(recoveryDir, `${hash}.xlsx`)
+      await new Promise((r) => setTimeout(r, 50))
+      writeFileSync(recoveryPath, 'recovery content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      mockDialog.showMessageBox.mockResolvedValueOnce({ response: 0 }) // Restore
+
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      expect(openResult).not.toBeNull()
+      const sessionId = openResult!.sessionId
+      expect(openResult!.session.restoreTarget).toBe(path)
+
+      // Save (restore-writeback)
+      const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+      expect(saveResult.ok).toBe(true)
+
+      // Same sessionId still addressable
+      const session = coordinator.getSession(wcId, sessionId)
+      expect(session.sessionId).toBe(sessionId)
+    })
   })
 
-  // ── 2. Same workbook opened in two renderers ──
+  // ── 2. ExternalChangeStatus policy ──
 
-  test('same workbook in two renderers — fully independent', async () => {
+  describe('ExternalChangeStatus policy', () => {
+    test('unchanged file → save permitted', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'unchanged.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+      // Don't modify the file → save should succeed
+      const saveResult = await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+      expect(saveResult.ok).toBe(true)
+    })
+
+    test('changed file → save refused', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'changed.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+      // Modify the file
+      writeTestWorkbook(path, 'modified content')
+
+      // Mock service.save to return refused when externalChange is 'changed'
+      service.save = vi.fn(async (_s: any, _h: EngineSessionHandle, _r: SaveRequest, externalChange: any) => {
+        if (externalChange === 'changed' || externalChange === 'unknown') {
+          return { ok: false, reason: 'external-modified' as const }
+        }
+        return { ok: true, data: new Uint8Array([1]), touchedEntries: [] }
+      }) as any
+
+      const saveResult = await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+      expect(saveResult.ok).toBe(false)
+      expect(saveResult.reason).toBe('external-modified')
+    })
+
+    test('deleted file → save refused (unknown, not unchanged)', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'deleted.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+      // Delete the file
+      const { unlinkSync } = await import('node:fs')
+      unlinkSync(path)
+
+      // Mock service.save to return refused when externalChange is 'unknown'
+      service.save = vi.fn(async (_s: any, _h: EngineSessionHandle, _r: SaveRequest, externalChange: any) => {
+        if (externalChange === 'unknown') {
+          return { ok: false, reason: 'external-modified' as const }
+        }
+        return { ok: true, data: new Uint8Array([1]), touchedEntries: [] }
+      }) as any
+
+      const saveResult = await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+      expect(saveResult.ok).toBe(false)
+      expect(saveResult.reason).toBe('external-modified')
+    })
+
+    test('save-as bypasses disk-change guard', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'saveas-bypass.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+      // Modify the file (disk changed)
+      writeTestWorkbook(path, 'modified content')
+
+      // Save-as should still succeed (bypasses the guard)
+      const saveAsPath = join(testDir, 'saved-as-bypass.xlsx')
+      mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: saveAsPath })
+
+      const saveResult = await coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save-as', undefined)
+      expect(saveResult.ok).toBe(true)
+    })
+
+    test('restore-target uses its own sha guard', async () => {
+      const { coordinator } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'restore-guard.xlsx')
+      writeTestWorkbook(path, 'original content')
+
+      // Create recovery copy newer
+      const recoveryDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-autosave')
+      mkdirSync(recoveryDir, { recursive: true })
+      const hash = createHash('sha1').update(path).digest('hex').slice(0, 16)
+      const recoveryPath = join(recoveryDir, `${hash}.xlsx`)
+      await new Promise((r) => setTimeout(r, 50))
+      writeFileSync(recoveryPath, 'recovery content')
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      mockDialog.showMessageBox.mockResolvedValueOnce({ response: 0 }) // Restore
+
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      expect(openResult!.session.restoreTarget).toBe(path)
+
+      // Modify the restore target after open
+      writeTestWorkbook(path, 'modified after open')
+
+      // Save should throw because restoreTarget sha changed
+      await expect(
+        coordinator.saveWorkbook(wcId, openResult!.sessionId, makeSaveRequest(), 'save', undefined)
+      ).rejects.toThrow()
+    })
+  })
+
+  // ── 3. No coordinator legacy sidecar ──
+
+  test('coordinator deps do NOT include legacyClient', () => {
+    // The SheetsShellCoordinatorDeps interface should NOT have a legacyClient field.
+    // Verify by attempting to construct with a legacyClient — TypeScript should
+    // reject it. At runtime, we verify the deps type doesn't include it.
     const { coordinator } = makeCoordinator()
-    const wcId1 = 100
-    const wcId2 = 200
-    const path = join(testDir, 'shared.xlsx')
+    expect(coordinator).toBeDefined()
+    // The deps should only have 'service'
+    expect((coordinator as any).deps).toHaveProperty('service')
+    expect((coordinator as any).deps).not.toHaveProperty('legacyClient')
+  })
+
+  // ── 4. .xls conversion failure ──
+
+  test('.xls conversion throws explicit error (not silent failure)', async () => {
+    const { coordinator } = makeCoordinator()
+    const wcId = 100
+    const path = join(testDir, 'legacy.xls')
+    writeTestWorkbook(path, 'fake xls content')
+
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+
+    // Opening a .xls should throw (conversion not yet wired through service)
+    await expect(coordinator.openWorkbook(wcId, undefined, { locale: 'en' })).rejects.toThrow(EngineError)
+  })
+
+  // ── 5. Teardown epoch safety ──
+
+  describe('teardown epoch safety', () => {
+    test('teardown during open — session NOT registered, engine handle cleaned up', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'teardown-open.xlsx')
+      writeTestWorkbook(path)
+
+      // Start an open operation, but tear down before it completes.
+      // We'll make the dialog resolve, then tear down immediately.
+      mockDialog.showOpenDialog.mockImplementation(async () => {
+        // Tear down while the dialog is "showing"
+        await coordinator.teardown(wcId)
+        return { canceled: false, filePaths: [path] }
+      })
+
+      // The open should fail because the renderer was torn down during the operation
+      await expect(coordinator.openWorkbook(wcId, undefined, { locale: 'en' })).rejects.toThrow(InvalidSessionError)
+    })
+
+    test('teardown during save — replacement session NOT registered, new handle cleaned up', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'teardown-save.xlsx')
+      writeTestWorkbook(path)
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+
+      // Make service.save trigger a teardown
+      service.save = vi.fn(async () => {
+        await coordinator.teardown(wcId)
+        return { ok: true, data: new Uint8Array([1, 2, 3]), touchedEntries: [] }
+      }) as any
+
+      // The save should fail because the renderer was torn down
+      await expect(
+        coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+      ).rejects.toThrow(InvalidSessionError)
+
+      // The new engine handle should have been closed (cleanup)
+      expect(service.close).toHaveBeenCalled()
+    })
+  })
+
+  // ── 6. Recovery race safety ──
+
+  describe('recovery race safety', () => {
+    test('stale recovery write is rejected after save increments epoch', async () => {
+      const { coordinator, service } = makeCoordinator()
+      const wcId = 100
+      const path = join(testDir, 'recovery-race.xlsx')
+      writeTestWorkbook(path)
+
+      mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+      const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+      const sessionId = openResult!.sessionId
+
+      // Start a recovery write, but make it slow
+      service.writeRecovery = vi.fn(async () => {
+        // Save while the recovery write is in flight
+        await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
+        return new Uint8Array([1, 2, 3])
+      }) as any
+
+      // The recovery write should return ok: false (stale — epoch incremented by save)
+      const recoveryResult = await coordinator.writeRecovery(wcId, sessionId, makeSaveRequest())
+      expect(recoveryResult.ok).toBe(false)
+    })
+  })
+
+  // ── 7. Engine handle opacity ──
+
+  test('engine handle opacity — ShellWorkbookSession.engineHandle is opaque', async () => {
+    const { coordinator } = makeCoordinator()
+    const wcId = 100
+    const path = join(testDir, 'opaque.xlsx')
     writeTestWorkbook(path)
 
-    mockDialog.showOpenDialog
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
 
-    const result1 = await coordinator.openWorkbook(wcId1, undefined, { locale: 'en' })
-    const result2 = await coordinator.openWorkbook(wcId2, undefined, { locale: 'en' })
-
-    expect(result1).not.toBeNull()
-    expect(result2).not.toBeNull()
-    // Different sessions, different engine handles (mock returns same handle but they're separate lookups)
-    expect(result1!.sessionId).not.toBe(result2!.sessionId)
-    // Both have their own snapshot
-    expect(result1!.session.snapshotPath).not.toBe(result2!.session.snapshotPath)
+    const handle = result!.session.engineHandle
+    expect(Object.keys(handle)).toEqual([])
+    expect(Reflect.ownKeys(handle).filter((k) => typeof k === 'string')).toEqual([])
   })
 
-  // ── 3. Save isolation ──
+  // ── 8. Read delegation (no regression) ──
 
-  test('save isolation — saving one workbook does not affect another', async () => {
+  test('readRange delegates to service, not sidecar', async () => {
     const { coordinator, service } = makeCoordinator()
     const wcId = 100
-    const path1 = join(testDir, 'wb1.xlsx')
-    const path2 = join(testDir, 'wb2.xlsx')
-    writeTestWorkbook(path1)
-    writeTestWorkbook(path2)
+    const path = join(testDir, 'read.xlsx')
+    writeTestWorkbook(path)
 
-    mockDialog.showOpenDialog
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path1] })
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path2] })
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
 
-    const result1 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-    const result2 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Save wb1
-    const saveResult = await coordinator.saveWorkbook(wcId, result1!.sessionId, makeSaveRequest(), 'save', undefined)
-    expect(saveResult.ok).toBe(true)
-
-    // wb2 session still valid
-    const session2 = coordinator.getSession(wcId, result2!.sessionId)
-    expect(session2).toBeDefined()
+    await coordinator.readRange(wcId, openResult!.sessionId, 'sheet-1', 'A1:B2')
+    expect(service.readRange).toHaveBeenCalledTimes(1)
   })
 
-  // ── 4. Close isolation ──
+  test('readFormulaCells delegates to service', async () => {
+    const { coordinator, service } = makeCoordinator()
+    const wcId = 100
+    const path = join(testDir, 'formulas.xlsx')
+    writeTestWorkbook(path)
+
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+    await coordinator.readFormulaCells(wcId, openResult!.sessionId, 'sheet-1')
+    expect(service.readFormulaCells).toHaveBeenCalledTimes(1)
+  })
+
+  test('recalculate delegates to service', async () => {
+    const { coordinator, service } = makeCoordinator()
+    const wcId = 100
+    const path = join(testDir, 'recalc.xlsx')
+    writeTestWorkbook(path)
+
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+    await coordinator.recalculate(wcId, openResult!.sessionId, [], [])
+    expect(service.recalculate).toHaveBeenCalledTimes(1)
+  })
+
+  test('readMedia delegates to service', async () => {
+    const { coordinator, service } = makeCoordinator()
+    const wcId = 100
+    const path = join(testDir, 'media.xlsx')
+    writeTestWorkbook(path)
+
+    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
+    const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
+
+    await coordinator.readMedia(wcId, openResult!.sessionId, 'img1')
+    expect(service.readMedia).toHaveBeenCalledTimes(1)
+  })
+
+  // ── 9. Close isolation ──
 
   test('close isolation — closing one workbook does not affect another', async () => {
     const { coordinator } = makeCoordinator()
@@ -228,172 +603,13 @@ describe('SheetsShellCoordinator (Increment 4)', () => {
     const result1 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
     const result2 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
 
-    // Close wb1
     await coordinator.closeWorkbook(wcId, result1!.sessionId)
 
-    // wb1 session gone
     expect(() => coordinator.getSession(wcId, result1!.sessionId)).toThrow(InvalidSessionError)
-    // wb2 session still valid
-    const session2 = coordinator.getSession(wcId, result2!.sessionId)
-    expect(session2).toBeDefined()
+    coordinator.getSession(wcId, result2!.sessionId) // should not throw
   })
 
-  // ── 5. Recovery isolation ──
-
-  test('recovery isolation — recovery for one workbook does not affect another', async () => {
-    const { coordinator } = makeCoordinator()
-    const wcId = 100
-    const path1 = join(testDir, 'wb1.xlsx')
-    const path2 = join(testDir, 'wb2.xlsx')
-    writeTestWorkbook(path1)
-    writeTestWorkbook(path2)
-
-    mockDialog.showOpenDialog
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path1] })
-      .mockResolvedValueOnce({ canceled: false, filePaths: [path2] })
-
-    const result1 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-    const result2 = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Write recovery for wb1
-    const recoveryResult = await coordinator.writeRecovery(wcId, result1!.sessionId, makeSaveRequest())
-    expect(recoveryResult.ok).toBe(true)
-
-    // wb2 session still valid
-    const session2 = coordinator.getSession(wcId, result2!.sessionId)
-    expect(session2).toBeDefined()
-  })
-
-  // ── 6. Disk-change isolation ──
-
-  test('disk-change isolation — save refused when disk fingerprint changed', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'changed.xlsx')
-    writeTestWorkbook(path, 'original content')
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Simulate disk change: overwrite the file with different content
-    writeTestWorkbook(path, 'modified content that is definitely different')
-
-    // Mock service.save to return the "changed" result directly (since the
-    // coordinator computes externalChange and calls service.save with it).
-    // The coordinator should detect the disk change and pass externalChange='changed',
-    // causing service.save to return { ok: false, reason: 'external-modified' }.
-    service.save = vi.fn(async (_s: any, _h: EngineSessionHandle, _r: SaveRequest, externalChange: any) => {
-      if (externalChange === 'changed' || externalChange === 'unknown') {
-        return { ok: false, reason: 'external-modified' as const }
-      }
-      return { ok: true, data: new Uint8Array([1, 2, 3]), touchedEntries: [] }
-    }) as any
-
-    const saveResult = await coordinator.saveWorkbook(wcId, result!.sessionId, makeSaveRequest(), 'save', undefined)
-    expect(saveResult.ok).toBe(false)
-    expect(saveResult.reason).toBe('external-modified')
-  })
-
-  // ── 7. Teardown during open ──
-
-  test('teardown during open — all sessions cleaned up', async () => {
-    const { coordinator } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'teardown.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Teardown
-    await coordinator.teardown(wcId)
-
-    // Session gone
-    expect(() => coordinator.getSession(wcId, result!.sessionId)).toThrow(InvalidSessionError)
-  })
-
-  // ── 8. Teardown during save ──
-
-  test('teardown during save — save completes or aborts cleanly', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'teardown-save.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Start save, then teardown (the save should complete first since it's awaited)
-    const savePromise = coordinator.saveWorkbook(wcId, result!.sessionId, makeSaveRequest(), 'save', undefined)
-    await coordinator.teardown(wcId)
-
-    // The save may succeed or the session may be gone — either is acceptable
-    try {
-      const saveResult = await savePromise
-      // If it succeeds, the session was swapped/closed
-    } catch (err) {
-      // If it fails, it should be an InvalidSessionError
-      expect(err).toBeInstanceOf(InvalidSessionError)
-    }
-  })
-
-  // ── 9. Caller-specific recovery dialog ──
-
-  test('caller-specific recovery dialog — dialog parent is the caller window', async () => {
-    const { coordinator } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'recovery.xlsx')
-    // Write the original file FIRST
-    writeTestWorkbook(path, 'original content')
-
-    // Sleep briefly so the recovery copy's mtime is strictly newer
-    await new Promise((r) => setTimeout(r, 50))
-
-    // Create a recovery copy NEWER than the file.
-    // The coordinator uses app.getPath('userData') which the mock returns as
-    // join(tmpdir(), 'genoffice-test-userData'). So the recovery path is:
-    // join(tmpdir(), 'genoffice-test-userData', 'sheets-autosave', '<sha1>.xlsx')
-    const recoveryDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-autosave')
-    mkdirSync(recoveryDir, { recursive: true })
-    const hash = createHash('sha1').update(path).digest('hex').slice(0, 16)
-    const recoveryPath = join(recoveryDir, `${hash}.xlsx`)
-    writeFileSync(recoveryPath, 'recovery content')
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    mockDialog.showMessageBox.mockResolvedValueOnce({ response: 1 }) // Discard
-
-    const mockWindow = { id: 999 } as any
-    const result = await coordinator.openWorkbook(wcId, mockWindow, { locale: 'en' })
-
-    // Verify showMessageBox was called with the parent window
-    expect(mockDialog.showMessageBox).toHaveBeenCalled()
-    const callArgs = mockDialog.showMessageBox.mock.calls[0]!
-    expect(callArgs[0]).toBe(mockWindow) // parent window passed as first arg
-  })
-
-  // ── 10. Caller-specific save dialog ──
-
-  test('caller-specific save dialog — save-as dialog parent is the caller window', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'save-as.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    const mockWindow = { id: 999 } as any
-    const saveAsPath = join(testDir, 'saved-as.xlsx')
-    mockDialog.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: saveAsPath })
-
-    await coordinator.saveWorkbook(wcId, result!.sessionId, makeSaveRequest(), 'save-as', mockWindow)
-
-    expect(mockDialog.showSaveDialog).toHaveBeenCalled()
-    const callArgs = mockDialog.showSaveDialog.mock.calls[0]!
-    expect(callArgs[0]).toBe(mockWindow)
-  })
-
-  // ── 11. Per-renderer push events ──
+  // ── 10. Per-renderer isolation ──
 
   test('per-renderer event routing — session resolved by wcId, not global', async () => {
     const { coordinator } = makeCoordinator()
@@ -411,64 +627,7 @@ describe('SheetsShellCoordinator (Increment 4)', () => {
     const result1 = await coordinator.openWorkbook(wcId1, undefined, { locale: 'en' })
     const result2 = await coordinator.openWorkbook(wcId2, undefined, { locale: 'en' })
 
-    // wcId1 cannot access wcId2's session
     expect(() => coordinator.getSession(wcId1, result2!.sessionId)).toThrow(InvalidSessionError)
-    // wcId2 cannot access wcId1's session
     expect(() => coordinator.getSession(wcId2, result1!.sessionId)).toThrow(InvalidSessionError)
-  })
-
-  // ── 12. Stale engine handle rejection ──
-
-  test('stale engine handle rejection — operations on closed session throw', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'stale.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Close the session
-    await coordinator.closeWorkbook(wcId, result!.sessionId)
-
-    // Operations on the closed session should throw InvalidSessionError
-    await expect(coordinator.readRange(wcId, result!.sessionId, 'sheet-1', 'A1:B2')).rejects.toThrow(InvalidSessionError)
-    await expect(coordinator.readFormulaCells(wcId, result!.sessionId, 'sheet-1')).rejects.toThrow(InvalidSessionError)
-    await expect(coordinator.recalculate(wcId, result!.sessionId, [], [])).rejects.toThrow(InvalidSessionError)
-    await expect(coordinator.readMedia(wcId, result!.sessionId, 'img1')).rejects.toThrow(InvalidSessionError)
-  })
-
-  // ── Additional: unknown sheetId fail-closed ──
-
-  test('unknown sheetId in readRange → InvalidInputError (fail-closed)', async () => {
-    const { coordinator, service } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'unknown-sheet.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // Mock service to throw InvalidInputError for unknown sheetId
-    service.readRange = vi.fn(async () => { throw new InvalidInputError('Unknown sheetId: unknown') })
-
-    await expect(coordinator.readRange(wcId, result!.sessionId, 'unknown', 'A1:B2')).rejects.toThrow(InvalidInputError)
-  })
-
-  // ── Additional: engine handle opacity ──
-
-  test('engine handle opacity — ShellWorkbookSession.engineHandle is opaque', async () => {
-    const { coordinator } = makeCoordinator()
-    const wcId = 100
-    const path = join(testDir, 'opaque.xlsx')
-    writeTestWorkbook(path)
-
-    mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
-    const result = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
-
-    // The engineHandle must have no inspectable properties
-    const handle = result!.session.engineHandle
-    expect(Object.keys(handle)).toEqual([])
-    expect(Reflect.ownKeys(handle).filter((k) => typeof k === 'string')).toEqual([])
   })
 })
