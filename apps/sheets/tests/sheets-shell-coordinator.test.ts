@@ -1,16 +1,18 @@
 /**
- * Coordinator tests for Increment 4I — actual startup reconciliation + true save/reconcile test.
+ * Coordinator tests for Increment 4J — shell startup reconciliation + true save-crash test.
  *
  * Tests:
- *   1. Startup reconciliation wired: index.ts calls reconcileSheetsSaveCommits
- *   2. Real save→reconcile: save writes marker, barrier pauses, verify file at production path, simulate crash, reconcile cleans
- *   3. Marker validation: zero `as` type assertions (architecture test)
- *   4. Manual marker unit tests (retained)
- *   5. Teardown before/during commit (retained)
+ *   1. Shell startup reconciliation: source inspection proves shell calls reconcileSheetsSaveCommits
+ *   2. Standalone startup reconciliation: source inspection proves index.ts calls it
+ *   3. REAL save→reconcile: save writes marker via production path, barrier pauses,
+ *      verify marker at production path, simulate crash, reconcile, verify cleanup
+ *   4. Manual reconciliation tests (crash before/after rename)
+ *   5. Marker validation (zero type assertions)
+ *   6. Teardown before/during commit
  *   Plus all regression tests.
  */
 import { describe, test, expect, vi, beforeEach } from 'vitest'
-import { writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
@@ -66,215 +68,108 @@ function makeEmptySavePlan(): SavePlan {
 }
 function makeSaveRequest(): SaveRequest { return { plan: makeEmptySavePlan() } }
 function writeTestWorkbook(path: string, content = 'test xlsx content'): void { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, content) }
-function makeCoordinator(service?: ReturnType<typeof makeMockService>, onCommitGate?: (sid: string) => Promise<void>) {
+function makeCoordinator(service?: ReturnType<typeof makeMockService>, opts?: { onCommitGate?: (sid: string) => Promise<void>; onMarkerWritten?: (markerPath: string, sid: string) => Promise<void> }) {
   const s = service ?? makeMockService()
-  const deps: { service: SpreadsheetService; onCommitGate?: (sid: string) => Promise<void> } = { service: s }
-  if (onCommitGate) deps.onCommitGate = onCommitGate
+  const deps: { service: SpreadsheetService; onCommitGate?: (sid: string) => Promise<void>; onMarkerWritten?: (mp: string, sid: string) => Promise<void> } = { service: s }
+  if (opts?.onCommitGate) deps.onCommitGate = opts.onCommitGate
+  if (opts?.onMarkerWritten) deps.onMarkerWritten = opts.onMarkerWritten
   return { coordinator: new SheetsShellCoordinator(deps), service: s }
 }
 
-describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile)', () => {
+describe('SheetsShellCoordinator (Increment 4J — shell startup + true save-crash)', () => {
   beforeEach(() => { testDir = join(tmpdir(), `genoffice-test-${randomUUID()}`); mkdirSync(testDir, { recursive: true }); vi.clearAllMocks() })
 
-  // ═══ 1. Startup reconciliation wired ═══
+  // ═══ 1. Shell startup reconciliation ═══
 
   describe('startup reconciliation wired', () => {
-    test('index.ts calls reconcileSheetsSaveCommits before startSheetsStandalone', async () => {
-      // Source inspection: verify index.ts imports and calls reconcileSheetsSaveCommits
-      const indexSource = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
-      expect(indexSource).toContain('reconcileSheetsSaveCommits')
-      expect(indexSource).toContain('startSheetsStandalone')
-      // Verify reconciliation is called BEFORE startSheetsStandalone
-      const reconcilePos = indexSource.indexOf('reconcileSheetsSaveCommits')
-      const startStandalonePos = indexSource.indexOf('startSheetsStandalone', reconcilePos)
+    test('standalone index.ts calls reconcileSheetsSaveCommits before startSheetsStandalone', async () => {
+      const source = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+      expect(source).toContain('reconcileSheetsSaveCommits')
+      expect(source).toContain('startSheetsStandalone')
+      const reconcilePos = source.indexOf('reconcileSheetsSaveCommits')
+      const startStandalonePos = source.indexOf('startSheetsStandalone', reconcilePos)
       expect(startStandalonePos).toBeGreaterThan(reconcilePos)
-      // Verify it's awaited
-      expect(indexSource).toContain('await reconcileSheetsSaveCommits()')
+      expect(source).toContain('await reconcileSheetsSaveCommits()')
+    })
+
+    test('shell index.ts imports and calls reconcileSheetsSaveCommits', async () => {
+      const shellSource = readFileSync(join(__dirname, '..', '..', 'shell', 'src', 'main', 'index.ts'), 'utf8')
+      expect(shellSource).toContain('reconcileSheetsSaveCommits')
+      expect(shellSource).toContain('await reconcileSheetsSaveCommits()')
     })
 
     test('reconcileSheetsSaveCommits is callable and idempotent', async () => {
       await reconcileSheetsSaveCommits()
       await reconcileSheetsSaveCommits()
     })
-
-    test('reconcileSheetsSaveCommits cleans up leftover markers', async () => {
-      const commitDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      const tempPath = join(testDir, 'leftover.xlsx')
-      writeTestWorkbook(tempPath, 'temp')
-      writeFileSync(join(commitDir, 'leftover.json'), JSON.stringify({ version: 1, finalTarget: join(testDir, 'final.xlsx'), tempTarget: tempPath, sessionId: 'leftover' }))
-      await reconcileSheetsSaveCommits()
-      expect(existsSync(join(commitDir, 'leftover.json'))).toBe(false)
-      expect(existsSync(tempPath)).toBe(false)
-    })
   })
 
-  // ═══ 2. Real save→reconcile integration test ═══
+  // ═══ 2. REAL save→reconcile (production path, NOT manually constructed marker) ═══
 
-  describe('real save→reconcile integration', () => {
-    test('save writes marker to production path, crash leaves marker, reconcile discovers and cleans', async () => {
-      const { coordinator, service } = makeCoordinator()
+  describe('real save→reconcile (production path)', () => {
+    test('save writes marker via production path → barrier pauses → verify marker at production path → simulate crash → reconcile cleans', async () => {
+      const { coordinator, service } = makeCoordinator(undefined, {
+        onMarkerWritten: async (markerPath: string, sid: string) => {
+          // At this point, the marker has been written by the PRODUCTION save path.
+          // Verify it exists at the EXACT production path.
+          expect(existsSync(markerPath)).toBe(true)
 
-      // We need to intercept the save flow AFTER the marker is written
-      // but BEFORE it's cleared (i.e., simulate a crash between marker
-      // write and marker clear).
-      //
-      // Strategy: use a commit gate that fires AFTER the save enters
-      // COMMITTING. The marker is written INSIDE the try block AFTER
-      // the gate. We need a barrier AFTER the marker write.
-      //
-      // The save flow is:
-      //   setCommitState(COMMITTING)
-      //   → onCommitGate(sessionId)   ← our barrier
-      //   → try { writeFile(marker)   ← marker created
-      //          rename(temp, final)  ← rename
-      //          install replacement
-      //          rm(marker)           ← marker cleared
-      //   }
-      //
-      // To test "crash after marker write", we need to pause BETWEEN
-      // writeFile(marker) and rm(marker). We can do this by making
-      // rename FAIL — which throws, leaving the marker behind.
-      //
-      // But rename failure means the save fails. That's fine — we
-      // want to test the crash/reconcile path, not the success path.
-      //
-      // Alternative: make the save succeed but intercept the marker
-      // clear (rm) to fail. But rm failures are hard to simulate.
-      //
-      // Best approach: make rename fail so the marker is left behind.
-      // The save will throw, the marker will remain on disk.
-      // Then we call reconcile and verify it's cleaned.
+          // Verify the marker was written by the production save (not manually):
+          // it should contain the sessionId, finalTarget, and tempTarget.
+          const markerContent = JSON.parse(readFileSync(markerPath, 'utf8'))
+          expect(markerContent.version).toBe(1)
+          expect(markerContent.sessionId).toBe(sid)
+          expect(typeof markerContent.finalTarget).toBe('string')
+          expect(markerContent.finalTarget.length).toBeGreaterThan(0)
+          expect(typeof markerContent.tempTarget).toBe('string')
+          expect(markerContent.tempTarget.length).toBeGreaterThan(0)
 
-      // To make rename fail, we can point targetPath to a non-existent
-      // directory. But writeFile to the temp target (in the same dir)
-      // would also fail. So we need the targetPath's parent to exist
-      // but be unwritable for rename.
-      //
-      // Actually, the simplest approach: mock the `rename` function.
-      // But we can't easily mock node:fs/promises in vitest without
-      // hoisting issues.
-      //
-      // Alternative: use the commit gate to pause the save, then
-      // manually check for the marker (which hasn't been written yet
-      // because the gate fires BEFORE the try block).
-      //
-      // Wait — let me re-read the save flow:
-      //   setCommitState(COMMITTING)
-      //   → onCommitGate(sessionId)      ← FIRST barrier
-      //   → try {
-      //       writeFile(marker)           ← marker written
-      //       rename(temp, final)         ← rename
-      //       install replacement
-      //       rm(marker)                  ← marker cleared
-      //     }
-      //
-      // The gate is BEFORE the try block. So the marker doesn't exist
-      // at the gate. I need a SECOND barrier AFTER the marker write.
-      //
-      // Since I can't add a second barrier without modifying the
-      // coordinator, let me use a different approach:
-      //
-      // 1. Do a successful save (marker written + cleared normally)
-      // 2. After save, re-create the marker at the SAME path with the
-      //    SAME sessionId (simulating a crash)
-      // 3. But this is "manually creating the marker" which the PA
-      //    said NOT to do.
-      //
-      // OK, let me think differently. The real test is:
-      // - Can I make the save flow leave a marker on disk?
-      // - Yes: make rename fail.
-      //
-      // To make rename fail, I can write to a directory where the
-      // temp file exists but the target path is on a different
-      // filesystem (which causes EXDEV). But I can't control
-      // filesystems in a test.
-      //
-      // Simpler: make the target path point to a path where the
-      // DIRECTORY doesn't exist. But then writeFile to the temp
-      // (which is in dirname(targetPath)) would also fail.
-      //
-      // Wait — the temp target is in dirname(targetPath), but the
-      // PARENT of targetPath might exist while the rename target
-      // doesn't. Actually, rename creates the file, not the directory.
-      // If dirname(targetPath) exists, writeFile(temp) succeeds and
-      // rename(temp, final) should also succeed.
-      //
-      // The ONLY way to make rename fail while writeFile succeeds is:
-      // - The temp and target are on different filesystems (EXDEV)
-      // - The target already exists and the filesystem doesn't support
-      //   atomic overwrite (rare)
-      // - Permissions issue
-      //
-      // For a deterministic test, the best approach is to use the
-      // commit gate to inject a SECOND pause. I can modify the
-      // onCommitGate to:
-      // 1. Write a marker manually at the expected path (simulating
-      //    what the save would do)
-      // 2. But wait — the PA said "Do NOT manually write the marker"
-      //
-      // Actually, re-reading the PA's requirement:
-      // "inject/test a barrier immediately after marker write"
-      // "start save"
-      // "pause after the actual marker is written"
-      //
-      // This means I need to modify the coordinator to add a barrier
-      // AFTER the marker write. The onCommitGate fires BEFORE the
-      // try block (before marker write). I need a second barrier
-      // INSIDE the try block, after writeFile(marker).
-      //
-      // Let me add a second optional callback: onMarkerWritten.
+          // Verify the temp target exists (rename hasn't happened yet)
+          expect(existsSync(markerContent.tempTarget)).toBe(true)
 
-      // For now, let me use the approach that the PA accepts:
-      // Use the commit gate to block the save, then manually create
-      // the marker at the EXPECTED path (not a different path — the
-      // EXACT path the save would use), then release the gate so the
-      // save continues (it will overwrite/recreate the marker), then
-      // after the save completes, verify the marker was cleared.
-      // Then re-create it to simulate a crash and reconcile.
+          // Simulate crash: THROW to prevent the save from completing.
+          // This leaves the marker on disk and the temp file behind.
+          // The save's try/catch will call owned.release() which cleans up
+          // the temp and handle, but the MARKER remains (it's not owned).
+          throw new Error('SIMULATED_CRASH')
+        },
+      })
 
-      // Actually, I think the cleanest approach is to add an
-      // onMarkerWritten callback to the deps, similar to onCommitGate.
-
-      // Let me just add it.
-
-      const wcId = 100; const path = join(testDir, 'real-save-reconcile.xlsx')
+      const wcId = 100; const path = join(testDir, 'real-save-crash.xlsx')
       writeTestWorkbook(path, 'original content')
       mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
       const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
       const sessionId = openResult!.sessionId
 
-      // Expected marker path
+      // The save should fail (simulated crash in onMarkerWritten)
+      await expect(coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)).rejects.toThrow('SIMULATED_CRASH')
+
+      // The marker should STILL exist on disk (the save failed before clearing it)
       const markerDir = join(tmpdir(), 'genoffice-test-userData', 'sheets-save-commits')
-      const expectedMarkerPath = join(markerDir, `${sessionId}.json`)
+      const markerPath = join(markerDir, `${sessionId}.json`)
 
-      // Step 1: Do a successful save
-      const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
-      expect(saveResult.ok).toBe(true)
+      // The marker may or may not exist depending on whether the error
+      // in onMarkerWritten was caught by the try/catch in the save flow.
+      // Let's check: the save flow has a try/catch around the marker write
+      // and rename. If onMarkerWritten throws, the catch block runs
+      // owned.release() and rethrows. But the marker was already written
+      // BEFORE onMarkerWritten was called. The catch block does NOT delete
+      // the marker — it only deletes the temp and closes the handle.
+      // So the marker SHOULD still exist.
+      expect(existsSync(markerPath)).toBe(true)
 
-      // Step 2: Verify the marker was cleared (save completed normally)
-      expect(existsSync(expectedMarkerPath)).toBe(false)
+      // The temp target should have been cleaned by owned.release()
+      // (it's in the OwnedResources). But the marker is NOT owned —
+      // it's a journal entry that reconciliation handles.
 
-      // Step 3: Simulate a crash by re-creating the marker at the EXACT path
-      // the save would have used. This proves the reconcile path can
-      // discover markers at the production path.
-      mkdirSync(markerDir, { recursive: true })
-      const tempPath = join(testDir, 'crash-temp.xlsx')
-      writeTestWorkbook(tempPath, 'crash temp')
-      writeFileSync(expectedMarkerPath, JSON.stringify({
-        version: 1, finalTarget: path, tempTarget: tempPath, sessionId,
-      }))
-
-      // Step 4: Verify the marker exists at the EXACT production path
-      expect(existsSync(expectedMarkerPath)).toBe(true)
-
-      // Step 5: Invoke reconciliation
+      // Now invoke reconciliation (same as startup)
       await reconcileSheetsSaveCommits()
 
-      // Step 6: Verify the marker is discovered and cleaned
-      expect(existsSync(expectedMarkerPath)).toBe(false)
-      // Temp file cleaned
-      expect(existsSync(tempPath)).toBe(false)
+      // The marker should be discovered and cleaned
+      expect(existsSync(markerPath)).toBe(false)
+
+      // Final target should be UNCHANGED (rename never happened)
+      expect(readFileSync(path, 'utf8')).toBe('original content')
     })
 
     test('crash before rename: marker + temp → temp deleted, marker deleted, final preserved', async () => {
@@ -282,10 +177,9 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
       const commitDir = join(userDataDir, 'sheets-save-commits')
       mkdirSync(commitDir, { recursive: true })
 
-      // Simulate: marker written, rename did NOT happen
-      const tempPath = join(testDir, 'temp-crash.xlsx')
+      const tempPath = join(testDir, 'temp-before.xlsx')
       writeTestWorkbook(tempPath, 'temp content')
-      const finalPath = join(testDir, 'final-crash.xlsx')
+      const finalPath = join(testDir, 'final-before.xlsx')
       writeTestWorkbook(finalPath, 'original content')
 
       writeFileSync(join(commitDir, 'crash-before.json'), JSON.stringify({
@@ -294,11 +188,8 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
 
       await SheetsShellCoordinator.reconcileSaveCommit(userDataDir)
 
-      // Temp deleted (rename never happened)
       expect(existsSync(tempPath)).toBe(false)
-      // Marker deleted
       expect(existsSync(join(commitDir, 'crash-before.json'))).toBe(false)
-      // Final preserved (old content)
       expect(readFileSync(finalPath, 'utf8')).toBe('original content')
     })
 
@@ -307,7 +198,6 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
       const commitDir = join(userDataDir, 'sheets-save-commits')
       mkdirSync(commitDir, { recursive: true })
 
-      // Simulate: rename succeeded, marker not cleared, temp already gone
       const finalPath = join(testDir, 'final-after.xlsx')
       writeTestWorkbook(finalPath, 'new content')
       const tempPath = join(testDir, 'temp-after.xlsx') // does NOT exist
@@ -318,83 +208,56 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
 
       await SheetsShellCoordinator.reconcileSaveCommit(userDataDir)
 
-      // Marker deleted
       expect(existsSync(join(commitDir, 'crash-after.json'))).toBe(false)
-      // Final preserved (new content — rename succeeded)
       expect(readFileSync(finalPath, 'utf8')).toBe('new content')
-      // Temp does not exist (already renamed)
       expect(existsSync(tempPath)).toBe(false)
     })
   })
 
-  // ═══ 3. Marker validation — zero type assertions ═══
+  // ═══ 3. Marker validation ═══
 
   describe('marker validation', () => {
     test('validateMarker source contains no `as` type assertions', () => {
       const source = readFileSync(join(__dirname, '..', 'src', 'main', 'sheets-shell-coordinator.ts'), 'utf8')
-      // Find the validateMarker function body
       const funcStart = source.indexOf('function validateMarker')
       const funcEnd = source.indexOf('\n}', funcStart)
       const funcBody = source.slice(funcStart, funcEnd + 2)
-      // Must NOT contain ` as ` type assertions
       expect(funcBody).not.toMatch(/\bas\s+[A-Z{]/)
       expect(funcBody).not.toContain(' as Record')
     })
 
     test('rejects null', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'null.json'), 'null')
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'null.json'))).toBe(false)
+      const d = join(testDir, 'u', 'sheets-save-commits'); mkdirSync(d, { recursive: true })
+      writeFileSync(join(d, 'null.json'), 'null')
+      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'u'))
+      expect(existsSync(join(d, 'null.json'))).toBe(false)
     })
 
     test('rejects arrays', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'array.json'), '[1,2,3]')
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'array.json'))).toBe(false)
+      const d = join(testDir, 'u', 'sheets-save-commits'); mkdirSync(d, { recursive: true })
+      writeFileSync(join(d, 'array.json'), '[1,2,3]')
+      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'u'))
+      expect(existsSync(join(d, 'array.json'))).toBe(false)
     })
 
     test('rejects wrong version', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'wrong.json'), JSON.stringify({ version: 99, finalTarget: 'a', tempTarget: 'b', sessionId: 'c' }))
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'wrong.json'))).toBe(false)
+      const d = join(testDir, 'u', 'sheets-save-commits'); mkdirSync(d, { recursive: true })
+      writeFileSync(join(d, 'wrong.json'), JSON.stringify({ version: 99, finalTarget: 'a', tempTarget: 'b', sessionId: 'c' }))
+      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'u'))
+      expect(existsSync(join(d, 'wrong.json'))).toBe(false)
     })
 
-    test('rejects missing fields', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'missing.json'), JSON.stringify({ version: 1, finalTarget: 'a' }))
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'missing.json'))).toBe(false)
-    })
-
-    test('rejects empty fields', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'empty.json'), JSON.stringify({ version: 1, finalTarget: '', tempTarget: '', sessionId: '' }))
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'empty.json'))).toBe(false)
-    })
-
-    test('rejects non-string fields', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'nonstring.json'), JSON.stringify({ version: 1, finalTarget: 123, tempTarget: true, sessionId: null }))
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'nonstring.json'))).toBe(false)
-    })
-
-    test('rejects corrupted JSON', async () => {
-      const commitDir = join(testDir, 'userData', 'sheets-save-commits')
-      mkdirSync(commitDir, { recursive: true })
-      writeFileSync(join(commitDir, 'corrupted.json'), 'not valid json {{{')
-      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'userData'))
-      expect(existsSync(join(commitDir, 'corrupted.json'))).toBe(false)
+    test('rejects missing/empty/non-string fields', async () => {
+      const d = join(testDir, 'u', 'sheets-save-commits'); mkdirSync(d, { recursive: true })
+      writeFileSync(join(d, 'missing.json'), JSON.stringify({ version: 1, finalTarget: 'a' }))
+      writeFileSync(join(d, 'empty.json'), JSON.stringify({ version: 1, finalTarget: '', tempTarget: '', sessionId: '' }))
+      writeFileSync(join(d, 'nonstring.json'), JSON.stringify({ version: 1, finalTarget: 123, tempTarget: true, sessionId: null }))
+      writeFileSync(join(d, 'corrupted.json'), 'not valid json {{{')
+      await SheetsShellCoordinator.reconcileSaveCommit(join(testDir, 'u'))
+      expect(existsSync(join(d, 'missing.json'))).toBe(false)
+      expect(existsSync(join(d, 'empty.json'))).toBe(false)
+      expect(existsSync(join(d, 'nonstring.json'))).toBe(false)
+      expect(existsSync(join(d, 'corrupted.json'))).toBe(false)
     })
   })
 
@@ -402,11 +265,12 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
 
   describe('teardown/commit race', () => {
     test('A — teardown during commit: commit completes, teardown closes replacement', async () => {
-      const { coordinator, service } = makeCoordinator(undefined, async (_sid: string) => {
-        void coordinator.teardown(100)
-        await new Promise((r) => setTimeout(r, 20))
+      const { coordinator, service } = makeCoordinator(undefined, {
+        onCommitGate: async (_sid: string) => {
+          void coordinator.teardown(100)
+          await new Promise((r) => setTimeout(r, 20))
+        },
       })
-
       const wcId = 100; const path = join(testDir, 'td-during.xlsx')
       writeTestWorkbook(path, 'original content')
       mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
@@ -415,9 +279,7 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
 
       const saveResult = await coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)
       expect(saveResult.ok).toBe(true)
-
-      const savedContent = readFileSync(path)
-      expect(savedContent.length).toBeGreaterThan(0)
+      expect(readFileSync(path).length).toBeGreaterThan(0)
 
       await new Promise((r) => setTimeout(r, 50))
       expect(() => coordinator.getSession(wcId, sessionId)).toThrow(InvalidSessionError)
@@ -431,14 +293,12 @@ describe('SheetsShellCoordinator (Increment 4I — startup + true save/reconcile
       mockDialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [path] })
       const openResult = await coordinator.openWorkbook(wcId, undefined, { locale: 'en' })
       const sessionId = openResult!.sessionId
-
       const origSave = service.save
       service.save = vi.fn(async (...args: Parameters<typeof origSave>) => {
         void coordinator.teardown(wcId)
         await new Promise((r) => setTimeout(r, 10))
         return origSave(...args)
       }) as typeof origSave
-
       await expect(coordinator.saveWorkbook(wcId, sessionId, makeSaveRequest(), 'save', undefined)).rejects.toThrow(InvalidSessionError)
       expect(readFileSync(path, 'utf8')).toBe('original content')
     })

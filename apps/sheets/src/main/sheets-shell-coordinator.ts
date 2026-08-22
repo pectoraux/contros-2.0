@@ -68,6 +68,13 @@ export interface SheetsShellCoordinatorDeps {
    * teardown-during-commit race. In production, this is undefined.
    */
   readonly onCommitGate?: (sessionId: string) => Promise<void>
+  /**
+   * Optional marker-written hook — called immediately AFTER the commit
+   * marker is written to disk but BEFORE the rename. Used for
+   * deterministic testing of the save→reconcile crash path.
+   * In production, this is undefined.
+   */
+  readonly onMarkerWritten?: (markerPath: string, sessionId: string) => Promise<void>
 }
 
 // ── Session commit lifecycle ──
@@ -396,6 +403,13 @@ export class SheetsShellCoordinator {
         const markerPath = join(commitDir, `${sessionId}.json`)
         const marker: SaveCommitMarker = { version: 1, finalTarget: targetPath, tempTarget: tempTargetPath, sessionId }
         await writeFile(markerPath, JSON.stringify(marker))
+
+        // Marker-written hook — injectable barrier for deterministic
+        // testing of the save→reconcile crash path. Called AFTER the
+        // marker is on disk but BEFORE the rename. In production, undefined.
+        if (this.deps.onMarkerWritten) {
+          await this.deps.onMarkerWritten(markerPath, sessionId)
+        }
 
         // Atomically promote temp → final via rename.
         // NO copyFile fallback. If rename fails, save fails.

@@ -126,6 +126,7 @@ import {
   startSheetsCaptureServer,
   stopSheetsSidecar,
 } from '../../../sheets/src/main/sheets-main'
+import { reconcileSheetsSaveCommits } from '../../../sheets/src/main/sheets-shell-coordinator'
 import {
   configureSlidesRuntime,
   installSlidesMenu,
@@ -2848,6 +2849,13 @@ app.whenReady().then(async () => {
 
   proxyBootstrap = installMainProcessProxy()
   app.setAccessibilitySupportEnabled(true)
+
+  // Reconcile leftover save-commit markers from a previous crash BEFORE
+  // any Sheets workbook operations can begin. Safe/idempotent — no-op
+  // if no markers exist. Must run after app.whenReady() (so userData is
+  // available) and before createShellWindow()/startSheetsCaptureServer().
+  await reconcileSheetsSaveCommits()
+
   // Settle the shared uiLang from saved settings BEFORE any tab renderer can
   // ask 'app:get-language': the editor handlers return the i18n module's
   // mutable lang, whose 'zh' default otherwise wins the race for whichever
