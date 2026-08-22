@@ -7,16 +7,25 @@
  * in runtime-contracts (Layer 1); the implementation lives in
  * platform-electron (Layer 4a) as ElectronXlsxSidecarEngine.
  *
+ * RUNTIME INDEPENDENCE:
+ *   The engine contract is data-oriented. It accepts and returns Uint8Array
+ *   for workbook content — NOT filesystem paths. This allows:
+ *     - ElectronXlsxSidecarEngine: internally writes Uint8Array to a temp
+ *       file, passes the path to the Rust sidecar, reads the result back
+ *       as Uint8Array. The temp-file translation is private to the adapter.
+ *     - WasmSpreadsheetEngine: passes Uint8Array directly to in-process
+ *       IronCalc — no filesystem needed.
+ *     - CloudSpreadsheetEngine: uploads Uint8Array to a server — no local
+ *       filesystem needed.
+ *
  * The engine operates on opaque EngineSessionHandle tokens — the domain
  * service and runtime contracts NEVER inspect the token's internal
- * representation. The Electron adapter maps the token to a Rust sidecar
- * UUID internally; a future WASM adapter would map it to an in-memory
- * table key; a Cloud adapter would map it to a server session token.
+ * representation.
  *
  * FORBIDDEN in this file (and all runtime-contracts):
  *   sidecarSessionId, sidecar, Rust, stdio, child_process, snapshotPath,
  *   BrowserWindow, WebContents, wcId, Electron, node:fs, node:path,
- *   engineSessionId
+ *   engineSessionId, filesystem path parameters
  *
  * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
  */
@@ -125,13 +134,16 @@ export interface WorksheetMetadata {
   tabColor?: string
 }
 
-/** Workbook metadata returned by engine.open(). */
+/**
+ * Workbook metadata returned by engine.open().
+ *
+ * Contains workbook/domain metadata ONLY — no filesystem paths, no
+ * snapshot paths, no absolute paths. Those belong to ShellWorkbookSession.
+ */
 export interface WorkbookMetadata {
-  /** The file name (basename). */
+  /** The workbook name (basename, e.g. 'budget.xlsx'). */
   name: string
-  /** Absolute on-disk path (may be a snapshot). */
-  path: string
-  /** SHA-256 hash of the file content. */
+  /** SHA-256 hash of the workbook content. */
   sha256: string
   /** Number of ZIP entries in the archive. */
   entryCount: number
@@ -274,7 +286,7 @@ export interface EngineMediaResult {
 
 /** A patch to apply to a ZIP entry in the archive during save. */
 export interface EngineArchivePatch {
-  /** The ZIP entry path to patch (e.g., 'xl/worksheets/sheet1.xml'). */
+  /** The ZIP entry path within the archive (e.g., 'xl/worksheets/sheet1.xml'). */
   entryPath: string
   /** The new content for the entry (UTF-8 string). */
   content: string
@@ -290,19 +302,34 @@ export interface EngineArchivePatch {
  *   - WasmSpreadsheetEngine (future: IronCalc compiled to WASM)
  *   - CloudSpreadsheetEngine (future: server-side computation)
  *
+ * RUNTIME INDEPENDENCE:
+ *   The engine accepts workbook content as Uint8Array — NOT filesystem
+ *   paths. The Electron adapter may internally write the bytes to a temp
+ *   file and pass the path to the Rust sidecar, but that translation is
+ *   private to the adapter. A WASM engine passes the bytes directly to
+ *   in-process IronCalc. A Cloud engine uploads the bytes to a server.
+ *
  * The interface uses `Promise<T>` for all operations. It must not assume
  * a process boundary — a WASM engine returns results via async in-process
  * calls, not IPC.
  */
 export interface SpreadsheetEngine {
   /**
-   * Open a workbook file. Creates a new engine session and returns an
-   * opaque handle + workbook metadata.
+   * Open a workbook from raw bytes. Creates a new engine session and
+   * returns an opaque handle + workbook metadata.
    *
    * The handle does NOT exist before this call. All subsequent operations
    * receive the handle returned here.
+   *
+   * @param workbook — the raw xlsx file content (Uint8Array)
+   * @param locale — the UI locale for formula/function name resolution
+   * @param fileName — the workbook file name (basename, e.g. 'budget.xlsx')
    */
-  open(path: string, locale: string): Promise<{
+  open(
+    workbook: Uint8Array,
+    locale: string,
+    fileName: string,
+  ): Promise<{
     handle: EngineSessionHandle
     metadata: WorkbookMetadata
   }>
@@ -355,6 +382,7 @@ export interface SpreadsheetEngine {
   /**
    * Save the workbook as a new archive. Applies patches to the existing
    * ZIP entries and returns the complete archive bytes.
+   *
    * @param handle — opaque engine session handle
    * @param patches — the entry patches to apply
    * @returns the complete archive bytes (Uint8Array)
@@ -366,10 +394,18 @@ export interface SpreadsheetEngine {
 
   /**
    * Convert a legacy workbook (.xls) to .xlsx format.
-   * @param path — the path to the legacy file
-   * @returns the path to the converted .xlsx file
+   *
+   * @param workbook — the raw legacy file content (Uint8Array)
+   * @param fileName — the legacy file name (e.g. 'old.xls')
+   * @returns the converted .xlsx content as bytes + the new file name
    */
-  convertWorkbook(path: string): Promise<{ path: string }>
+  convertWorkbook(
+    workbook: Uint8Array,
+    fileName: string,
+  ): Promise<{
+    data: Uint8Array
+    fileName: string
+  }>
 
   /**
    * Close an engine session. The handle becomes invalid after this call.

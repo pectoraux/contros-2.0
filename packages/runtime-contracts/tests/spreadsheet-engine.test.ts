@@ -135,6 +135,27 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
     expect(engineHits).toEqual([])
   })
 
+  test('ZERO filesystem path parameters in spreadsheet-engine.ts', () => {
+    // The engine contract must be data-oriented (Uint8Array), not path-oriented.
+    // Verify that open() and convertWorkbook() do NOT accept string path parameters.
+    const text = readFile(ENGINE_FILE)
+    // open() must accept Uint8Array, not string path
+    expect(text).toMatch(/open\(\s*workbook:\s*Uint8Array/)
+    // convertWorkbook() must accept Uint8Array, not string path
+    expect(text).toMatch(/convertWorkbook\(\s*workbook:\s*Uint8Array/)
+    // WorkbookMetadata must NOT have a 'path' field
+    const metadataMatch = text.match(/interface WorkbookMetadata \{([\s\S]*?)\}/)
+    expect(metadataMatch).not.toBeNull()
+    const metadataBody = metadataMatch![1]
+    expect(metadataBody).not.toMatch(/^\s*path:\s*string/m)
+    // No method should accept a parameter named 'path' of type string
+    // (the 'entryPath' in EngineArchivePatch is a ZIP entry path, not a filesystem path — that's fine)
+    const pathParams = text.match(/\bpath:\s*string/g)
+    // Filter out entryPath and comment lines
+    const realPathParams = (pathParams ?? []).filter((p) => !p.includes('entryPath'))
+    expect(realPathParams).toEqual([])
+  })
+
   test('EngineSessionHandle exposes no inspectable fields', () => {
     const text = readFile(ENGINE_FILE)
     // The interface should only have the brand symbol — no string/number fields
@@ -155,8 +176,9 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
 
   test('EngineSessionHandle is created by open() and received by subsequent operations', () => {
     const text = readFile(ENGINE_FILE)
-    // open() returns a handle (creates it)
-    expect(text).toMatch(/open\(.*\).*Promise<\{[^}]*handle:\s*EngineSessionHandle/)
+    // open() returns a handle (creates it) — the signature is multi-line now
+    expect(text).toMatch(/open\(\s*workbook:\s*Uint8Array/)
+    expect(text).toMatch(/handle:\s*EngineSessionHandle/)
     // All other operations receive handle as first parameter
     const methods = ['readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'saveArchive', 'close']
     for (const method of methods) {
