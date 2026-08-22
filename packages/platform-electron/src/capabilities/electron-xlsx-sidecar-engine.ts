@@ -43,7 +43,7 @@ import {
 } from '@genoffice/runtime-contracts'
 import type { SavePlan } from '@genoffice/runtime-contracts'
 import type { EntrySource } from '@genoffice/xlsx-gateway'
-import { SidecarProtocolClient } from './sidecar-protocol-client.js'
+import { SidecarProtocolClient, type SidecarProtocolLike } from './sidecar-protocol-client.js'
 import {
   validateOpenResult,
   buildWorkbookMetadata,
@@ -59,6 +59,37 @@ import { translateSavePlan, type EngineArchivePatch } from './save-plan-translat
 interface SessionState {
   readonly sidecarSessionId: string
   readonly tempPath: string
+}
+
+/**
+ * Options for adopting an externally-opened sidecar session.
+ *
+ * The engine creates a new opaque handle wrapping the EXISTING sidecar
+ * session — NO wire call is made, NO temp file is created, NO snapshot
+ * is taken. The sidecar session must already be alive in the sidecar
+ * process that this engine's `SidecarProtocolLike` is connected to.
+ *
+ * This is used by the legacy `workbook:select` adoption path: the legacy
+ * `XlsxSidecarClient` opens the workbook (in the SAME sidecar process
+ * the engine uses), then the engine wraps the resulting `sidecarSessionId`
+ * into an opaque `EngineSessionHandle` so the migrated read/recalc/media
+ * path can use the coordinator-backed flow without re-opening the file.
+ */
+export interface AdoptExternalSessionOptions {
+  /** The sidecar's session UUID (returned by the sidecar's `open` command). */
+  readonly sidecarSessionId: string
+  /**
+   * Absolute path to the temp file the sidecar has open. The engine uses
+   * this for `recalc_cells` (which takes a path, not a sessionId) and
+   * for cleanup on close.
+   */
+  readonly tempPath: string
+  /**
+   * sheetId → file sheet name mapping (built from `[sheet.id, sheet.name]`
+   * at open time). Stored on the handle so applySavePlan's translator
+   * can resolve domain sheetIds → file sheet names.
+   */
+  readonly sheetNames: ReadonlyMap<string, string>
 }
 
 // ── Opaque handle ─────────────────────────────────────────────────────
@@ -77,12 +108,33 @@ function createHandle(): EngineSessionHandle {
 // ── Engine ────────────────────────────────────────────────────────────
 
 export interface ElectronXlsxSidecarEngineConfig {
-  binaryPath: string
+  /**
+   * Path to the Rust xlsx-sidecar binary. REQUIRED when `sidecarClient` is
+   * not provided (the engine will construct its own `SidecarProtocolClient`).
+   * OPTIONAL when `sidecarClient` is provided (the engine uses the injected
+   * client and never spawns a process itself).
+   */
+  binaryPath?: string
   tempDir?: string
+  /**
+   * Optional pre-existing sidecar client. When provided, the engine uses
+   * this client instead of constructing its own `SidecarProtocolClient`,
+   * and does NOT own the client's lifecycle (stop() will not call
+   * client.stop()).
+   *
+   * This is the integration point for the legacy `XlsxSidecarClient`
+   * (apps/sheets/src/main/xlsx-sidecar-client.ts): the legacy client
+   * opens the workbook via `client.open()`, and the engine wraps the
+   * resulting `sidecarSessionId` via `adoptExternalSession()` — sharing
+   * the same sidecar process, eliminating double-spawn.
+   */
+  sidecarClient?: SidecarProtocolLike
 }
 
 export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
-  private readonly client: SidecarProtocolClient
+  private readonly client: SidecarProtocolLike
+  /** True when the engine owns the sidecar client (constructed it itself). */
+  private readonly ownsClient: boolean
   private readonly sessions = new WeakMap<EngineSessionHandle, SessionState>()
   /**
    * Parallel map of handle → sheetNames (sheetId → file sheet name).
@@ -97,7 +149,18 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
 
   constructor(config: ElectronXlsxSidecarEngineConfig) {
     this.tempDir = config.tempDir ?? tmpdir()
-    this.client = new SidecarProtocolClient(config.binaryPath)
+    if (config.sidecarClient) {
+      this.client = config.sidecarClient
+      this.ownsClient = false
+    } else {
+      if (!config.binaryPath) {
+        throw new Error(
+          'ElectronXlsxSidecarEngine requires either `sidecarClient` or `binaryPath`',
+        )
+      }
+      this.client = new SidecarProtocolClient(config.binaryPath)
+      this.ownsClient = true
+    }
     // On unexpected sidecar exit: invalidate ALL sessions + clean temp files
     this.client.onProcessExit(() => this.invalidateAllSessions())
   }
@@ -134,17 +197,61 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     }
   }
 
+  /**
+   * Adopt an externally-opened sidecar session.
+   *
+   * Wraps an EXISTING sidecar `sessionId` (opened by an external client of
+   * the SAME sidecar process) into a new opaque `EngineSessionHandle`. This
+   * performs NO wire call, spawns NO process, creates NO temp file, and
+   * reads NO workbook bytes — it is a pure in-process handle registration.
+   *
+   * The caller MUST guarantee:
+   *   - The `sidecarSessionId` is currently alive in the sidecar process
+   *     that this engine's `SidecarProtocolLike` is connected to.
+   *   - The `tempPath` is the path that was passed to the sidecar's `open`
+   *     command (the sidecar still has it open for `recalc_cells`).
+   *   - The `sheetNames` map was built from `[sheet.id, sheet.name]` of the
+   *     sidecar's open response (the stable XLSX sheetId attribute).
+   *
+   * After adoption, the returned `EngineSessionHandle` is interchangeable
+   * with one returned by `open()` — all read/recalc/media/save operations
+   * work identically.
+   *
+   * OWNERSHIP: The engine takes ownership of the sidecar session. When
+   * `close(handle)` is called, the engine issues `command: 'close'` to the
+   * sidecar and (if the tempPath was created by the engine) cleans up the
+   * temp file. For adopted sessions, the tempPath was NOT created by the
+   * engine — `close()` will still try to clean it up because the engine
+   * always cleans up `SessionState.tempPath`. The legacy caller must NOT
+   * also clean up the tempPath (adoption transfers ownership).
+   */
+  adoptExternalSession(opts: AdoptExternalSessionOptions): EngineSessionHandle {
+    const handle = createHandle()
+    this.sessions.set(handle, {
+      sidecarSessionId: opts.sidecarSessionId,
+      tempPath: opts.tempPath,
+    })
+    this.sessionSheetNames.set(handle, new Map(opts.sheetNames))
+    this.activeHandles.add(handle)
+    return handle
+  }
+
   async readRange(
     handle: EngineSessionHandle,
     sheetName: string,
     range: string,
   ): Promise<EngineRangeResult> {
     const session = this.resolveSession(handle)
+    // Resolve sheetName → sidecar sheetId. The service passes the file sheet
+    // name (e.g. 'Sheet1'); the sidecar expects the stable XLSX sheetId
+    // attribute (e.g. 'sheet-1'). The engine stored the sheetId→sheetName
+    // map at open() time — invert it here to resolve sheetName→sheetId.
+    const sheetId = this.resolveSheetIdFromName(handle, sheetName)
     try {
       const raw = await this.client.request({
         command: 'read_range',
         sessionId: session.sidecarSessionId,
-        sheetId: sheetName,
+        sheetId,
         range: this.parseRange(range),
       })
       return validateRangeResult(raw)
@@ -158,11 +265,12 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     sheetName: string,
   ): Promise<EngineFormulaCellsResult> {
     const session = this.resolveSession(handle)
+    const sheetId = this.resolveSheetIdFromName(handle, sheetName)
     try {
       const raw = await this.client.request({
         command: 'read_formula_cells',
         sessionId: session.sidecarSessionId,
-        sheetId: sheetName,
+        sheetId,
       })
       return validateFormulaCellsResult(raw)
     } catch (error) {
@@ -403,7 +511,12 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
 
   async stop(): Promise<void> {
     this.invalidateAllSessions()
-    this.client.stop()
+    if (this.ownsClient) {
+      // Only stop the sidecar process when the engine owns it.
+      // For injected clients (legacy XlsxSidecarClient), the caller owns
+      // the lifecycle and is responsible for stopping.
+      this.client.stop()
+    }
   }
 
   start(): void { this.client.start() }
@@ -415,6 +528,28 @@ export class ElectronXlsxSidecarEngine implements SpreadsheetEngine {
     const session = this.sessions.get(handle)
     if (!session) throw new InvalidSessionError('Unknown engine session handle')
     return session
+  }
+
+  /**
+   * Resolve a file sheet NAME (e.g. 'Sheet1') back to the stable XLSX sheetId
+   * attribute (e.g. 'sheet-1') that the sidecar expects in `read_range` /
+   * `read_formula_cells` commands.
+   *
+   * The engine stores a `sheetId → sheetName` map per handle at open() /
+   * adoption time. Invert it here for reverse lookup.
+   *
+   * THROWS: InvalidInputError if the sheetName is not in the map (the caller
+   * passed a sheet name that doesn't exist in this workbook).
+   */
+  private resolveSheetIdFromName(handle: EngineSessionHandle, sheetName: string): string {
+    const sheetNames = this.sessionSheetNames.get(handle)
+    if (!sheetNames) {
+      throw new InvalidSessionError('Session sheetNames not found — was the session closed?')
+    }
+    for (const [id, name] of sheetNames) {
+      if (name === sheetName) return id
+    }
+    throw new InvalidInputError(`Unknown sheet name: ${sheetName}`)
   }
 
   /**

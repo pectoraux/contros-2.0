@@ -279,6 +279,87 @@ export class SheetsShellCoordinator {
     }
   }
 
+  // ── Legacy session adoption (Increment 5A) ──
+
+  /**
+   * Adopt a legacy-opened session into the coordinator's registry.
+   *
+   * This is the compatibility handoff between the legacy `workbook:select`
+   * open lifecycle (which uses `XlsxSidecarClient.open()` directly) and the
+   * migrated read/recalc/media/close path (which uses the coordinator-backed
+   * `SpreadsheetService`).
+   *
+   * The caller (sheets-runtime.ts) has ALREADY:
+   *   - Opened the workbook via the legacy `XlsxSidecarClient.open()`.
+   *   - Built a snapshot, computed its sha256, captured sheet names.
+   *   - Constructed a `ShellWorkbookSession` whose `engineHandle` was produced
+   *     by `ElectronXlsxSidecarEngine.adoptExternalSession()` — a pure
+   *     in-process handle wrap with NO wire call, NO file IO, NO spawn.
+   *
+   * The coordinator just registers the session under (wcId, sessionId) and
+   * initializes its commit state to IDLE. There is NO re-open, NO re-spawn,
+   * NO duplicate snapshot, NO recomputed fingerprint.
+   *
+   * OWNERSHIP: After adoption, the coordinator is the EXCLUSIVE owner of:
+   *   - The engine handle (and the underlying sidecar session it wraps).
+   *   - The snapshot path.
+   *   - The recovery resources.
+   * The legacy `SessionInfo` keeps a NON-OWNING reference (marked
+   * `adopted: true`) for the legacy `save`/`write-recovery` paths to keep
+   * working — but it MUST NOT independently `client.close(sessionId)` or
+   * `rm(snapshotPath)` once adopted.
+   *
+   * SESSION IDENTITY: The coordinator registers the session under the SAME
+   * `sessionId` the legacy open returned — preserving renderer continuity.
+   * The renderer's existing `sessionId` is valid for both legacy
+   * `save`/`write-recovery` AND migrated reads/closes without remapping.
+   *
+   * THREAD SAFETY: Acquires the per-session mutation lock. If a concurrent
+   * teardown already holds the session's lock (e.g., the renderer is being
+   * destroyed), adoption still completes — the session is registered but
+   * will be cleaned up by the teardown that owns the lock.
+   *
+   * @returns the registered session (same as the input).
+   */
+  async adoptLegacySession(
+    wcId: number,
+    session: ShellWorkbookSession,
+  ): Promise<ShellWorkbookSession> {
+    // Lazily register the renderer if this is the first call for this wcId.
+    // The legacy `workbook:select` path does not call registerRenderer()
+    // explicitly — adoption is the first coordinator contact for a tab.
+    let state = this.tabs.get(wcId)
+    if (!state) {
+      state = {
+        sessions: new Map(),
+        epoch: 0,
+        locks: new Map(),
+        commitStates: new Map(),
+      }
+      this.tabs.set(wcId, state)
+    }
+    return this.withSessionLock(wcId, session.sessionId, async () => {
+      // Re-fetch inside the lock — the renderer may have been torn down
+      // between the lazy register above and the lock acquisition.
+      const cur = this.tabs.get(wcId)
+      if (!cur) {
+        throw new InvalidSessionError(`Renderer ${wcId} torn down during adoption`)
+      }
+      // If a session already exists under this sessionId, it means adoption
+      // was called twice (a bug, or a save-reopen path that hasn't been
+      // migrated yet). The previous session's resources must be cleaned up
+      // by the caller BEFORE re-adoption — we throw to surface the bug.
+      if (cur.sessions.has(session.sessionId)) {
+        throw new InvalidSessionError(
+          `Session ${session.sessionId} already adopted — caller must close before re-adopting`,
+        )
+      }
+      cur.sessions.set(session.sessionId, session)
+      cur.commitStates.set(session.sessionId, SessionCommitState.IDLE)
+      return session
+    })
+  }
+
   // ── Read operations ──
 
   async readRange(wcId: number, sessionId: string, sheetId: string, range: string): Promise<EngineRangeResult> {

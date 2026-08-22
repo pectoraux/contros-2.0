@@ -118,8 +118,9 @@ import { IPC_CHANNELS } from '../shared/ipc-channels'
 import { closeGuardDecision } from './close-guard'
 import { exportPdf } from './pdf-export'
 import { XlsxSidecarClient } from './xlsx-sidecar-client'
-import { initSheetsRuntime } from './sheets-runtime'
+import { initSheetsRuntime, adoptLegacySessionIntoCoordinator, type SheetsRuntimeBundle, type LegacySessionAdoption } from './sheets-runtime'
 import { registerMigratedSheetsIpc } from './sheets-migrated-handlers'
+import type { WorkbookMetadata, WorksheetMetadata } from '@genoffice/runtime-contracts'
 
 /**
  * Sheets main-process logic as an embeddable module: no top-level lifecycle.
@@ -1041,6 +1042,22 @@ interface SessionInfo {
   /// write-back against external modification, mirroring the sha256 check on
   /// the session's own path.
   readonly restoreTargetSha?: string
+  /**
+   * INCREMENT 5A — LEGACY SESSION ADOPTION:
+   *   True when this session has been adopted into the
+   *   SheetsShellCoordinator's registry. After adoption:
+   *     - The coordinator is the EXCLUSIVE owner of the engine handle
+   *       (which wraps the sidecar `sessionId`) and the snapshot path.
+   *     - This legacy `SessionInfo` is a NON-OWNING reference kept only
+   *       for the legacy `save` / `write-recovery` paths to keep working
+   *       (they use `entry.client` + `session.sheetNames`, NOT the engine
+   *       handle or the snapshot lifecycle).
+   *     - `closeAllSessions(entry)` (called on renderer teardown) MUST NOT
+   *       `client.close(sessionId)` or `rm(snapshotPath)` for adopted
+   *       sessions — the coordinator's `teardown(wcId)` does that exactly
+   *       once.
+   */
+  adopted?: boolean
 }
 
 // ---- runtime configuration (paths differ when bundled into the shell) ----
@@ -1074,13 +1091,31 @@ let sidecar: XlsxSidecarClient | null = null
  * on the first createSheetsWindow/createSheetsView call. The migrated
  * IPC handlers use this coordinator for read-range, read-formulas,
  * recalc, read-media, and close operations.
+ *
+ * INCREMENT 5A — LEGACY SIDECAR SHARING:
+ *   The legacy `sidecar: XlsxSidecarClient` (created lazily by
+ *   createSheetsWindow / createSheetsView) is passed to the engine via
+ *   `initSheetsRuntime({ sidecarClient: sidecar })`. This makes the
+ *   engine use the SAME sidecar process as the legacy `workbook:select`
+ *   path — eliminating double-spawn and enabling zero-overhead legacy
+ *   session adoption.
+ *
+ *   The engine does NOT own the injected client's lifecycle: stop() is
+ *   a no-op for the client (the legacy path owns starting/stopping it).
  */
 let migratedRuntime: ReturnType<typeof initSheetsRuntime> | null = null
 
 function getMigratedRuntime(): ReturnType<typeof initSheetsRuntime> {
   if (!migratedRuntime) {
     const sidecarPath = resolveSidecarPath()
-    migratedRuntime = initSheetsRuntime({ binaryPath: sidecarPath })
+    // Share the legacy sidecar client (if already created by
+    // createSheetsWindow/createSheetsView) with the engine. This is the
+    // integration point that enables legacy session adoption — the engine
+    // and the legacy client speak to the SAME sidecar process.
+    const sharedClient = sidecar ?? new XlsxSidecarClient(sidecarPath)
+    sidecar = sharedClient
+    sharedClient.start()
+    migratedRuntime = initSheetsRuntime({ binaryPath: sidecarPath, sidecarClient: sharedClient })
   }
   return migratedRuntime
 }
@@ -1136,11 +1171,36 @@ async function saveFileDialog(event: IpcMainInvokeEvent, options: SaveDialogOpti
 function registerSheetsSession(webContents: WebContents, client: XlsxSidecarClient): void {
   sheetsTabs.set(webContents.id, { webContents, client, sessions: new Map(), aiStreams: new Map() })
   activeSheetsWebContents = webContents
+  // INCREMENT 5A — register this tab with the SheetsShellCoordinator so
+  // that adoption (called later from workbook:select) lands in the right
+  // per-renderer registry, and the coordinator's teardown is invoked when
+  // the webContents is destroyed. The coordinator's teardown handles
+  // adopted sessions (closing the sidecar session + removing the snapshot
+  // exactly once); closeAllSessions below handles non-adopted legacy sessions.
+  try {
+    const { coordinator } = getMigratedRuntime()
+    coordinator.registerRenderer(webContents.id, webContents)
+  } catch (error) {
+    // If the runtime can't be constructed (e.g., sidecar binary missing),
+    // adoption is impossible — the renderer will fall back to the legacy
+    // session registry only. Log and continue.
+    console.warn('[sheets] coordinator.registerRenderer failed:', error)
+  }
   webContents.once('destroyed', () => {
     const entry = sheetsTabs.get(webContents.id)
     sheetsTabs.delete(webContents.id)
     if (entry) void closeAllSessions(entry)
     if (activeSheetsWebContents === webContents) activeSheetsWebContents = null
+    // INCREMENT 5A — tear down the coordinator's sessions for this renderer.
+    // This is idempotent (safe to call even if registerRenderer failed).
+    // The coordinator's teardown acquires per-session locks and waits for
+    // any in-progress commit to complete before closing handles.
+    try {
+      const { coordinator } = getMigratedRuntime()
+      void coordinator.teardown(webContents.id)
+    } catch {
+      // Runtime not constructed — nothing to tear down.
+    }
   })
 }
 
@@ -1759,7 +1819,37 @@ export function registerSheetsIpc(): void {
       csvImport: prepared.csvImport,
       restoreTarget: prepared.restoreTarget,
     })
-    if (result) workbookOpenedHook?.(event.sender, path)
+    // INCREMENT 5A — Adopt the legacy-opened session into the coordinator's
+    // registry so the migrated read/recalc/media/close IPC handlers can
+    // resolve it. Adoption happens ONLY after openWorkbookSession succeeds:
+    //   - If the dialog is cancelled, openWorkbookSession returns null and
+    //     we return early above (cancellation → no adoption).
+    //   - If open fails (sidecar error, file IO error), openWorkbookSession
+    //     throws — we never reach here (failure → no adoption).
+    //   - If adoption itself fails (e.g., coordinator not constructed), we
+    //     log and continue — the renderer will fall back to the legacy
+    //     session registry only (read/recalc/etc. would fail with
+    //     InvalidSessionError, surfacing the integration gap rather than
+    //     silently succeeding with a half-wired session).
+    if (result) {
+      try {
+        await adoptLegacySessionFromWorkbookFile(
+                          getMigratedRuntime(),
+                          event.sender.id,
+                          result,
+                          entry.sessions.get(result.sessionId),
+                          prepared.restoreTarget,
+                          getUiLang(),
+                        )
+        // Mark the legacy SessionInfo as adopted — closeAllSessions will
+        // skip it (the coordinator owns the sidecar session + snapshot now).
+        const legacy = entry.sessions.get(result.sessionId)
+        if (legacy) entry.sessions.set(result.sessionId, { ...legacy, adopted: true })
+      } catch (error) {
+        console.warn('[sheets] legacy session adoption failed — migrated reads will not work:', error)
+      }
+      workbookOpenedHook?.(event.sender, path)
+    }
     return result
   })
 
@@ -2846,6 +2936,95 @@ async function openWorkbookSession(
   }
 }
 
+// ── INCREMENT 5A: Legacy session adoption helper ─────────────────────
+//
+// Build a `LegacySessionAdoption` from the legacy `WorkbookFile` +
+// `SessionInfo` and delegate to `adoptLegacySessionIntoCoordinator` in
+// sheets-runtime.ts. The helper is intentionally a thin adapter — all
+// adoption semantics (engine wrap, coordinator registration, ownership
+// transfer) live in the runtime layer.
+//
+// Architecture guards verified by tests:
+//   - This helper imports NO @genoffice/platform-electron symbols directly
+//     (it goes through `sheets-runtime.ts`, which is the only permitted
+//     module to construct the engine).
+//   - It does NOT spawn child_process, read/write workbook files, or
+//     call getFocusedWindow. It only translates data shapes.
+
+async function adoptLegacySessionFromWorkbookFile(
+  bundle: SheetsRuntimeBundle,
+  wcId: number,
+  file: WorkbookFile,
+  legacy: SessionInfo | undefined,
+  restoreTarget: string | undefined,
+  locale: string,
+): Promise<void> {
+  if (!legacy) {
+    // The legacy SessionInfo was not registered — openWorkbookSession
+    // either failed or did not run. This is a defensive check; the
+    // caller already gates on `result` being truthy.
+    return
+  }
+
+  // Build the contract-level WorksheetMetadata[] from the legacy schema.
+  // The legacy schema has rich per-sheet metadata (columnWidths, freeze,
+  // tables, comments); the contract-level metadata is a subset. We pick
+  // only the fields the contract requires.
+  const sheets: WorksheetMetadata[] = file.sheets.map((s, i) => ({
+    id: s.id,
+    name: s.name,
+    index: i,
+    hidden: s.hidden,
+    rtl: false, // legacy schema does not carry RTL — defaulted to false
+    showGridlines: s.showGridLines,
+    rowCount: s.rowCount,
+    columnCount: s.columnCount,
+    defaultRowHeight: s.defaultRowHeight ?? 15,
+    defaultColumnWidth: s.defaultColumnWidth ?? 8.43,
+    ...(s.tabColor !== null && s.tabColor !== undefined ? { tabColor: s.tabColor } : {}),
+  }))
+
+  // Build the contract-level WorkbookMetadata. The legacy `definedNames`
+  // use `{name, formula, sheetIndex?}` while the contract uses `{name, value}`
+  // — translate `formula → value` (the sidecar's `formula` IS the value
+  // expression for the defined name). Sheet-scoped names (sheetIndex set)
+  // lose their sheet-binding in this translation — a known limitation
+  // (the contract does not carry sheet-scoped name info; future increment
+  // can extend WorkbookMetadata.definedNames if needed).
+  const metadata: WorkbookMetadata = {
+    name: file.name,
+    sha256: file.sha256,
+    entryCount: file.entryCount,
+    sheets,
+    activeTab: file.activeTab,
+    definedNames: file.definedNames.map((d) => ({ name: d.name, value: d.formula })),
+    themeColors: file.themeColors ?? [],
+    themeFonts: file.themeFonts ?? { major: '', minor: '' },
+  }
+
+  // The `originalPath` the renderer should consider for save: if the session
+  // opened a restored crash-recovery copy, the renderer-facing path is the
+  // ORIGINAL file (file.path), not the snapshot. openWorkbookSession already
+  // sets `file.path = restoreTarget ?? path` — so file.path is correct here.
+  const originalPath = file.path ?? legacy.path
+
+  const adoption: LegacySessionAdoption = {
+    sidecarSessionId: file.sessionId,
+    originalPath,
+    snapshotPath: legacy.snapshotPath,
+    diskFingerprint: legacy.sha256,
+    ...(legacy.suggestSaveAs !== undefined ? { suggestSaveAs: legacy.suggestSaveAs } : {}),
+    ...(legacy.csvImport === true ? { csvImport: legacy.csvImport } : {}),
+    ...(restoreTarget !== undefined ? { restoreTarget } : {}),
+    ...(legacy.restoreTargetSha !== undefined ? { restoreTargetSha: legacy.restoreTargetSha } : {}),
+    sheetNames: legacy.sheetNames,
+    metadata,
+    locale,
+  }
+
+  await adoptLegacySessionIntoCoordinator(bundle, wcId, adoption)
+}
+
 /** which legacy charset an Excel CSV most likely uses, judged by the UI language */
 function legacyCsvCharset(): string | undefined {
   const byLang: Partial<Record<Lang, string>> = {
@@ -3115,6 +3294,14 @@ async function closeAllSessions(entry: {
   entry.sessions.clear()
   await Promise.allSettled(
     sessions.map(async ([sessionId, session]) => {
+      // INCREMENT 5A — LEGACY SESSION ADOPTION:
+      //   Adopted sessions are owned EXCLUSIVELY by SheetsShellCoordinator.
+      //   The coordinator's teardown(wcId) will close the sidecar session
+      //   (via the engine handle that wraps it) and remove the snapshot.
+      //   Doing it here too would double-close — the sidecar would emit
+      //   "unknown session" errors and the rm would race the coordinator's
+      //   rm. Skip adopted sessions entirely.
+      if (session.adopted) return
       // Close before removing the snapshot the sidecar session has open
       await entry.client.close(sessionId).catch(() => undefined)
       await rm(session.snapshotPath, { force: true })

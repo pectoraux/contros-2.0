@@ -51,7 +51,35 @@ interface SidecarResponse {
 /** Callback invoked when the sidecar process exits unexpectedly. */
 export type OnProcessExitCallback = () => void
 
-export class SidecarProtocolClient {
+/**
+ * Minimal wire-protocol interface that any sidecar client must satisfy.
+ *
+ * Both `SidecarProtocolClient` (the canonical implementation in this package)
+ * and the legacy `XlsxSidecarClient` (in apps/sheets) satisfy this interface.
+ * The engine accepts an injectable `SidecarProtocolLike` so that the legacy
+ * sidecar process can be shared with the engine — eliminating the need to
+ * spawn a second sidecar process for the migrated path.
+ *
+ * This interface is PRIVATE to platform-electron. It is NOT exported through
+ * runtime-contracts (which forbids sidecar-specific terms).
+ */
+export interface SidecarProtocolLike {
+  /** Send a request and await the response. Returns `unknown` — the caller validates. */
+  request(
+    command: Readonly<Record<string, unknown>>,
+    timeoutMs?: number,
+  ): Promise<unknown>
+  /** Register a callback for unexpected process exit. */
+  onProcessExit(callback: OnProcessExitCallback): void
+  /** Spawn the sidecar ahead of the first request. */
+  start(): void
+  /** Get the sidecar process ID, if started. */
+  getProcessId(): number | null
+  /** Stop the sidecar process. */
+  stop(): void
+}
+
+export class SidecarProtocolClient implements SidecarProtocolLike {
   private process: ChildProcessWithoutNullStreams | null = null
   private lines: Interface | null = null
   private readonly pending = new Map<string, PendingRequest>()

@@ -1,5 +1,5 @@
 /**
- * Architecture-boundary test for @genoffice/sheets (Increment 3I/5 — AST-based).
+ * Architecture-boundary test for @genoffice/sheets (Increment 3I/5/5A — AST-based).
  *
  * Uses the TypeScript compiler API (via dep-scanner.ts) to parse source files
  * into an AST and extract actual module specifiers. This GUARANTEES:
@@ -14,6 +14,16 @@
  *   - package.json declares @genoffice/platform-electron (runtime construction)
  *   - package.json declares @genoffice/xlsx-gateway (canonical planner)
  *   - DOES import @genoffice/xlsx-gateway
+ *
+ * INCREMENT 5A — Legacy session adoption guards:
+ *   - sheets-shell-coordinator.ts MUST NOT import the legacy sidecar client
+ *     (XlsxSidecarClient) or child_process — the coordinator is pure to
+ *     SpreadsheetService.
+ *   - sheets-runtime.ts MUST NOT import the legacy sidecar client — adoption
+ *     goes through engine.adoptExternalSession (no legacy client dependency).
+ *   - No file under src/main/ except xlsx-sidecar-client.ts may import
+ *     child_process (the legacy client is the ONLY module that spawns the
+ *     sidecar binary; the engine accepts an injectable SidecarProtocolLike).
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -38,7 +48,7 @@ function scanForImports(rootDir: string, forbidden: string[]): Array<{ file: str
   return hits
 }
 
-describe('@genoffice/sheets architecture boundary (Increment 3I/5 — AST-based)', () => {
+describe('@genoffice/sheets architecture boundary (Increment 3I/5/5A — AST-based)', () => {
   test('ZERO imports of @genoffice/platform-electron in production source (except runtime/handlers)', () => {
     // Exception: sheets-runtime.ts and sheets-migrated-handlers.ts are
     // the runtime construction + thin IPC adapter — they are the ONLY
@@ -74,5 +84,77 @@ describe('@genoffice/sheets architecture boundary (Increment 3I/5 — AST-based)
   test('DOES import @genoffice/xlsx-gateway (the canonical planner)', () => {
     const hits = scanForImports(SRC, ['@genoffice/xlsx-gateway'])
     expect(hits.length).toBeGreaterThan(0)
+  })
+
+  // ═══ INCREMENT 5A — Legacy session adoption architecture guards ═══
+
+  test('sheets-shell-coordinator.ts does NOT import the legacy sidecar client', () => {
+    // The coordinator receives ONLY SpreadsheetService — it must not
+    // depend on XlsxSidecarClient, child_process, or any sidecar-specific code.
+    const hits = scanForImports(join(SRC, 'main'), ['./xlsx-sidecar-client'])
+    const violations = hits.filter((h) => h.file.endsWith('sheets-shell-coordinator.ts'))
+    expect(violations).toEqual([])
+  })
+
+  test('sheets-runtime.ts does NOT import the legacy sidecar client', () => {
+    // sheets-runtime.ts constructs the engine via @genoffice/platform-electron.
+    // It accepts an injectable SidecarProtocolLike (the legacy client is
+    // passed in via ElectronXlsxSidecarEngineConfig.sidecarClient), but
+    // does NOT directly import XlsxSidecarClient.
+    const hits = scanForImports(join(SRC, 'main'), ['./xlsx-sidecar-client'])
+    const violations = hits.filter((h) => h.file.endsWith('sheets-runtime.ts'))
+    expect(violations).toEqual([])
+  })
+
+  test('ONLY xlsx-sidecar-client.ts imports child_process in src/main/', () => {
+    // The legacy client is the ONLY module that spawns the sidecar binary.
+    // The engine accepts an injectable SidecarProtocolLike — when the
+    // legacy client is injected, no second child_process spawn happens.
+    const hits = scanForImports(join(SRC, 'main'), ['node:child_process'])
+    const violations = hits.filter((h) => !h.file.endsWith('xlsx-sidecar-client.ts'))
+    if (violations.length > 0) {
+      console.error('Found child_process imports outside xlsx-sidecar-client.ts:')
+      for (const h of violations) {
+        console.error(`  ${h.file}:${h.line}: ${h.kind}`)
+      }
+    }
+    expect(violations).toEqual([])
+  })
+
+  test('no src/main/ file calls getFocusedWindow', () => {
+    // getFocusedWindow is a UI concern — adoption must not depend on the
+    // currently-focused window. The wcId is sourced from event.sender.id
+    // at the IPC boundary, not from focus state.
+    const mainSrc = join(SRC, 'main')
+    for (const file of listSourceFiles(mainSrc)) {
+      const src = readFileSync(file, 'utf8')
+      // Allow references inside string literals or comments by checking
+      // for the call pattern only.
+      expect(src).not.toMatch(/getFocusedWindow\s*\(/)
+    }
+  })
+
+  test('no src/main/ file creates a second engine handle for the same sidecar session', () => {
+    // The ElectronXlsxSidecarEngine.adoptExternalSession method is the
+    // ONLY way to wrap an existing sidecar sessionId into an opaque
+    // EngineSessionHandle. No code should manually construct handles.
+    const mainSrc = join(SRC, 'main')
+    for (const file of listSourceFiles(mainSrc)) {
+      const src = readFileSync(file, 'utf8')
+      // The handle creation is via createHandle() — private to the engine.
+      // No file in apps/sheets/src/main should reference createHandle.
+      expect(src).not.toMatch(/\bcreateHandle\b/)
+    }
+  })
+
+  test('no global session state — wcId is always a parameter', () => {
+    // The coordinator's `tabs` Map is keyed by wcId — there is no
+    // "currentWcId" or "activeSession" module-level state. Sessions are
+    // always resolved by (wcId, sessionId) pair.
+    const coordinatorSrc = readFileSync(
+      join(SRC, 'main', 'sheets-shell-coordinator.ts'),
+      'utf8',
+    )
+    expect(coordinatorSrc).not.toMatch(/^(let|var|const)\s+(currentWcId|activeSession|globalSession)\b/m)
   })
 })

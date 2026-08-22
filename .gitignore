@@ -10,6 +10,29 @@ release/
 electron-builder.env
 ~$*
 
+# Stub workspace packages created to satisfy renderer-bridge's package.json
+# dependencies during local installs — these packages do not exist in the
+# public registry or in this repo, and the previous Phase 2 increments did
+# NOT commit them. They are local-only stubs that let `npm install` succeed
+# for testing in environments without access to a private registry.
+/packages/docs-shared/
+/packages/markdown-shared/
+/packages/pdf-shared/
+/packages/sheets-shared/
+/packages/shell-home-shared/
+/packages/shell-tabs-shared/
+/packages/shell-update-shared/
+/packages/slides-shared/
+
+# Local tool-results and worklog scratch dir
+/tool-results/
+
+# Skill registry (not part of the codebase)
+/skills/
+
+# Downloaded deliverables
+/download/
+
 # Local ad-hoc e2e driver scripts (not pushed); the folder and README are tracked, the scripts are not
 /scripts/drivers/driver.*.mjs
 /probe*.mjs

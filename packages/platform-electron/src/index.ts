@@ -18,8 +18,8 @@ export { ElectronClipboard } from './capabilities/electron-clipboard.js'
 export { ElectronNotifications } from './capabilities/electron-notifications.js'
 export { ElectronWindowing } from './capabilities/electron-windowing.js'
 export { ElectronFontRegistry } from './capabilities/electron-font-registry.js'
-export { ElectronXlsxSidecarEngine, type ElectronXlsxSidecarEngineConfig } from './capabilities/electron-xlsx-sidecar-engine.js'
-export { SidecarProtocolClient } from './capabilities/sidecar-protocol-client.js'
+export { ElectronXlsxSidecarEngine, type ElectronXlsxSidecarEngineConfig, type AdoptExternalSessionOptions } from './capabilities/electron-xlsx-sidecar-engine.js'
+export { SidecarProtocolClient, type SidecarProtocolLike, type OnProcessExitCallback } from './capabilities/sidecar-protocol-client.js'
 export {
   createElectronCapabilities,
   publishRuntime,

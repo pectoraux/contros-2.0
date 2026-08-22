@@ -24,11 +24,27 @@ interface SidecarResponse {
   }
 }
 
+/** Callback invoked when the sidecar process exits unexpectedly. */
+export type OnProcessExitCallback = () => void
+
+/**
+ * XlsxSidecarClient — the legacy JSON-over-stdio wire protocol client for
+ * the Rust xlsx-sidecar binary.
+ *
+ * This class satisfies `SidecarProtocolLike` (from @genoffice/platform-electron)
+ * via its public `request`, `onProcessExit`, `start`, `getProcessId`, and
+ * `stop` methods. The migrated `ElectronXlsxSidecarEngine` can be constructed
+ * with an `XlsxSidecarClient` as its `sidecarClient`, sharing the SAME sidecar
+ * process between the legacy `workbook:select` path and the migrated
+ * `workbook:read-range` / `read-formulas` / `recalc` / `read-media` / `close`
+ * path — eliminating double-spawn and enabling zero-overhead adoption.
+ */
 export class XlsxSidecarClient {
   private process: ChildProcessWithoutNullStreams | null = null
   private lines: Interface | null = null
   private readonly pending = new Map<string, PendingRequest>()
   private stderr = ''
+  private onExitCallback: OnProcessExitCallback | null = null
 
   constructor(private readonly binaryPath: string) {}
 
@@ -125,6 +141,11 @@ export class XlsxSidecarClient {
     return this.request({ command: 'recalc_cells', ...input }, ARCHIVE_TIMEOUT_MS)
   }
 
+  /** Register a callback for unexpected sidecar process exit. */
+  onProcessExit(callback: OnProcessExitCallback): void {
+    this.onExitCallback = callback
+  }
+
   /** spawn the sidecar ahead of the first request to hide process cold-start */
   start(): void {
     this.ensureStarted()
@@ -142,7 +163,15 @@ export class XlsxSidecarClient {
     this.rejectPending(new Error('XLSX sidecar stopped.'))
   }
 
-  private request(
+  /**
+   * Send a wire-protocol request and await the response.
+   *
+   * PUBLIC so that `XlsxSidecarClient` satisfies `SidecarProtocolLike` —
+   * the migrated `ElectronXlsxSidecarEngine` can be constructed with an
+   * `XlsxSidecarClient` as its `sidecarClient`, sharing the same sidecar
+   * process. This is the integration point for legacy session adoption.
+   */
+  request(
     command: Readonly<Record<string, unknown>>,
     timeoutMs: number = REQUEST_TIMEOUT_MS,
   ): Promise<unknown> {
@@ -197,6 +226,8 @@ export class XlsxSidecarClient {
         ? `XLSX sidecar exited: ${detail}`
         : `XLSX sidecar exited with code ${String(code)} and signal ${String(signal)}.`
       this.rejectPending(new Error(reason))
+      // Notify external consumers (the engine) that the process died.
+      this.onExitCallback?.()
     })
     return child
   }
