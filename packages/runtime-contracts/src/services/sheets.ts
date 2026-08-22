@@ -1,7 +1,7 @@
 /**
  * SpreadsheetService — domain runtime service for the sheets (`.xlsx`) editor.
  *
- * ADR-004 / Phase 2 Architecture (Increment 3B correction):
+ * ADR-004 / Phase 2 Architecture (Increment 3C correction):
  *   The service owns DOMAIN semantics only — workbook open/read/recalc/save.
  *   It delegates engine operations to SpreadsheetEngine (opaque handle).
  *   It receives dependencies via constructor injection — no getRuntime().
@@ -16,6 +16,9 @@
  *     - child_process spawning (engine adapter owns sidecar lifecycle)
  *     - Renderer event routing / lifecycle notifications (shell coordinator
  *       owns `docs/workbook opened`, `renamed`, `teardown` notifications)
+ *     - SavePlan → archive-patch translation (engine implementation owns
+ *       this internally — Increment 3C removed the runtime-contract
+ *       SavePlanTranslator and EngineArchivePatch)
  *
  *   The service DOES own:
  *     - Workbook open/save semantics
@@ -23,12 +26,12 @@
  *       on unknown sheetIds (throws InvalidInputError)
  *     - ExternalChangeStatus policy (unchanged → save; changed/unknown → refuse)
  *     - Save-plan validation (sheetId resolution before delegation)
- *     - Engine coordination (delegates to SpreadsheetEngine)
+ *     - Engine coordination (delegates to SpreadsheetEngine.applySavePlan)
  *     - Recovery path derivation (pure computation, no filesystem)
  *
- * SAVE DOMAIN MODEL (Increment 3B):
- *   The service accepts a domain `SavePlan` (NOT `EngineArchivePatch[]`).
- *   The SavePlan preserves ALL renderer-independent Sheets mutation families
+ * SAVE DOMAIN MODEL (Increment 3B + 3C):
+ *   The service accepts a domain `SavePlan` (defined in save-plan.ts). The
+ *   SavePlan preserves ALL renderer-independent Sheets mutation families
  *   (sheetOps, edits, structuralOps, filterStates, hyperlinkEdits, cfStates,
  *   dvStates, pageSetupStates, noteStates, formulaValues, visualAdditions,
  *   tableAdditions, pivotAdditions, sparklineAdditions, pivotRefreshUpdates,
@@ -37,11 +40,11 @@
  *   legacy `WorkbookSaveRequest` (apps/sheets/src/shared/desktop-api.ts:1476)
  *   but as domain types, not Zod schemas.
  *
- *   The service translates the SavePlan → `EngineArchivePatch[]` at the
- *   final engine boundary, via an injected `SavePlanTranslator`. The
- *   translator implementation is provided by the shell (it wraps the
- *   xlsx-gateway.ts planning logic). The service does NOT import
- *   platform-electron, xlsx-gateway, or any engine-specific code.
+ *   The service validates all sheetIds in the SavePlan (fail-closed), then
+ *   delegates to `engine.applySavePlan(handle, plan)`. The engine
+ *   implementation translates the SavePlan to its own internal archive
+ *   representation PRIVATELY. The runtime-independent contract does NOT
+ *   expose `EngineArchivePatch` or any engine-specific archive type.
  *
  * SHEET-ID MAPPING (Increment 3B):
  *   The service builds `sheetNames: Map<sheetId, sheetName>` from
@@ -65,328 +68,38 @@ import type {
   EngineRecalcRead,
   EngineRecalcResult,
   EngineMediaResult,
-  EngineArchivePatch,
 } from './spreadsheet-engine.js'
 
-// ── Domain save plan types (mirror legacy WorkbookSaveRequest) ────────
-
-/**
- * A cell edit in the domain save plan.
- * Keyed by `sheetId` (domain), resolved to file sheet name by the service.
- */
-export interface SheetCellEdit {
-  /** Domain sheetId (the renderer's sheet identifier). */
-  readonly sheetId: string
-  readonly row: number
-  readonly column: number
-  /** The value to write (string for formulas, number for numeric). */
-  readonly value: string
-  /** Optional formula string (without leading =). */
-  readonly formula?: string
-  /** Optional style index to apply. */
-  readonly styleIndex?: number
-  /** Optional rich-text runs. */
-  readonly rich?: unknown
-  /** Whether to reset the cell's style. */
-  readonly styleReset?: boolean
-}
-
-/**
- * A structural operation (insert/delete/resize/hide/outline rows or columns).
- * Keyed by `sheetId` (domain), resolved to file sheet name by the service.
- */
-export interface SheetStructuralOp {
-  readonly sheetId: string
-  readonly kind: string
-  readonly start?: number
-  readonly end?: number
-  readonly index?: number
-  readonly count?: number
-  readonly size?: number
-  readonly level?: number
-  readonly collapsed?: boolean
-  readonly hidden?: boolean
-  readonly before?: boolean
-  readonly range?: unknown
-}
-
-/**
- * A sheet-level operation (add/duplicate/rename/reorder/remove/hide).
- * Keyed by `sheetId` (domain).
- */
-export interface SheetOp {
-  readonly kind: 'add-sheet' | 'duplicate-sheet' | 'rename-sheet' | 'remove-sheet' | 'set-sheet-hidden' | 'reorder-sheets'
-  readonly sheetId: string
-  /** For add-sheet / duplicate-sheet: the new sheet's name. */
-  readonly name?: string
-  /** For duplicate-sheet: the source sheet's id. */
-  readonly sourceSheetId?: string
-  /** For rename-sheet: the new name. */
-  readonly newName?: string
-  /** For set-sheet-hidden: the hidden state. */
-  readonly hidden?: boolean
-}
-
-/**
- * A hyperlink edit (add/remove) keyed by sheetId + cell.
- */
-export interface SheetHyperlinkEdit {
-  readonly sheetId: string
-  readonly row: number
-  readonly column: number
-  /** null target = remove hyperlink. */
-  readonly target: string | null
-}
-
-/**
- * A filter state (auto-filter) keyed by sheetId.
- */
-export interface SheetFilterState {
-  readonly sheetId: string
-  readonly filter: unknown
-  readonly hiddenRows: number[]
-  readonly visibilityRange?: unknown
-}
-
-/**
- * A conditional-formatting state keyed by sheetId.
- */
-export interface SheetCfState {
-  readonly sheetId: string
-  readonly rules: unknown[]
-}
-
-/**
- * A data-validation state keyed by sheetId.
- */
-export interface SheetDvState {
-  readonly sheetId: string
-  readonly rules: unknown[]
-}
-
-/**
- * A page-setup state keyed by sheetId.
- */
-export interface SheetPageSetupState {
-  readonly sheetId: string
-  readonly [key: string]: unknown
-}
-
-/**
- * A note (cell comment) state keyed by sheetId.
- */
-export interface SheetNoteState {
-  readonly sheetId: string
-  readonly notes: unknown[]
-}
-
-/**
- * A visual addition (chart/shape/image) keyed by sheetId.
- */
-export interface SheetVisualAddition {
-  readonly sheetId: string
-  readonly anchor: unknown
-  readonly chart?: unknown
-  readonly shape?: unknown
-  readonly image?: unknown
-}
-
-/**
- * A table addition keyed by sheetId.
- */
-export interface SheetTableAddition {
-  readonly sheetId: string
-  readonly area: unknown
-  readonly name: string
-  readonly columnNames: string[]
-  readonly style?: unknown
-  readonly bandedRows?: boolean
-}
-
-/**
- * A pivot-table addition keyed by sheetId + sourceSheetId.
- */
-export interface SheetPivotAddition {
-  readonly sheetId: string
-  readonly sourceSheetId: string
-  readonly sourceArea: unknown
-  readonly location: unknown
-  readonly name: string
-  readonly [key: string]: unknown
-}
-
-/**
- * A sparkline addition keyed by sheetId.
- */
-export interface SheetSparklineAddition {
-  readonly sheetId: string
-  readonly type: 'line' | 'column' | 'stacked'
-  readonly color?: string
-  readonly cells: Array<{ cell: string; sourceRef: string }>
-}
-
-/**
- * A recalculated formula value writeback keyed by sheetId.
- */
-export interface SheetFormulaValue {
-  readonly sheetId: string
-  readonly row: number
-  readonly column: number
-  readonly value: string | number | boolean | null
-}
-
-/**
- * A pivot refresh update keyed by sheetId.
- */
-export interface PivotRefreshUpdate {
-  readonly cachePath: string
-  readonly sheetId: string
-  readonly newOutputRef: string
-  readonly relayout?: SheetPivotAddition
-}
-
-/**
- * A sheet protection state keyed by sheetId.
- */
-export interface SheetProtectionState {
-  readonly sheetId: string
-  readonly protected: boolean
-}
-
-/**
- * A protected-range state keyed by sheetId.
- */
-export interface SheetProtectedRangesState {
-  readonly sheetId: string
-  readonly ranges: Array<{ name: string; sqref: string }>
-}
-
-/**
- * A chart edit (package-absolute drawingPath — no sheetId mapping needed).
- */
-export interface WorkbookChartEdit {
-  readonly drawingPath: string
-  readonly [key: string]: unknown
-}
-
-/**
- * A visual edit (package-absolute drawingPath — no sheetId mapping needed).
- */
-export interface WorkbookVisualEdit {
-  readonly drawingPath: string
-  readonly [key: string]: unknown
-}
-
-/**
- * Defined-names state (declarative snapshot, null = untouched).
- */
-export interface DefinedNamesState {
-  readonly names: Array<{ name: string; formula: string; sheetIndex?: number }>
-  readonly preserveNames: string[]
-}
-
-/**
- * Theme state (null = untouched).
- */
-export interface WorkbookThemeState {
-  readonly colors?: { name: string; values: string[] }
-  readonly fonts?: { name: string; major: string; minor: string }
-}
-
-/**
- * Workbook protection state (null = untouched).
- */
-export interface WorkbookProtectionState {
-  readonly lockStructure: boolean
-}
-
-/**
- * The domain save plan — preserves ALL renderer-independent Sheets mutation
- * families. Mirrors the legacy `WorkbookSaveRequest` (apps/sheets/src/shared/
- * desktop-api.ts:1476) but as domain types, not Zod schemas.
- *
- * Every field keyed by `sheetId` is resolved to the file sheet name by the
- * service (using `session.sheetNames`) before delegation. Unknown sheetIds
- * → `InvalidInputError` (fail-closed).
- *
- * The service translates this plan to `EngineArchivePatch[]` at the final
- * engine boundary, via the injected `SavePlanTranslator`.
- */
-export interface SavePlan {
-  // ── Cell-level mutations ──
-  readonly edits: SheetCellEdit[]
-  readonly structuralOps: SheetStructuralOp[]
-  readonly formulaValues: SheetFormulaValue[]
-
-  // ── Sheet-level mutations ──
-  readonly sheetOps: SheetOp[]
-  /** Final tab order (domain sheetIds). Required when sheetOps is non-empty. */
-  readonly sheetOrder: string[]
-
-  // ── Per-sheet state ──
-  readonly filterStates: SheetFilterState[]
-  readonly hyperlinkEdits: SheetHyperlinkEdit[]
-  readonly cfStates: SheetCfState[]
-  readonly dvStates: SheetDvState[]
-  readonly pageSetupStates: SheetPageSetupState[]
-  readonly noteStates: SheetNoteState[]
-  readonly sheetProtections: SheetProtectionState[]
-  readonly protectedRangeStates: SheetProtectedRangesState[]
-
-  // ── Additions (new objects) ──
-  readonly visualAdditions: SheetVisualAddition[]
-  readonly tableAdditions: SheetTableAddition[]
-  readonly pivotAdditions: SheetPivotAddition[]
-  readonly sparklineAdditions: SheetSparklineAddition[]
-
-  // ── Workbook-level mutations ──
-  readonly chartEdits: WorkbookChartEdit[]
-  readonly visualEdits: WorkbookVisualEdit[]
-  readonly pivotCacheRefreshPaths: string[]
-  readonly pivotRefreshUpdates: PivotRefreshUpdate[]
-  readonly definedNamesState: DefinedNamesState | null
-  readonly themeState: WorkbookThemeState | null
-  readonly workbookProtectionState: WorkbookProtectionState | null
-}
-
-/**
- * Result of translating a SavePlan to engine archive patches.
- * The service passes these patches to `engine.saveArchive()`.
- */
-export interface SavePlanTranslation {
-  /** The engine archive patches to apply. */
-  readonly patches: EngineArchivePatch[]
-  /** Entry paths that were touched (for the save result). */
-  readonly touchedEntries: string[]
-}
-
-/**
- * Translates a domain SavePlan to engine archive patches at the final
- * engine boundary. The service calls this before `engine.saveArchive()`.
- *
- * The translator implementation is provided by the shell (it wraps the
- * xlsx-gateway.ts planning logic). The service does NOT import
- * platform-electron, xlsx-gateway, or any engine-specific code.
- *
- * The translator receives the resolved `sheetNames` map (sheetId → file
- * sheet name) and is responsible for resolving sheetIds in the plan
- * before producing archive patches.
- */
-export interface SavePlanTranslator {
-  /**
-   * Translate a domain SavePlan to engine archive patches.
-   *
-   * @param handle — opaque engine session handle (for reading archive entries)
-   * @param plan — the domain save plan
-   * @param sheetNames — the resolved sheetId → file sheet name map
-   * @returns the engine archive patches + touched entry paths
-   */
-  translate(
-    handle: EngineSessionHandle,
-    plan: SavePlan,
-    sheetNames: ReadonlyMap<string, string>,
-  ): Promise<SavePlanTranslation>
-}
+// Re-export all SavePlan domain types so callers can construct save requests
+// without importing from two files. These types are defined in save-plan.ts
+// (separate file to avoid a circular import: spreadsheet-engine.ts needs
+// SavePlan, and sheets.ts needs SpreadsheetEngine from spreadsheet-engine.ts).
+export type {
+  SavePlan,
+  SheetCellEdit,
+  SheetStructuralOp,
+  SheetOp,
+  SheetHyperlinkEdit,
+  SheetFilterState,
+  SheetCfState,
+  SheetDvState,
+  SheetPageSetupState,
+  SheetNoteState,
+  SheetProtectionState,
+  SheetProtectedRangesState,
+  SheetVisualAddition,
+  SheetTableAddition,
+  SheetPivotAddition,
+  SheetSparklineAddition,
+  SheetFormulaValue,
+  PivotRefreshUpdate,
+  WorkbookChartEdit,
+  WorkbookVisualEdit,
+  DefinedNamesState,
+  WorkbookThemeState,
+  WorkbookProtectionState,
+} from './save-plan.js'
+import type { SavePlan } from './save-plan.js'
 
 // ── Domain session ───────────────────────────────────────────────────
 
@@ -454,8 +167,8 @@ export interface WorkbookOpenResult {
  * This REPLACES the Increment 3A `SaveRequest = EngineArchivePatch[]`,
  * which discarded renderer-independent Sheets mutation semantics. The
  * service now receives a domain SavePlan, validates sheetIds (fail-closed),
- * resolves them to file sheet names, and delegates to the engine via the
- * injected SavePlanTranslator.
+ * resolves them to file sheet names, and delegates to
+ * `engine.applySavePlan(handle, plan)`.
  */
 export interface SaveRequest {
   /** The domain save plan (sheetOps, edits, structuralOps, etc.). */
@@ -475,6 +188,9 @@ export interface SaveRequest {
  * distinguish:
  *   - externalChange policy refusal → { ok: false, reason: 'external-modified' }
  *   - engine failure              → throws EngineError | InvalidSessionError
+ *
+ * `touchedEntries` is a list of archive-entry path strings (e.g.
+ * 'xl/worksheets/sheet1.xml') — NOT an engine-specific structure.
  */
 export interface SaveResult {
   /** true when the save succeeded; false when refused by external-change policy. */
@@ -486,7 +202,7 @@ export interface SaveResult {
   reason?: 'external-modified'
   /** The saved workbook bytes — present when ok === true. */
   data?: Uint8Array
-  /** Entry paths that were touched — present when ok === true. */
+  /** Archive entry paths that were touched — present when ok === true. */
   touchedEntries?: string[]
 }
 
@@ -495,15 +211,14 @@ export interface SaveResult {
 /**
  * Dependencies for SpreadsheetServiceImpl.
  *
- * The SavePlanTranslator is injected (not imported) — the service does
- * NOT own the translation logic. The shell provides the translator
- * implementation (wrapping xlsx-gateway.ts).
+ * The service receives only the SpreadsheetEngine — it does NOT need a
+ * SavePlanTranslator (Increment 3C removed that abstraction). The engine
+ * accepts the domain SavePlan directly via `applySavePlan(handle, plan)`
+ * and translates it to its own internal archive format privately.
  */
 export interface SpreadsheetServiceDeps {
   /** The spreadsheet execution engine (injected — runtime chooses impl). */
   readonly engine: SpreadsheetEngine
-  /** Translates domain SavePlan → EngineArchivePatch[] at the engine boundary. */
-  readonly savePlanTranslator: SavePlanTranslator
 }
 
 // ── Service interface ───────────────────────────────────────────────
@@ -648,8 +363,11 @@ export interface SpreadsheetService {
    * delegation. Unknown sheetIds in ANY mutation family (edits,
    * structuralOps, sheetOps, filterStates, etc.) → InvalidInputError.
    *
-   * The service translates the validated SavePlan to EngineArchivePatch[]
-   * via the injected SavePlanTranslator, then calls engine.saveArchive().
+   * The service delegates to `engine.applySavePlan(handle, plan)`, which
+   * internally translates the SavePlan to the engine's own archive format
+   * and produces the saved bytes + touched entry paths. The translation is
+   * PRIVATE to the engine implementation — no EngineArchivePatch leaks
+   * above the engine boundary.
    *
    * RETURNS `SaveResult` — the external-change refusal is a legitimate
    * business outcome (NOT an error). Engine failures (InvalidSessionError,
@@ -665,10 +383,9 @@ export interface SpreadsheetService {
 
   /**
    * Write a recovery copy. The service validates all sheetIds in the
-   * SavePlan (fail-closed), translates to EngineArchivePatch[] via the
-   * injected SavePlanTranslator, and delegates to engine.saveArchive().
-   * It does NOT write to a filesystem path — it returns the bytes for
-   * the shell to persist.
+   * SavePlan (fail-closed), delegates to `engine.applySavePlan(handle, plan)`,
+   * and returns the saved bytes. It does NOT write to a filesystem path —
+   * the shell persists the bytes.
    *
    * THROWS on failure (does NOT return `{ ok: false }`):
    *   - InvalidInputError    — unknown sheetId in the SavePlan

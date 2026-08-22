@@ -21,7 +21,7 @@ import {
   validateRecalcResult,
   validateMediaResult,
 } from '../src/capabilities/sidecar-validators.js'
-import type { EngineSessionHandle } from '@genoffice/runtime-contracts'
+import type { EngineSessionHandle, SavePlan } from '@genoffice/runtime-contracts'
 import {
   EngineError,
   InvalidSessionError,
@@ -29,6 +29,36 @@ import {
 } from '@genoffice/runtime-contracts'
 
 const FAKE_BINARY = '/nonexistent/xlsx-sidecar'
+
+// Helper: an empty SavePlan for applySavePlan tests (Increment 3C).
+function makeEmptySavePlan(): SavePlan {
+  return {
+    edits: [],
+    structuralOps: [],
+    formulaValues: [],
+    sheetOps: [],
+    sheetOrder: [],
+    filterStates: [],
+    hyperlinkEdits: [],
+    cfStates: [],
+    dvStates: [],
+    pageSetupStates: [],
+    noteStates: [],
+    sheetProtections: [],
+    protectedRangeStates: [],
+    visualAdditions: [],
+    tableAdditions: [],
+    pivotAdditions: [],
+    sparklineAdditions: [],
+    chartEdits: [],
+    visualEdits: [],
+    pivotCacheRefreshPaths: [],
+    pivotRefreshUpdates: [],
+    definedNamesState: null,
+    themeState: null,
+    workbookProtectionState: null,
+  }
+}
 
 // ── Handle opacity ────────────────────────────────────────────────────
 
@@ -77,10 +107,12 @@ describe('Session invalidation', () => {
     const fakeHandle = Object.freeze({}) as EngineSessionHandle
     await expect(engine.readMedia(fakeHandle, 'img1')).rejects.toThrow(InvalidSessionError)
   })
-  test('saveArchive with fake handle → InvalidSessionError', async () => {
+  test('applySavePlan with fake handle → InvalidSessionError', async () => {
     const engine = new ElectronXlsxSidecarEngine({ binaryPath: FAKE_BINARY })
     const fakeHandle = Object.freeze({}) as EngineSessionHandle
-    await expect(engine.saveArchive(fakeHandle, [])).rejects.toThrow(InvalidSessionError)
+    // Increment 3C: applySavePlan replaces saveArchive. The engine accepts
+    // the domain SavePlan directly.
+    await expect(engine.applySavePlan(fakeHandle, makeEmptySavePlan())).rejects.toThrow(InvalidSessionError)
   })
   test('close with fake handle → InvalidSessionError', async () => {
     const engine = new ElectronXlsxSidecarEngine({ binaryPath: FAKE_BINARY })
@@ -133,15 +165,76 @@ describe('Protocol envelope validation', () => {
   test('validateOpenResult with missing sessionId → EngineError', () => {
     expect(() => validateOpenResult({ sha256: 'abc' })).toThrow(EngineError)
   })
-  test('validateOpenResult with valid data → succeeds', () => {
+  test('validateOpenResult with valid data (id + name) → succeeds (Increment 3C: id is required)', () => {
     const result = validateOpenResult({
       sessionId: 'test-uuid',
       sha256: 'abc123',
       entryCount: 10,
-      sheets: [{ name: 'Sheet1' }],
+      // Increment 3C: sheets[].id is REQUIRED (no name fallback).
+      sheets: [{ id: 'sheet-1', name: 'Sheet1' }],
     })
     expect(result.sessionId).toBe('test-uuid')
     expect(result.sheets).toHaveLength(1)
+    expect(result.sheets[0].id).toBe('sheet-1')
+    expect(result.sheets[0].name).toBe('Sheet1')
+  })
+
+  test('validateOpenResult with missing sheets[].id → EngineError(PROTOCOL_ERROR) (Increment 3C: no name fallback)', () => {
+    // A sidecar binary that does not return `id` is PROTOCOL-INCOMPATIBLE.
+    // We do NOT silently fall back to the sheet name.
+    expect(() => validateOpenResult({
+      sessionId: 'test-uuid',
+      sha256: 'abc123',
+      entryCount: 10,
+      sheets: [{ name: 'Sheet1' }],  // missing id
+    })).toThrow(EngineError)
+    // Verify the error code is PROTOCOL_ERROR
+    try {
+      validateOpenResult({
+        sessionId: 'test-uuid',
+        sha256: 'abc123',
+        entryCount: 10,
+        sheets: [{ name: 'Sheet1' }],
+      })
+      expect.fail('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError)
+      expect((err as EngineError).code).toBe('PROTOCOL_ERROR')
+    }
+  })
+
+  test('validateOpenResult with non-string sheets[].id → EngineError(PROTOCOL_ERROR) (Increment 3C)', () => {
+    expect(() => validateOpenResult({
+      sessionId: 'test-uuid',
+      sha256: 'abc123',
+      entryCount: 10,
+      sheets: [{ id: 123, name: 'Sheet1' }],  // non-string id
+    })).toThrow(EngineError)
+    try {
+      validateOpenResult({
+        sessionId: 'test-uuid',
+        sha256: 'abc123',
+        entryCount: 10,
+        sheets: [{ id: null, name: 'Sheet1' }],
+      })
+      expect.fail('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError)
+      expect((err as EngineError).code).toBe('PROTOCOL_ERROR')
+    }
+  })
+
+  test('validateOpenResult with id === name (no fallback, id is authoritative) → succeeds', () => {
+    // When id and name happen to be equal, the validator accepts it — but
+    // the id is the authoritative key, not the name.
+    const result = validateOpenResult({
+      sessionId: 'test-uuid',
+      sha256: 'abc123',
+      entryCount: 10,
+      sheets: [{ id: 'Sheet1', name: 'Sheet1' }],
+    })
+    expect(result.sheets[0].id).toBe('Sheet1')
+    expect(result.sheets[0].name).toBe('Sheet1')
   })
 
   test('validateRangeResult with null → EngineError', () => {
@@ -222,17 +315,20 @@ describe('SidecarProtocolClient', () => {
 // ── Architecture boundary ────────────────────────────────────────────
 
 describe('Architecture boundary', () => {
-  test('ElectronXlsxSidecarEngine implements SpreadsheetEngine', () => {
+  test('ElectronXlsxSidecarEngine implements SpreadsheetEngine (Increment 3C: applySavePlan replaces saveArchive)', () => {
     const engine = new ElectronXlsxSidecarEngine({ binaryPath: FAKE_BINARY })
     expect(typeof engine.open).toBe('function')
     expect(typeof engine.readRange).toBe('function')
     expect(typeof engine.readFormulaCells).toBe('function')
     expect(typeof engine.recalculate).toBe('function')
     expect(typeof engine.readMedia).toBe('function')
-    expect(typeof engine.saveArchive).toBe('function')
+    // Increment 3C: applySavePlan replaces saveArchive.
+    expect(typeof engine.applySavePlan).toBe('function')
     expect(typeof engine.convertWorkbook).toBe('function')
     expect(typeof engine.close).toBe('function')
     expect(typeof engine.stop).toBe('function')
+    // saveArchive must NOT exist (removed in 3C)
+    expect((engine as unknown as { saveArchive?: unknown }).saveArchive).toBeUndefined()
   })
   test('open() accepts Uint8Array (not string path)', () => {
     const engine = new ElectronXlsxSidecarEngine({ binaryPath: FAKE_BINARY })

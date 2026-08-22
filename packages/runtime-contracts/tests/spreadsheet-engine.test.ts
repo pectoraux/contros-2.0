@@ -148,12 +148,64 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
     expect(metadataMatch).not.toBeNull()
     const metadataBody = metadataMatch![1]
     expect(metadataBody).not.toMatch(/^\s*path:\s*string/m)
-    // No method should accept a parameter named 'path' of type string
-    // (the 'entryPath' in EngineArchivePatch is a ZIP entry path, not a filesystem path — that's fine)
-    const pathParams = text.match(/\bpath:\s*string/g)
-    // Filter out entryPath and comment lines
-    const realPathParams = (pathParams ?? []).filter((p) => !p.includes('entryPath'))
-    expect(realPathParams).toEqual([])
+    // No method should accept a parameter named 'path' of type string.
+    // (Increment 3C removed EngineArchivePatch from runtime-contracts entirely;
+    // the 'entryPath' field that previously appeared here is now an engine-
+    // internal type defined only in packages/platform-electron/.)
+    const pathParams = text.match(/\bpath:\s*string/g) ?? []
+    expect(pathParams).toEqual([])
+  })
+
+  test('ZERO references to EngineArchivePatch in spreadsheet-engine.ts source (non-comment, Increment 3C)', () => {
+    const text = readFile(ENGINE_FILE)
+    // EngineArchivePatch has been REMOVED from runtime-contracts.
+    // It is now an engine-internal type defined only in packages/platform-electron/.
+    // The only allowable mentions are in comment lines documenting the removal.
+    const hits = scanForPattern(ENGINE_FILE.replace('/spreadsheet-engine.ts', ''), /\bEngineArchivePatch\b/)
+    const engineHits = hits.filter((h) => h.file.endsWith('spreadsheet-engine.ts'))
+    expect(engineHits).toEqual([])
+  })
+
+  test('ZERO references to EngineArchivePatch across ALL runtime-contracts source (non-comment, Increment 3C)', () => {
+    // Scan the entire runtime-contracts src directory for any EngineArchivePatch leakage.
+    // Comment lines are filtered out by scanForPattern.
+    const hits = scanForPattern(SRC, /\bEngineArchivePatch\b/)
+    expect(hits).toEqual([])
+  })
+
+  test('saveArchive is REMOVED (replaced by applySavePlan in Increment 3C)', () => {
+    const text = readFile(ENGINE_FILE)
+    // The old saveArchive(handle, EngineArchivePatch[]) operation is gone
+    // from the source (non-comment lines).
+    const hits = scanForPattern(ENGINE_FILE.replace('/spreadsheet-engine.ts', ''), /\bsaveArchive\b/)
+    const engineHits = hits.filter((h) => h.file.endsWith('spreadsheet-engine.ts'))
+    expect(engineHits).toEqual([])
+  })
+
+  test('applySavePlan is defined (accepts domain SavePlan, returns EngineSaveResult)', () => {
+    const text = readFile(ENGINE_FILE)
+    // The new applySavePlan operation accepts a domain SavePlan (not engine patches).
+    expect(text).toMatch(/applySavePlan\(/)
+    expect(text).toMatch(/applySavePlan\(\s*handle:\s*EngineSessionHandle/)
+    expect(text).toMatch(/plan:\s*SavePlan/)
+    expect(text).toMatch(/Promise<EngineSaveResult>/)
+  })
+
+  test('EngineSaveResult is defined (data + touchedEntries, no EngineArchivePatch in source)', () => {
+    const text = readFile(ENGINE_FILE)
+    expect(text).toMatch(/interface EngineSaveResult/)
+    const resultMatch = text.match(/interface EngineSaveResult \{([\s\S]*?)\}/)
+    expect(resultMatch).not.toBeNull()
+    const body = resultMatch![1]
+    expect(body).toMatch(/data:\s*Uint8Array/)
+    expect(body).toMatch(/touchedEntries:\s*string\[\]/)
+    // Must NOT contain any engine-specific archive type in the interface body
+    expect(body).not.toContain('EngineArchivePatch')
+  })
+
+  test('SavePlan is imported from save-plan.ts (no circular dependency)', () => {
+    const text = readFile(ENGINE_FILE)
+    expect(text).toMatch(/import type \{ SavePlan \} from '.\/save-plan\.js'/)
   })
 
   test('EngineSessionHandle exposes no inspectable fields', () => {
@@ -179,8 +231,9 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
     // open() returns a handle (creates it) — the signature is multi-line now
     expect(text).toMatch(/open\(\s*workbook:\s*Uint8Array/)
     expect(text).toMatch(/handle:\s*EngineSessionHandle/)
-    // All other operations receive handle as first parameter
-    const methods = ['readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'saveArchive', 'close']
+    // All other operations receive handle as first parameter.
+    // Increment 3C: saveArchive replaced by applySavePlan.
+    const methods = ['readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'applySavePlan', 'close']
     for (const method of methods) {
       expect(text).toMatch(new RegExp(`${method}\\(\\s*handle:\\s*EngineSessionHandle`))
     }
@@ -215,9 +268,10 @@ describe('SpreadsheetEngine contract — ADR-004 architecture boundary', () => {
     expect(body).toMatch(/stable/i)
   })
 
-  test('SpreadsheetEngine interface defines all 9 operations from ADR-004', () => {
+  test('SpreadsheetEngine interface defines all 9 operations from ADR-004 (Increment 3C: applySavePlan replaces saveArchive)', () => {
     const text = readFile(ENGINE_FILE)
-    const required = ['open', 'readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'saveArchive', 'convertWorkbook', 'close', 'stop']
+    // Increment 3C: saveArchive replaced by applySavePlan.
+    const required = ['open', 'readRange', 'readFormulaCells', 'recalculate', 'readMedia', 'applySavePlan', 'convertWorkbook', 'close', 'stop']
     for (const op of required) {
       expect(text).toContain(op)
     }

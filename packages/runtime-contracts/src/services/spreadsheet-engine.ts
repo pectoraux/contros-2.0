@@ -30,6 +30,8 @@
  * IMPORTANT (ADR-001 Correction A): constructor injection. No getRuntime().
  */
 
+import type { SavePlan } from './save-plan.js'
+
 // ── Opaque engine session handle ───────────────────────────────────────
 
 /**
@@ -298,13 +300,29 @@ export interface EngineMediaResult {
   base64: string
 }
 
-/** A patch to apply to a ZIP entry in the archive during save. */
-export interface EngineArchivePatch {
-  /** The ZIP entry path within the archive (e.g., 'xl/worksheets/sheet1.xml'). */
-  entryPath: string
-  /** The new content for the entry (UTF-8 string). */
-  content: string
+/**
+ * Result of applying a SavePlan — the saved archive bytes plus the list of
+ * archive entry paths that were touched (for shell-layer recovery/recent-
+ * files tracking). Contains NO engine-specific archive type.
+ */
+export interface EngineSaveResult {
+  /** The complete saved archive bytes. */
+  readonly data: Uint8Array
+  /** Archive entry paths that were touched (e.g., 'xl/worksheets/sheet1.xml'). */
+  readonly touchedEntries: string[]
 }
+
+// NOTE (Increment 3C):
+//   EngineArchivePatch has been REMOVED from runtime-contracts. It is an
+//   engine-specific archive representation that must NOT leak above the
+//   engine boundary. The ElectronXlsxSidecarEngine internally defines its
+//   own archive-patch type (in packages/platform-electron/) and uses it
+//   to translate the domain SavePlan → archive patches.
+//
+//   The engine contract now exposes `applySavePlan(handle, plan)`, which
+//   accepts the domain SavePlan (from save-plan.ts) and returns the saved
+//   archive bytes + touched entry paths. The translation is private to
+//   the engine implementation.
 
 // ── SpreadsheetEngine interface ────────────────────────────────────────
 
@@ -322,6 +340,11 @@ export interface EngineArchivePatch {
  *   file and pass the path to the Rust sidecar, but that translation is
  *   private to the adapter. A WASM engine passes the bytes directly to
  *   in-process IronCalc. A Cloud engine uploads the bytes to a server.
+ *
+ *   The engine accepts the domain `SavePlan` for saves — NOT engine-
+ *   specific archive patches. The implementation translates the plan to
+ *   its own archive format internally (Increment 3C: no EngineArchivePatch
+ *   leakage above the engine boundary).
  *
  * The interface uses `Promise<T>` for all operations. It must not assume
  * a process boundary — a WASM engine returns results via async in-process
@@ -394,17 +417,28 @@ export interface SpreadsheetEngine {
   ): Promise<EngineMediaResult>
 
   /**
-   * Save the workbook as a new archive. Applies patches to the existing
-   * ZIP entries and returns the complete archive bytes.
+   * Apply a domain SavePlan and return the saved archive bytes.
+   *
+   * The engine implementation translates the SavePlan to its own internal
+   * archive representation (e.g., EngineArchivePatch[] for the Rust sidecar,
+   * an in-memory entry map for WASM) and produces the complete archive bytes.
+   * The translation is PRIVATE to the implementation — the runtime-
+   * independent contract does NOT expose any engine-specific archive type.
+   *
+   * The caller (SpreadsheetService) is responsible for validating all
+   * sheetIds in the SavePlan against `session.sheetNames` (fail-closed)
+   * BEFORE calling this method. The engine receives a plan whose sheetIds
+   * have already been resolved to file sheet names where applicable —
+   * HOWEVER, the engine MAY also perform its own validation.
    *
    * @param handle — opaque engine session handle
-   * @param patches — the entry patches to apply
-   * @returns the complete archive bytes (Uint8Array)
+   * @param plan — the domain save plan (sheetOps, edits, structuralOps, etc.)
+   * @returns the saved archive bytes + touched entry paths
    */
-  saveArchive(
+  applySavePlan(
     handle: EngineSessionHandle,
-    patches: EngineArchivePatch[],
-  ): Promise<Uint8Array>
+    plan: SavePlan,
+  ): Promise<EngineSaveResult>
 
   /**
    * Convert a legacy workbook (.xls) to .xlsx format.

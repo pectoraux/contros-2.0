@@ -1,6 +1,6 @@
 /**
  * Architecture-boundary test for the SpreadsheetService domain contract
- * (ADR-004 / Phase 2 Increment 3A correction).
+ * (ADR-004 / Phase 2 Increment 3C correction).
  *
  * Verifies that the runtime-independent contract in
  * `packages/runtime-contracts/src/services/sheets.ts`:
@@ -24,6 +24,16 @@
  *
  *   5. Documents the engineHandle as an opaque engine context token
  *      (not inspectable, not serializable, no implementation details).
+ *
+ *   6. (Increment 3C) Has ZERO references to EngineArchivePatch — the
+ *      engine-specific archive type is PRIVATE to the engine implementation.
+ *      The service delegates to engine.applySavePlan(handle, plan), which
+ *      internally translates the domain SavePlan to the engine's own
+ *      archive format.
+ *
+ *   7. (Increment 3C) Has ZERO references to SavePlanTranslator /
+ *      SavePlanTranslation — the translation is now entirely below the
+ *      engine boundary, not in runtime-contracts.
  */
 import { describe, test, expect } from 'vitest'
 import { join } from 'node:path'
@@ -212,7 +222,7 @@ describe('SpreadsheetService contract — Increment 3A architecture boundary', (
     expect(text).toMatch(/SpreadsheetEngine/)
   })
 
-  // ── 7. SavePlan preserves all mutation families (Increment 3B) ─────
+  // ── 7. SavePlan preserves all mutation families (Increment 3B/3C) ──
 
   test('SaveRequest is a domain SavePlan (NOT EngineArchivePatch[])', () => {
     const text = readFile(SHEETS_FILE)
@@ -225,7 +235,11 @@ describe('SpreadsheetService contract — Increment 3A architecture boundary', (
   })
 
   test('SavePlan preserves all mutation families from legacy WorkbookSaveRequest', () => {
-    const text = readFile(SHEETS_FILE)
+    // Increment 3C: SavePlan is defined in save-plan.ts (separate file to
+    // avoid a circular import: spreadsheet-engine.ts needs SavePlan,
+    // and sheets.ts needs SpreadsheetEngine from spreadsheet-engine.ts).
+    const SAVE_PLAN_FILE = join(__dirname, '..', 'src', 'services', 'save-plan.ts')
+    const text = readFile(SAVE_PLAN_FILE)
     const planMatch = text.match(/interface SavePlan \{([\s\S]*?)\}/)
     expect(planMatch).not.toBeNull()
     const body = planMatch![1]
@@ -260,26 +274,41 @@ describe('SpreadsheetService contract — Increment 3A architecture boundary', (
     expect(body).toMatch(/\bworkbookProtectionState:\s*WorkbookProtectionState/)
   })
 
-  test('SavePlanTranslator interface is defined (translates at engine boundary)', () => {
+  test('SavePlan is re-exported from sheets.ts (so callers import from one module)', () => {
     const text = readFile(SHEETS_FILE)
-    expect(text).toMatch(/interface SavePlanTranslator/)
-    // The translator takes (handle, plan, sheetNames) and returns SavePlanTranslation
-    const translatorMatch = text.match(/interface SavePlanTranslator \{([\s\S]*?)\}/)
-    expect(translatorMatch).not.toBeNull()
-    const body = translatorMatch![1]
-    expect(body).toMatch(/handle:\s*EngineSessionHandle/)
-    expect(body).toMatch(/plan:\s*SavePlan/)
-    expect(body).toMatch(/sheetNames:\s*ReadonlyMap/)
-    expect(body).toMatch(/Promise<SavePlanTranslation>/)
+    // sheets.ts re-exports the SavePlan types from save-plan.ts
+    expect(text).toMatch(/export type \{[\s\S]*SavePlan[\s\S]*\} from '\.\/save-plan\.js'/)
   })
 
-  test('SpreadsheetServiceDeps includes SavePlanTranslator (injected dependency)', () => {
+  test('SpreadsheetServiceDeps includes ONLY engine (no SavePlanTranslator — Increment 3C)', () => {
     const text = readFile(SHEETS_FILE)
     const depsMatch = text.match(/interface SpreadsheetServiceDeps \{([\s\S]*?)\}/)
     expect(depsMatch).not.toBeNull()
     const body = depsMatch![1]
     expect(body).toMatch(/engine:\s*SpreadsheetEngine/)
-    expect(body).toMatch(/savePlanTranslator:\s*SavePlanTranslator/)
+    // Increment 3C: SavePlanTranslator is REMOVED — the engine accepts
+    // the domain SavePlan directly via applySavePlan.
+    expect(body).not.toMatch(/savePlanTranslator/)
+    expect(body).not.toMatch(/SavePlanTranslator/)
+  })
+
+  test('ZERO references to SavePlanTranslator in sheets.ts (Increment 3C removed it)', () => {
+    // scanForPattern filters comment lines (starts with *, //, /*)
+    const hits = scanForPattern(readFile(SHEETS_FILE), /\bSavePlanTranslator\b|\bSavePlanTranslation\b/)
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to EngineArchivePatch in sheets.ts source (non-comment, Increment 3C)', () => {
+    // scanForPattern filters comment lines — the only allowable mentions of
+    // EngineArchivePatch are in comment lines documenting its removal.
+    const hits = scanForPattern(readFile(SHEETS_FILE), /\bEngineArchivePatch\b/)
+    expect(hits).toEqual([])
+  })
+
+  test('ZERO references to EngineArchivePatch in save-plan.ts source (non-comment, Increment 3C)', () => {
+    const SAVE_PLAN_FILE = join(__dirname, '..', 'src', 'services', 'save-plan.ts')
+    const hits = scanForPattern(readFile(SAVE_PLAN_FILE), /\bEngineArchivePatch\b/)
+    expect(hits).toEqual([])
   })
 
   // ── 8. SheetId mapping uses stable id (Increment 3B) ──────────────

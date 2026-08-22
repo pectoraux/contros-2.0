@@ -49,10 +49,8 @@ import type {
   EngineFormulaCellsResult,
   EngineRecalcResult,
   EngineMediaResult,
-  EngineArchivePatch,
+  EngineSaveResult,
   SavePlan,
-  SavePlanTranslator,
-  SavePlanTranslation,
   SpreadsheetServiceDeps,
 } from '@genoffice/runtime-contracts'
 import { EngineError, InvalidSessionError, InvalidInputError } from '@genoffice/runtime-contracts'
@@ -87,42 +85,37 @@ function makeMockMetadata(): WorkbookMetadata {
   }
 }
 
-function makeMockEngine(): SpreadsheetEngine & { _handle: EngineSessionHandle } {
+function makeMockEngine(): SpreadsheetEngine & { _handle: EngineSessionHandle; _saveResult: EngineSaveResult } {
   const handle = makeMockHandle()
+  const saveResult: EngineSaveResult = {
+    data: new Uint8Array([1, 2, 3]),
+    touchedEntries: ['xl/worksheets/sheet1.xml'],
+  }
   return {
     _handle: handle,
+    _saveResult: saveResult,
     open: vi.fn(async () => ({ handle, metadata: makeMockMetadata() })),
     readRange: vi.fn(async () => ({ cells: [], rows: [], merges: [], columns: [], hyperlinks: [], conditionalFormatting: [], dataValidation: [], rowBreaks: [], columnBreaks: [], sheetProtection: false }) as EngineRangeResult),
     readFormulaCells: vi.fn(async () => ({ cells: [] }) as EngineFormulaCellsResult),
     recalculate: vi.fn(async () => ({ cells: [] }) as EngineRecalcResult),
     readMedia: vi.fn(async () => ({ mediaType: 'image/png', base64: 'iVBOR' }) as EngineMediaResult),
-    saveArchive: vi.fn(async () => new Uint8Array([1, 2, 3])),
+    // Increment 3C: applySavePlan replaces saveArchive. The engine accepts
+    // the domain SavePlan directly and returns EngineSaveResult (data +
+    // touchedEntries). No EngineArchivePatch leaks above the engine boundary.
+    applySavePlan: vi.fn(async () => saveResult),
     convertWorkbook: vi.fn(async () => ({ data: new Uint8Array([1]), fileName: 'converted.xlsx' })),
     close: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
   }
 }
 
-function makeMockTranslator(): SavePlanTranslator & { _translation: SavePlanTranslation } {
-  const translation: SavePlanTranslation = {
-    patches: [{ entryPath: 'xl/worksheets/sheet1.xml', content: '<xml/>' }],
-    touchedEntries: ['xl/worksheets/sheet1.xml'],
-  }
-  return {
-    _translation: translation,
-    translate: vi.fn(async () => translation),
-  }
-}
-
 function makeService(
   engine?: ReturnType<typeof makeMockEngine>,
-  translator?: ReturnType<typeof makeMockTranslator>,
 ) {
   const eng = engine ?? makeMockEngine()
-  const trn = translator ?? makeMockTranslator()
-  const deps: SpreadsheetServiceDeps = { engine: eng, savePlanTranslator: trn }
+  const deps: SpreadsheetServiceDeps = { engine: eng }
   const service = new SpreadsheetServiceImpl(deps)
-  return { service, engine: eng, translator: trn }
+  return { service, engine: eng }
 }
 
 function makeEmptySavePlan(): SavePlan {
@@ -327,44 +320,43 @@ describe('SpreadsheetServiceImpl', () => {
   // ── save: external-change policy + SavePlan validation + error propagation ──
 
   describe('save', () => {
-    test('unchanged → save permitted, delegates to translator + engine, returns data + touchedEntries', async () => {
-      const { service, engine, translator } = makeService()
+    test('unchanged → save permitted, delegates to engine.applySavePlan, returns data + touchedEntries', async () => {
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
       const result = await service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')
       expect(result.ok).toBe(true)
       expect(result.data).toBeInstanceOf(Uint8Array)
       expect(result.touchedEntries).toEqual(['xl/worksheets/sheet1.xml'])
-      // Translator was called with the plan + sheetNames
-      expect(translator.translate).toHaveBeenCalledWith(engine._handle, plan, opened.session.sheetNames)
-      // Engine was called with the translator's patches
-      expect(engine.saveArchive).toHaveBeenCalledWith(engine._handle, [{ entryPath: 'xl/worksheets/sheet1.xml', content: '<xml/>' }])
+      // Increment 3C: engine.applySavePlan is called with the domain SavePlan directly.
+      // No translator, no EngineArchivePatch leakage.
+      expect(engine.applySavePlan).toHaveBeenCalledWith(engine._handle, plan)
     })
 
-    test('changed → save refused with external-modified (translator NOT called)', async () => {
-      const { service, translator } = makeService()
+    test('changed → save refused with external-modified (engine NOT called)', async () => {
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const result = await service.save(opened.session, opened.engineHandle, { plan: makeEmptySavePlan() }, 'changed')
       expect(result.ok).toBe(false)
       expect(result.reason).toBe('external-modified')
-      expect(translator.translate).not.toHaveBeenCalled()
+      expect(engine.applySavePlan).not.toHaveBeenCalled()
     })
 
     test('unknown → save refused (safe default)', async () => {
-      const { service, translator } = makeService()
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const result = await service.save(opened.session, opened.engineHandle, { plan: makeEmptySavePlan() }, 'unknown')
       expect(result.ok).toBe(false)
       expect(result.reason).toBe('external-modified')
-      expect(translator.translate).not.toHaveBeenCalled()
+      expect(engine.applySavePlan).not.toHaveBeenCalled()
     })
 
     test('unknown sheetId in edits → throws InvalidInputError (fail-closed)', async () => {
-      const { service, translator } = makeService()
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'unknown', row: 0, column: 0, value: '42' }] }
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(InvalidInputError)
-      expect(translator.translate).not.toHaveBeenCalled()
+      expect(engine.applySavePlan).not.toHaveBeenCalled()
     })
 
     test('unknown sheetId in structuralOps → throws InvalidInputError', async () => {
@@ -403,7 +395,7 @@ describe('SpreadsheetServiceImpl', () => {
     })
 
     test('add-sheet op (new sheetId not in map) → does NOT throw (added sheets are new)', async () => {
-      const { service, translator } = makeService()
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = {
         ...makeEmptySavePlan(),
@@ -412,25 +404,28 @@ describe('SpreadsheetServiceImpl', () => {
       }
       const result = await service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')
       expect(result.ok).toBe(true)
-      expect(translator.translate).toHaveBeenCalled()
+      expect(engine.applySavePlan).toHaveBeenCalled()
     })
 
-    test('engine failure during saveArchive → throws EngineError (NOT { ok: false })', async () => {
+    test('engine failure during applySavePlan → throws EngineError (NOT { ok: false })', async () => {
       const engine = makeMockEngine()
-      engine.saveArchive = vi.fn(async () => { throw new EngineError('save failed', 'INTERNAL_ERROR') })
+      engine.applySavePlan = vi.fn(async () => { throw new EngineError('save failed', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(EngineError)
     })
 
-    test('translator failure → propagates as typed error', async () => {
-      const translator = makeMockTranslator()
-      translator.translate = vi.fn(async () => { throw new EngineError('translation failed', 'INTERNAL_ERROR') })
-      const { service } = makeService(undefined, translator)
+    test('engine protocol error during applySavePlan → throws EngineError with PROTOCOL_ERROR', async () => {
+      const engine = makeMockEngine()
+      engine.applySavePlan = vi.fn(async () => { throw new EngineError('protocol', 'PROTOCOL_ERROR') })
+      const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
-      await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(EngineError)
+      await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toMatchObject({
+        name: 'EngineError',
+        code: 'PROTOCOL_ERROR',
+      })
     })
   })
 
@@ -454,7 +449,7 @@ describe('SpreadsheetServiceImpl', () => {
 
     test('engine failure → throws EngineError', async () => {
       const engine = makeMockEngine()
-      engine.saveArchive = vi.fn(async () => { throw new EngineError('recovery fail', 'INTERNAL_ERROR') })
+      engine.applySavePlan = vi.fn(async () => { throw new EngineError('recovery fail', 'INTERNAL_ERROR') })
       const { service } = makeService(engine)
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan = { ...makeEmptySavePlan(), edits: [{ sheetId: 'sheet-1', row: 0, column: 0, value: '42' }] }
@@ -540,8 +535,8 @@ describe('SpreadsheetServiceImpl', () => {
       await expect(service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')).rejects.toThrow(InvalidInputError)
     })
 
-    test('valid plan with all sheetIds known → succeeds (translator + engine called)', async () => {
-      const { service, translator, engine } = makeService()
+    test('valid plan with all sheetIds known → succeeds (engine.applySavePlan called)', async () => {
+      const { service, engine } = makeService()
       const opened = await service.open(new Uint8Array([1]), 'en', 'test.xlsx')
       const plan: SavePlan = {
         ...makeEmptySavePlan(),
@@ -564,8 +559,9 @@ describe('SpreadsheetServiceImpl', () => {
       }
       const result = await service.save(opened.session, opened.engineHandle, { plan }, 'unchanged')
       expect(result.ok).toBe(true)
-      expect(translator.translate).toHaveBeenCalledTimes(1)
-      expect(engine.saveArchive).toHaveBeenCalledTimes(1)
+      // Increment 3C: engine.applySavePlan is called exactly once with the full SavePlan.
+      expect(engine.applySavePlan).toHaveBeenCalledTimes(1)
+      expect(engine.applySavePlan).toHaveBeenCalledWith(engine._handle, plan)
     })
   })
 })

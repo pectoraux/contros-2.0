@@ -1,8 +1,7 @@
 /**
  * SpreadsheetServiceImpl — the Sheets domain service.
  *
- * Composes SpreadsheetEngine (runtime-independent) + an injected
- * SavePlanTranslator (provided by the shell). Owns domain semantics:
+ * Composes SpreadsheetEngine (runtime-independent). Owns domain semantics:
  * workbook open/read/recalc/save, sheet-id translation (fail-closed),
  * external-change policy, recovery path derivation.
  *
@@ -34,12 +33,15 @@
  *   sheets-main.ts:1787 (recalc), 2545 and 2554 (save).
  *   The forbidden `if (!sheetName) return sheetId` fallback is gone.
  *
- * SAVE DOMAIN MODEL (Increment 3B correction):
- *   The service accepts a domain `SavePlan` (NOT `EngineArchivePatch[]`).
- *   The SavePlan preserves ALL mutation families. The service validates
- *   all sheetIds in the plan (fail-closed), then delegates to the injected
- *   SavePlanTranslator, which produces EngineArchivePatch[] at the final
- *   engine boundary.
+ * SAVE DOMAIN MODEL (Increment 3B + 3C correction):
+ *   The service accepts a domain `SavePlan` (defined in save-plan.ts).
+ *   The service validates all sheetIds in the plan (fail-closed), then
+ *   delegates to `engine.applySavePlan(handle, plan)`. The engine
+ *   implementation translates the SavePlan to its own internal archive
+ *   format PRIVATELY. The runtime-independent contract does NOT expose
+ *   `EngineArchivePatch` or any engine-specific archive type (Increment 3C
+ *   removed the SavePlanTranslator and SavePlanTranslation abstractions —
+ *   the translation is now entirely below the engine boundary).
  *
  * DOMAIN-EVENT PURITY (Increment 3A correction):
  *   The service does NOT own renderer/event routing. It exposes NO
@@ -205,20 +207,17 @@ export class SpreadsheetServiceImpl implements SpreadsheetService {
     // runtime at sheets-main.ts:2544-2545, 2553-2554.
     this.validateSavePlanSheetIds(request.plan, session.sheetNames)
 
-    // Delegate to the injected SavePlanTranslator, which produces
-    // EngineArchivePatch[] at the final engine boundary. The translator
-    // resolves sheetIds → sheetNames and produces archive patches.
-    const translation = await this.deps.savePlanTranslator.translate(
-      engineHandle,
-      request.plan,
-      session.sheetNames,
-    )
-
-    // Delegate to the engine. Typed engine failures (InvalidSessionError,
-    // InvalidInputError, EngineError) propagate to the caller — do NOT
-    // swallow them as { ok: false, error: string }.
-    const data = await this.deps.engine.saveArchive(engineHandle, translation.patches)
-    return { ok: true, data, touchedEntries: translation.touchedEntries }
+    // Delegate to the engine. The engine implementation translates the
+    // SavePlan to its own internal archive representation PRIVATELY — no
+    // EngineArchivePatch leaks above the engine boundary (Increment 3C).
+    // Typed engine failures (InvalidSessionError, InvalidInputError,
+    // EngineError) propagate to the caller.
+    const result = await this.deps.engine.applySavePlan(engineHandle, request.plan)
+    return {
+      ok: true,
+      data: result.data,
+      touchedEntries: result.touchedEntries,
+    }
   }
 
   async writeRecovery(
@@ -229,16 +228,11 @@ export class SpreadsheetServiceImpl implements SpreadsheetService {
     // Validate ALL sheetIds in the SavePlan (fail-closed).
     this.validateSavePlanSheetIds(request.plan, session.sheetNames)
 
-    // Delegate to the injected SavePlanTranslator.
-    const translation = await this.deps.savePlanTranslator.translate(
-      engineHandle,
-      request.plan,
-      session.sheetNames,
-    )
-
-    // Delegate to the engine. Typed engine failures propagate to the
-    // caller — do NOT swallow them as { ok: false }.
-    return this.deps.engine.saveArchive(engineHandle, translation.patches)
+    // Delegate to the engine. The engine translates the SavePlan to its
+    // internal archive format PRIVATELY. Typed engine failures propagate
+    // to the caller — do NOT swallow them as { ok: false }.
+    const result = await this.deps.engine.applySavePlan(engineHandle, request.plan)
+    return result.data
   }
 
   // ── Internal: sheet-id translation (fail-closed) ───────────────────
@@ -274,9 +268,9 @@ export class SpreadsheetServiceImpl implements SpreadsheetService {
    *
    * Note: sheetOps with kind 'add-sheet' or 'duplicate-sheet' introduce NEW
    * sheetIds that are not in the session map. The legacy runtime tracks these
-   * in `addedSheetNames` (sheets-main.ts:2519, 2528, 2536). The translator
-   * handles added sheets — the service validates only KNOWN sheetIds (those
-   * expected to already exist in the session map).
+   * in `addedSheetNames` (sheets-main.ts:2519, 2528, 2536). The engine
+   * implementation handles added sheets internally — the service validates
+   * only KNOWN sheetIds (those expected to already exist in the session map).
    */
   private validateSavePlanSheetIds(plan: SavePlan, sheetNames: ReadonlyMap<string, string>): void {
     // Cell edits
@@ -301,7 +295,8 @@ export class SpreadsheetServiceImpl implements SpreadsheetService {
     for (const op of plan.sheetOps) {
       if (op.kind === 'add-sheet' || op.kind === 'duplicate-sheet') {
         // Added sheets introduce new sheetIds — skip validation.
-        // The translator handles added sheets via the `addedSheetNames` map.
+        // The engine handles added sheets via the `addedSheetNames` map
+        // (mirroring the legacy runtime at sheets-main.ts:2519, 2528, 2536).
         // For duplicate-sheet, validate the SOURCE sheetId exists.
         if (op.kind === 'duplicate-sheet' && op.sourceSheetId !== undefined) {
           if (!sheetNames.has(op.sourceSheetId)) {

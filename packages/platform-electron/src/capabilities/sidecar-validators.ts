@@ -78,13 +78,16 @@ export function validateOpenResult(raw: unknown): ValidatedOpenResult {
   const sheets: WorksheetMetadata[] = sheetsRaw.map((s, i) => {
     if (!isRecord(s)) throw new EngineError(`Invalid open response: sheets[${i}] not a record`, 'PROTOCOL_ERROR')
     if (!isString(s.name)) throw new EngineError(`Invalid open response: sheets[${i}].name`, 'PROTOCOL_ERROR')
-    // Extract the stable XLSX sheetId attribute (Increment 3B: WorksheetMetadata.id).
-    // The sidecar returns this as `sheets[].id` (mirrors the legacy worksheetMetadataSchema
-    // at apps/sheets/src/shared/desktop-api.ts:25). Fall back to the sheet name if absent
-    // (stale sidecar binary) so the validator stays forward-compatible.
-    const sheetId = isString(s.id) ? s.id : s.name
+    // Increment 3C: FAIL-CLOSED on missing/non-string sheets[].id.
+    // The runtime contract requires a stable WorksheetMetadata.id (the XLSX
+    // sheetId attribute, immutable across renames). A sidecar binary that
+    // does not return `id` is PROTOCOL-INCOMPATIBLE — we do NOT silently
+    // fall back to the sheet name (that recreates the broken 3A mapping).
+    // The caller gets an EngineError(PROTOCOL_ERROR) and must update the
+    // sidecar binary.
+    if (!isString(s.id)) throw new EngineError(`Invalid open response: sheets[${i}].id (missing or non-string)`, 'PROTOCOL_ERROR')
     return {
-      id: sheetId,
+      id: s.id,
       name: s.name,
       index: i,
       hidden: opt(s.hidden, isBoolean) ?? false,
